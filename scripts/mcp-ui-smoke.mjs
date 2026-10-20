@@ -1,4 +1,5 @@
 import { verifyNodeSizing } from "./node-sizing-smoke.mjs";
+import { verifyCanvasTools } from "./canvas-tools-smoke.mjs";
 import { verifyResourceComposer } from "./resource-composer-smoke.mjs";
 import { verifyCanvasDrop } from "./canvas-drop-smoke.mjs";
 import { verifyLongNote } from "./long-note-smoke.mjs";
@@ -483,6 +484,18 @@ try {
       ui,
       prefix: "mcp",
       readDownload: () => downloaded,
+      readSnapshot: async () =>
+        (
+          await client.callTool({
+            name: "project_open",
+            arguments: { projectId: project.id },
+          })
+        ).structuredContent.result,
+    });
+    await verifyCanvasTools({
+      page,
+      ui,
+      prefix: "mcp",
       readSnapshot: async () =>
         (
           await client.callTool({

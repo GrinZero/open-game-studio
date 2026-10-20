@@ -1,4 +1,5 @@
 import { verifyNodeSizing } from "./node-sizing-smoke.mjs";
+import { verifyCanvasTools } from "./canvas-tools-smoke.mjs";
 import { verifyResourceComposer } from "./resource-composer-smoke.mjs";
 import { verifyCanvasDrop } from "./canvas-drop-smoke.mjs";
 import { verifyLongNote } from "./long-note-smoke.mjs";
@@ -187,6 +188,12 @@ try {
   await page.getByRole("button", { name: "fit view" }).click();
   await page.waitForTimeout(500);
   await page.locator(".workflow-node").first().click();
+  await verifyCanvasTools({
+    page,
+    prefix: "browser",
+    readSnapshot: async () =>
+      (await page.request.get(`${base}/api/projects/${project.id}`)).json(),
+  });
   await verifyCanvasInputs({
     page,
     prefix: "browser",

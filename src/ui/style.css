@@ -3945,6 +3945,27 @@ html[data-mcp-app] .workspace {
   gap: 20px;
   background: var(--bg-input);
 }
+.asset-preview-switcher {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+  flex-shrink: 0;
+}
+.asset-preview-switcher button {
+  padding: 4px 8px;
+  border: 1px solid var(--border-default);
+  border-radius: 5px;
+  background: var(--bg-input);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.asset-preview-switcher button[aria-pressed="true"] {
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  border-color: var(--border-focus);
+}
 .canvas-media-preview video {
   width: 100%;
   max-height: 200px;
@@ -3969,15 +3990,45 @@ html[data-mcp-app] .workspace {
 }
 .canvas-add-control {
   position: absolute;
-  z-index: 8;
-  bottom: 48px;
-  left: 66px;
-}
-.canvas-add-control button {
-  padding: 10px;
+  z-index: 10;
+  bottom: 42px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px;
   background: var(--bg-surface-elevated);
   border: 1px solid var(--border-strong);
+  border-radius: 12px;
   box-shadow: var(--shadow-md);
+}
+.canvas-add-control button {
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+}
+.canvas-add-control button[aria-pressed="true"] {
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+.canvas-add-control button:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 2px;
+}
+.canvas-area.is-panning .react-flow__pane {
+  cursor: grab;
+}
+.canvas-area.is-panning .react-flow__pane.dragging {
+  cursor: grabbing;
+}
+/* Let the pane receive gestures even over scrollable notes, media and 3D viewers. */
+.canvas-area.is-panning .react-flow__node,
+.canvas-area.is-panning .react-flow__node *,
+.canvas-area.is-panning .react-flow__edge,
+.canvas-area.is-panning .react-flow__nodesselection,
+.canvas-area.is-panning .react-flow__nodesselection * {
+  pointer-events: none !important;
 }
 .resource-adopt {
   border-top: 1px solid var(--border-default);
@@ -4079,13 +4130,66 @@ html[data-mcp-app] .workspace {
   min-width: 0;
 }
 
-.model-preview-expand { position: absolute; top: 8px; right: 8px; display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 1px solid var(--border-default); border-radius: 7px; background: var(--bg-surface); color: var(--text-primary); cursor: pointer; z-index: 2; }
-.model-preview-clips { right: 46px; max-width: calc(100% - 54px); }
-.model-preview-dialog { width: min(1000px, 92vw); max-width: 92vw; padding: 16px; border: 1px solid var(--border-default); border-radius: 16px; background: var(--bg-surface); color: var(--text-primary); }
-.model-preview-dialog::backdrop { background: #000a; }
-.model-preview-dialog header { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
-.model-preview-dialog button { cursor: pointer; color: var(--text-primary); background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: 6px; padding: 6px 10px; }
-.model-preview-dialog .is-detailed { height: min(72vh, 760px); min-height: 240px; }
-.model-preview-tools { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; padding: 8px; }
-.model-preview-tools button:disabled { opacity: .4; }
-.model-preview-dialog .model-preview-clips { right: 8px; }
+.model-preview-expand {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--border-default);
+  border-radius: 7px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  cursor: pointer;
+  z-index: 2;
+}
+.model-preview-clips {
+  right: 46px;
+  max-width: calc(100% - 54px);
+}
+.model-preview-dialog {
+  width: min(1000px, 92vw);
+  max-width: 92vw;
+  padding: 16px;
+  border: 1px solid var(--border-default);
+  border-radius: 16px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+}
+.model-preview-dialog::backdrop {
+  background: #000a;
+}
+.model-preview-dialog header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+.model-preview-dialog button {
+  cursor: pointer;
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+.model-preview-dialog .is-detailed {
+  height: min(72vh, 760px);
+  min-height: 240px;
+}
+.model-preview-tools {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px;
+}
+.model-preview-tools button:disabled {
+  opacity: 0.4;
+}
+.model-preview-dialog .model-preview-clips {
+  right: 8px;
+}

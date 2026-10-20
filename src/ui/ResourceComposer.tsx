@@ -991,27 +991,43 @@ export function CanvasMediaPreview({
   projectId,
   asset,
   revision,
+  index,
 }: {
   projectId: string;
   asset: Asset;
   revision: AssetRevision;
+  index: number;
 }) {
-  const { url, error } = useAssetFileUrl(projectId, revision.id);
+  const { url, error } = useAssetFileUrl(projectId, revision.id, index);
+  const [failedUrl, setFailedUrl] = useState<string>();
   return (
     <div
-      className="canvas-media-preview nodrag nowheel"
+      className="canvas-media-preview nodrag nowheel nopan"
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
       onMouseDown={(e) => e.stopPropagation()}
     >
-      {error ? (
-        <span role="alert">无法读取媒体</span>
+      {error || (url && failedUrl === url) ? (
+        <span role="alert">无法播放媒体，请检查文件格式或编码</span>
       ) : !url ? (
         <Loader2 className="spin" size={20} />
-      ) : asset.kind === "video" ? (
-        <video controls preload="metadata" src={url} aria-label={asset.name} />
+      ) : revision.files[index]?.mime.startsWith("video/") ? (
+        <video
+          key={url}
+          controls
+          playsInline
+          preload="metadata"
+          src={url}
+          aria-label={asset.name}
+          onError={() => setFailedUrl(url)}
+        />
       ) : (
         <>
           <Music2 size={32} />
           <audio
+            key={url}
+            onError={() => setFailedUrl(url)}
             controls
             preload="metadata"
             src={url}

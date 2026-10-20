@@ -60,6 +60,7 @@ import {
   Box,
   StickyNote,
   MousePointer2,
+  Hand,
   Check,
   Play,
   MoreHorizontal,
@@ -117,6 +118,8 @@ import { useTheme } from "./theme";
 import { projectPath } from "../shared/project-location";
 import { ProjectCoverImage, ProjectCoverModal } from "./ProjectCover";
 import { ModelPreview } from "./ModelPreview";
+import { AssetPreviewSwitcher } from "./AssetPreviewSwitcher";
+import type { PreviewOption } from "./asset-preview-options";
 import { AssetGroups, AssetCategoryEditor } from "./AssetCategories";
 import { assetCategories, assetCategory } from "../shared/asset-categories";
 import { CanvasContextMenu, type CanvasMenuAction } from "./CanvasContextMenu";
@@ -2648,27 +2651,37 @@ function AssetNode({ data, selected }: NodeProps) {
         <span>{kindName[d.asset?.kind] || "资源"}</span>
         <MoreHorizontal size={14} />
       </div>
-      {d.asset && d.revision && d.asset.kind === "model" ? (
-        <CanvasModelPreview
-          asset={d.asset}
-          projectId={d.projectId}
-          revision={d.revision}
-        />
-      ) : d.asset && d.revision && d.asset.kind === "document" ? (
-        <CanvasDocumentPreview projectId={d.projectId} revision={d.revision} />
-      ) : d.asset && d.revision && ["video", "audio"].includes(d.asset.kind) ? (
-        <CanvasMediaPreview
-          projectId={d.projectId}
-          asset={d.asset}
-          revision={d.revision}
-        />
-      ) : d.asset && d.revision ? (
-        <AssetThumb
-          asset={d.asset}
-          projectId={d.projectId}
-          revision={d.revision}
-          large
-        />
+      {d.asset && d.revision ? (
+        <AssetPreviewSwitcher asset={d.asset} revision={d.revision}>
+          {(preview) =>
+            preview?.kind === "model" ? (
+              <CanvasModelPreview
+                asset={d.asset}
+                projectId={d.projectId}
+                revision={d.revision}
+              />
+            ) : preview?.kind === "document" ? (
+              <CanvasDocumentPreview
+                projectId={d.projectId}
+                revision={d.revision}
+              />
+            ) : preview && ["video", "audio"].includes(preview.kind) ? (
+              <CanvasMediaPreview
+                projectId={d.projectId}
+                asset={d.asset}
+                revision={d.revision}
+                index={preview.index}
+              />
+            ) : (
+              <AssetThumb
+                asset={d.asset}
+                projectId={d.projectId}
+                revision={d.revision}
+                large
+              />
+            )
+          }
+        </AssetPreviewSwitcher>
       ) : (
         <div className="missing-preview">
           <AlertTriangle size={16} />
@@ -2945,6 +2958,8 @@ function CanvasBoard({
   const flow = useRef<ReactFlowInstance<Node, Edge> | null>(null);
   const dragging = useRef(false);
   const [zoom, setZoom] = useState(c.viewport.zoom);
+  const [canvasTool, setCanvasTool] = useState<"select" | "pan">("select");
+  const panning = canvasTool === "pan";
 
   const beginLayout = useCallback(() => {
     setMenu(undefined);
@@ -3399,7 +3414,7 @@ function CanvasBoard({
           ];
   return (
     <div
-      className="canvas-area"
+      className={`canvas-area${panning ? " is-panning" : ""}`}
       tabIndex={-1}
       onDragOver={(e) => {
         if (!acceptsCanvasDrop(e.dataTransfer)) return;
@@ -3463,10 +3478,6 @@ function CanvasBoard({
         </div>
       )}
       <div className="canvas-floating-tools">
-        <IconButton label="选择" onClick={() => onSelect([])}>
-          <MousePointer2 size={15} />
-        </IconButton>
-        <span />
         <IconButton
           label="撤销布局"
           disabled={!history.length || saving}
@@ -3482,10 +3493,12 @@ function CanvasBoard({
           <Redo2 size={14} />
         </IconButton>
       </div>
-      <div className="canvas-add-control">
+      <div className="canvas-add-control" role="toolbar" aria-label="画布工具">
         <button
-          className="button"
+          type="button"
+          className="icon-button"
           aria-label="画布添加资源"
+          title="添加资源"
           onClick={(e) => {
             const rect = e.currentTarget.getBoundingClientRect();
             setAddMenu({
@@ -3498,6 +3511,44 @@ function CanvasBoard({
           }}
         >
           <Plus size={20} />
+        </button>
+        <button
+          type="button"
+          className="icon-button"
+          aria-label="选择"
+          title="选择 · 拖动卡片或框选"
+          aria-pressed={!panning}
+          onClick={() => {
+            closeMenu();
+            setCanvasTool("select");
+            onSelect([]);
+          }}
+        >
+          <MousePointer2 size={20} />
+        </button>
+        <button
+          type="button"
+          className="icon-button"
+          aria-label="抓手"
+          title="抓手 · 在卡片或空白处拖动画布"
+          aria-pressed={panning}
+          onClick={() => {
+            closeMenu();
+            setCanvasTool("pan");
+          }}
+        >
+          <Hand size={20} />
+        </button>
+        <button
+          type="button"
+          className="icon-button"
+          aria-label="适应画布"
+          title="适应画布"
+          onClick={() =>
+            flow.current?.fitView({ padding: 0.2, duration: 180, maxZoom: 1 })
+          }
+        >
+          <Maximize size={20} />
         </button>
       </div>
       <ReactFlow
@@ -3548,7 +3599,7 @@ function CanvasBoard({
         }}
         onPaneClick={() => {
           closeMenu();
-          onSelect([]);
+          if (!panning) onSelect([]);
         }}
         onPaneContextMenu={(e) => openMenu(e, "pane")}
         onNodeContextMenu={(e, n) => openMenu(e, "node", n.id)}
@@ -3630,9 +3681,16 @@ function CanvasBoard({
         minZoom={0.2}
         maxZoom={2}
         panOnScroll
-        selectionOnDrag
-        panOnDrag={[1]}
-        deleteKeyCode={menu || sizeEditor ? null : ["Backspace", "Delete"]}
+        selectionOnDrag={!panning}
+        panOnDrag={panning ? [0, 1] : [1]}
+        nodesDraggable={!panning}
+        nodesConnectable={!panning}
+        elementsSelectable={!panning}
+        selectionKeyCode={panning ? null : "Shift"}
+        zoomOnDoubleClick={!panning}
+        deleteKeyCode={
+          menu || sizeEditor || panning ? null : ["Backspace", "Delete"]
+        }
         colorMode={resolvedTheme === "light" ? "light" : "dark"}
       >
         <Background
@@ -3849,7 +3907,11 @@ function CanvasBoard({
         </div>
       )}
       <div className="canvas-caption">
-        <span>连线将上游素材与便签作为制作输入</span>
+        <span>
+          {panning
+            ? "抓手模式 · 拖动卡片或空白处移动画布"
+            : "连线将上游素材与便签作为制作输入"}
+        </span>
         <span className="mono">{Math.round(zoom * 100)}%</span>
       </div>
     </div>
@@ -4273,18 +4335,36 @@ function AssetPreview({
   asset: Asset;
   revision: AssetRevision;
 }) {
+  return (
+    <AssetPreviewSwitcher asset={asset} revision={r}>
+      {(preview) => (
+        <AssetFilePreview
+          key={`${r.id}:${preview?.index ?? 0}`}
+          projectId={projectId}
+          asset={asset}
+          revision={r}
+          preview={preview}
+        />
+      )}
+    </AssetPreviewSwitcher>
+  );
+}
+
+function AssetFilePreview({
+  projectId,
+  asset,
+  revision: r,
+  preview,
+}: {
+  projectId: string;
+  asset: Asset;
+  revision: AssetRevision;
+  preview?: PreviewOption;
+}) {
   const [text, setText] = useState("");
   const [bad, setBad] = useState(false);
-  const i = Math.max(
-    0,
-    r.files.findIndex((f) =>
-      asset.kind === "model"
-        ? f.mime === "model/gltf-binary"
-        : asset.kind === "image"
-          ? f.mime.startsWith("image/")
-          : true,
-    ),
-  );
+  const i = preview?.index ?? 0;
+  const kind = preview?.kind ?? asset.kind;
   const f = r.files[i];
   const { url, error } = useAssetFileUrl(projectId, r.id, i);
 
@@ -4313,16 +4393,29 @@ function AssetPreview({
         </div>
       ) : !url ? (
         <span>正在读取资源…</span>
-      ) : asset.kind === "image" ? (
+      ) : kind === "image" ? (
         <img src={url} alt={asset.name} onError={() => setBad(true)} />
-      ) : asset.kind === "model" ? (
+      ) : kind === "model" ? (
         <ModelPreview src={url} name={asset.name} />
-      ) : asset.kind === "document" ? (
+      ) : kind === "document" ? (
         <Markdown text={text || "正在读取文档…"} />
-      ) : asset.kind === "video" ? (
-        <video controls src={url} />
-      ) : asset.kind === "audio" ? (
-        <audio controls src={url} />
+      ) : kind === "video" ? (
+        <video
+          controls
+          playsInline
+          preload="metadata"
+          src={url}
+          aria-label={asset.name}
+          onError={() => setBad(true)}
+        />
+      ) : kind === "audio" ? (
+        <audio
+          controls
+          preload="metadata"
+          src={url}
+          aria-label={asset.name}
+          onError={() => setBad(true)}
+        />
       ) : (
         <div
           style={{
