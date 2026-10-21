@@ -15,6 +15,10 @@ import {
 import { pickDirectory, pickFiles } from "./directories.js";
 import { fileURLToPath } from "node:url";
 import { verifyAssetHttpUrl } from "./asset-http.js";
+import {
+  openCharacterSession,
+  projectChangeVersion,
+} from "./codex-collaboration.js";
 const app = express();
 const core = new StudioCore();
 reconcileGenerations(core);
@@ -87,6 +91,37 @@ app.get("/api/health", (_req, res) =>
   }),
 );
 app.get("/api/projects", (_req, res) => res.json(core.listProjects()));
+app.get("/api/projects/:id/change-version", (req, res) =>
+  res.json(projectChangeVersion(core, req.params.id)),
+);
+app.get("/api/projects/:id/changes", (req, res) => {
+  let version = projectChangeVersion(core, req.params.id).version;
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+  const send = () => res.write(`data: ${JSON.stringify({ version })}\n\n`);
+  send();
+  let ticks = 0;
+  const timer = setInterval(() => {
+    try {
+      const next = projectChangeVersion(core, req.params.id).version;
+      if (next !== version) {
+        version = next;
+        send();
+      } else if (++ticks % 30 === 0) res.write(": keepalive\n\n");
+    } catch {
+      res.end();
+    }
+  }, 500);
+  timer.unref();
+  res.on("close", () => clearInterval(timer));
+});
+app.post(
+  "/api/projects/:id/character-workflow/open-codex-session",
+  async (req, res) =>
+    res.json(await openCharacterSession(core, req.params.id, req.body)),
+);
 app.get("/api/charakuru/local-projects", (_req, res) =>
   res.json({ projects: discoverLocalCharakuruProjects() }),
 );

@@ -195,6 +195,82 @@ class MigrationTests(unittest.TestCase):
         finally:
             sys.path.remove(str(ROOT / "worker"))
 
+    def test_task_progress_panel_and_worker_persistence(self):
+        notebook = json.loads((ROOT / "notebooks/colab.ipynb").read_text())
+        cell_ids = [c.get("metadata", {}).get("id") for c in notebook["cells"]]
+        self.assertIn("monster-progress", cell_ids)
+        prog_cell = [c for c in notebook["cells"] if c.get("metadata", {}).get("id") == "monster-progress"][0]
+        self.assertIn("monster_runtime.show_progress()", "".join(prog_cell["source"]))
+
+        # Test colab_runtime progress functions
+        data = runtime.get_progress_data()
+        self.assertIn("stage", data)
+        self.assertIn("gpu", data)
+        self.assertIn("eta_str", data)
+
+        # Mock data and verify HTML output
+        mock_data = {
+            "monster_id": "test_monster",
+            "stage": "training",
+            "stage_display": "训练 DINOv2 姿态头",
+            "status": "running",
+            "epoch": 3,
+            "epochs": 15,
+            "completed_batches": 45,
+            "batches_per_epoch": 313,
+            "overall_pct": 18.5,
+            "eta_str": "约 12 分钟",
+            "losses": {"uv": 0.01234, "heatmap": 0.04567, "visibility": 0.00891, "total": 0.17523},
+            "history": [{"epoch": 1, "uv": 0.05, "heatmap": 0.08, "visibility": 0.02, "total": 0.5},
+                        {"epoch": 2, "uv": 0.03, "heatmap": 0.06, "visibility": 0.01, "total": 0.3}],
+            "detail": "第 3 / 15 轮 · 本轮 45 / 313 批次 · 预计剩余：约 12 分钟",
+            "gpu": {"display": "Tesla T4 · 显存: 4200 / 15360 MiB · 利用率: 76%"},
+            "updated_at": "2026-10-21 17:40:00",
+            "updated_unix": 1729500000.0,
+        }
+        html_out = runtime.render_progress_html(mock_data)
+        self.assertIn("训练 DINOv2 姿态头", html_out)
+        self.assertIn("第 3 / 15 轮", html_out)
+        self.assertIn("45 / 313", html_out)
+        self.assertIn("约 12 分钟", html_out)
+        self.assertIn("Tesla T4", html_out)
+        self.assertIn("0.01234", html_out)
+        self.assertIn("关键点 UV loss", html_out)
+
+        # Test write_task_progress and dinov2 trainer progress writing
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            sys.path.insert(0, str(ROOT / "worker"))
+            try:
+                server = load("monster_server", "worker/colab_g4_worker_server.py")
+                dino = load("monster_dino", "worker/dinov2_pose_trainer.py")
+                with patch.object(server, "DRIVE_ROOT", temp_path / "drive"), \
+                     patch.object(server, "WORK_ROOT", temp_path / "work"):
+                    server.write_task_progress(
+                        monster_id="swamp_troll",
+                        stage="training",
+                        stage_display="训练 DINOv2 姿态头",
+                        status="running",
+                        detail="测试中",
+                        epochs=15,
+                    )
+                    runtime_prog = temp_path / "drive/runtime/current_task_progress.json"
+                    self.assertTrue(runtime_prog.is_file())
+                    saved = json.loads(runtime_prog.read_text(encoding="utf-8"))
+                    self.assertEqual(saved["monster_id"], "swamp_troll")
+                    self.assertEqual(saved["stage"], "training")
+
+                self.assertEqual(dino._format_eta(45), "约 45 秒")
+                self.assertEqual(dino._format_eta(360), "约 6 分钟")
+                self.assertEqual(dino._format_eta(0), "即将完成")
+
+                target_prog = temp_path / "custom_progress.json"
+                dino._write_progress_files([target_prog], {"epoch": 1, "test": True})
+                self.assertTrue(target_prog.is_file())
+                self.assertTrue(json.loads(target_prog.read_text())["test"])
+            finally:
+                sys.path.remove(str(ROOT / "worker"))
+
     def test_pose_and_ik_optimizations_present(self):
         dino_src = (ROOT / "worker/dinov2_pose_trainer.py").read_text(encoding="utf-8")
         bpy_src = (ROOT / "worker/studio_bpy_worker.py").read_text(encoding="utf-8")
@@ -526,9 +602,9 @@ class ClientTests(unittest.TestCase):
         pkg_script = (ROOT / "scripts/package-release.py").read_text()
         self.assertNotIn('"evals"', pkg_script)
 
-        manifest_path = ROOT / "evals/benchmarks/fantasy_creature_2k_v1/manifest.json"
-        golden_path = ROOT / "evals/benchmarks/fantasy_creature_2k_v1/golden_frames.json"
-        baseline_path = ROOT / "evals/benchmarks/fantasy_creature_2k_v1/baseline_latest.json"
+        manifest_path = ROOT / "evals/benchmarks/fantasy_creature_2k_v2/manifest.json"
+        golden_path = ROOT / "evals/benchmarks/fantasy_creature_2k_v2/golden_frames.json"
+        baseline_path = ROOT / "evals/benchmarks/fantasy_creature_2k_v2/baseline_latest.json"
         self.assertTrue(manifest_path.is_file())
         self.assertTrue(golden_path.is_file())
         self.assertTrue(baseline_path.is_file())

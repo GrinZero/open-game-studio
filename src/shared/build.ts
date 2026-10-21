@@ -1,1 +1,1 @@
-export const studioBuild = "workspace-launch-2026-10-12";
+export const studioBuild = "codex-live-collaboration-2026-10-21";

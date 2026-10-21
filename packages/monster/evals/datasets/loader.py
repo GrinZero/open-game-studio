@@ -9,21 +9,21 @@ from typing import Any
 from .drive_bundle import EVALS_ROOT, VAR_EVALS_ROOT, sha256_file
 
 
-def load_manifest(benchmark_id: str = "fantasy_creature_2k_v1") -> dict[str, Any]:
+def load_manifest(benchmark_id: str = "fantasy_creature_2k_v2") -> dict[str, Any]:
     manifest_path = EVALS_ROOT / "benchmarks" / benchmark_id / "manifest.json"
     if not manifest_path.is_file():
         raise FileNotFoundError(f"Benchmark manifest not found: {manifest_path}")
     return json.loads(manifest_path.read_text(encoding="utf-8"))
 
 
-def load_golden_frames(benchmark_id: str = "fantasy_creature_2k_v1") -> dict[str, Any]:
+def load_golden_frames(benchmark_id: str = "fantasy_creature_2k_v2") -> dict[str, Any]:
     golden_path = EVALS_ROOT / "benchmarks" / benchmark_id / "golden_frames.json"
     if not golden_path.is_file():
         return {"frames": []}
     return json.loads(golden_path.read_text(encoding="utf-8"))
 
 
-def load_baseline_metrics(benchmark_id: str = "fantasy_creature_2k_v1") -> dict[str, Any] | None:
+def load_baseline_metrics(benchmark_id: str = "fantasy_creature_2k_v2") -> dict[str, Any] | None:
     baseline_path = EVALS_ROOT / "benchmarks" / benchmark_id / "baseline_latest.json"
     if not baseline_path.is_file():
         return None
@@ -31,7 +31,7 @@ def load_baseline_metrics(benchmark_id: str = "fantasy_creature_2k_v1") -> dict[
 
 
 def verify_fixture_directory(
-    benchmark_id: str = "fantasy_creature_2k_v1",
+    benchmark_id: str = "fantasy_creature_2k_v2",
     fixture_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Verifies that all benchmark files exist locally under `var/monster/evals/fixtures/<benchmark_id>/`
@@ -71,7 +71,7 @@ def verify_fixture_directory(
 
 
 def load_benchmark_fixture(
-    benchmark_id: str = "fantasy_creature_2k_v1",
+    benchmark_id: str = "fantasy_creature_2k_v2",
     fixture_dir: Path | None = None,
     verify_hashes: bool = True,
 ) -> dict[str, Any]:

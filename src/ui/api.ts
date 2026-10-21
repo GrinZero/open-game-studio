@@ -14,6 +14,19 @@ export function supportsCodexReferences() {
   const capability = appTransport?.getHostCapabilities()?.updateModelContext;
   return !!capability?.text;
 }
+export function supportsCodexMessages() {
+  return !!appTransport?.getHostCapabilities()?.message?.text;
+}
+export async function sendCodexMessage(text: string) {
+  if (!supportsCodexMessages())
+    throw new Error("当前窗口不支持发送到对话，请使用“打开 Codex 会话”。");
+  const result = await appTransport!.sendMessage(
+    { role: "user", content: [{ type: "text", text }] },
+    { timeout: 15000 },
+  );
+  if (result.isError)
+    throw new Error("Codex 未接受制作消息，请重试或打开独立会话。");
+}
 export async function updateCodexReferences(text: string) {
   if (!supportsCodexReferences())
     throw new Error("当前窗口无法直接添加对话引用，请复制引用后粘贴到 Codex。");
@@ -98,7 +111,10 @@ export async function request<T>(url: string, init?: RequestInit): Promise<T> {
         assetId: form.get("assetId") || undefined,
       };
     } else if (typeof init?.body === "string") body = JSON.parse(init.body);
-    return appRequest<T>({ path: url, method: init?.method || "GET", body });
+    return appRequest<T>(
+      { path: url, method: init?.method || "GET", body },
+      init?.signal || undefined,
+    );
   }
   const r = await fetch(url, init);
   const data = await r.json();

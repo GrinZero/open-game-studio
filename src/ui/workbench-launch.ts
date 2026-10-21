@@ -22,3 +22,13 @@ export function receiveLaunch(value: unknown) {
   projectId = next;
   for (const listener of listeners) listener();
 }
+
+export function characterLaunch(project: string) {
+  const query = new URLSearchParams(location.search);
+  if (query.get("projectId") !== project || query.get("view") !== "character")
+    return undefined;
+  return {
+    runId: query.get("runId") || undefined,
+    nodeKey: query.get("nodeKey") || undefined,
+  };
+}

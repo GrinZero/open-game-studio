@@ -3,11 +3,11 @@
 
 Usage examples:
   npm run monster:eval -- dataset pack-from-starmaker
-  npm run monster:eval -- dataset verify fantasy_creature_2k_v1
-  npm run monster:eval -- dataset pull fantasy_creature_2k_v1 --drive-file-id <ID>
-  npm run monster:eval -- run fantasy_creature_2k_v1 --tier fast
-  npm run monster:eval -- run fantasy_creature_2k_v1 --tier fast --save-baseline
-  npm run monster:eval -- diagnose fantasy_creature_2k_v1 --frame 17
+  npm run monster:eval -- dataset verify fantasy_creature_2k_v2
+  npm run monster:eval -- dataset pull fantasy_creature_2k_v2 --drive-file-id <ID>
+  npm run monster:eval -- run fantasy_creature_2k_v2 --tier fast
+  npm run monster:eval -- run fantasy_creature_2k_v2 --tier fast --save-baseline
+  npm run monster:eval -- diagnose fantasy_creature_2k_v2 --frame 17
 """
 
 from __future__ import annotations
@@ -184,7 +184,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     p_pack = ds_sub.add_parser(
         "pack-from-starmaker",
-        help="Pack the 2K benchmark fixture from star-maker into var/monster/evals/archives/fantasy_creature_2k_v1.tar.gz",
+        help="Pack the 2K benchmark fixture from star-maker into var/monster/evals/archives/fantasy_creature_2k_v2.tar.gz",
     )
     p_pack.add_argument("--benchmark-id", default=DEFAULT_BENCHMARK_ID)
     p_pack.add_argument("--drive-file-id", default=None, help="Optional Google Drive file ID to record in manifest.json")

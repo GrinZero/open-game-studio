@@ -38,8 +38,10 @@ import threading
 import time
 import urllib.request
 import zipfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 DRIVE_ROOT = Path(os.environ.get("MONSTER_DRIVE_ROOT", "/content/drive/MyDrive/MonsterStudio"))
@@ -173,6 +175,48 @@ def save_stage_state(monster_id: str, stage: str, meta: dict[str, Any]) -> None:
     state_file.write_text(json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def write_task_progress(
+    monster_id: str | None = None,
+    stage: str = "idle",
+    stage_display: str = "就绪",
+    status: str = "idle",
+    detail: str = "",
+    epochs: int | None = None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    stamp = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S")
+    telemetry = query_gpu_telemetry()
+    payload = {
+        "monster_id": monster_id or "",
+        "stage": stage,
+        "stage_display": stage_display,
+        "status": status,
+        "detail": detail,
+        "epochs": epochs or 0,
+        "gpu": telemetry,
+        "updated_unix": time.time(),
+        "updated_at": stamp,
+        **(extra or {}),
+    }
+    targets = [
+        DRIVE_ROOT / "runtime" / "current_task_progress.json",
+        WORK_ROOT / "runtime" / "current_task_progress.json",
+    ]
+    if monster_id:
+        targets.extend([
+            DRIVE_ROOT / "monsters" / monster_id / "task_progress.json",
+            WORK_ROOT / "work" / monster_id / "task_progress.json",
+        ])
+    for target in targets:
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(target)
+        except Exception:
+            pass
+
+
 def api_heartbeat() -> str:
     """Endpoint 0: Refreshes the anti-idle timer and returns worker status + GPU telemetry."""
     GUARD.touch()
@@ -203,6 +247,13 @@ def api_rig_candidates(monster_id: str, input_glb_file: str, run_auto_audit: boo
     with GUARD.lock:
         GUARD.busy = True
         GUARD.touch(f"Stage1_SkinTokens:{monster_id}")
+        write_task_progress(
+            monster_id=monster_id,
+            stage="rigging",
+            stage_display="候选骨骼生成",
+            status="running",
+            detail=f"正在为 {monster_id} 生成 4 组候选骨骼与拓扑修剪...",
+        )
         try:
             free_comfyui_vram()
             m_drive = DRIVE_ROOT / "monsters" / monster_id
@@ -253,10 +304,23 @@ def api_rig_candidates(monster_id: str, input_glb_file: str, run_auto_audit: boo
                     zf.write(contact_sheet, contact_sheet.name)
 
             save_stage_state(monster_id, "stage1_rig", {"status": "completed", "bundle": str(bundle_zip)})
+            write_task_progress(
+                monster_id=monster_id,
+                stage="stage1_completed",
+                stage_display="候选骨骼生成完成",
+                status="completed",
+                detail=f"候选骨骼生成与评审大图已保存，等待 G1 选型。",
+            )
             return meta_path.read_text(encoding="utf-8") if meta_path.exists() else "{}", str(bundle_zip)
         finally:
             GUARD.busy = False
             GUARD.touch("IDLE")
+            write_task_progress(
+                stage="idle",
+                stage_display="就绪（等待任务）",
+                status="idle",
+                detail="Worker 正在运行并监听请求，随时可提交新任务。",
+            )
 
 
 def api_train_monster_probe(
@@ -293,9 +357,18 @@ def api_train_monster_probe(
             ckpt_path = m_drive / "dinov2_head.pt"
             exam_dir = m_work / "studio_exam"
             exam_report_path = m_drive / "exam_report.json"
+            progress_file = m_work / "training_progress.json"
 
             if not dataset_cache_matches(synth_dir, blend_path, meta_path, num_samples):
                 GUARD.touch(f"Stage2_Render3000:{monster_id}")
+                write_task_progress(
+                    monster_id=monster_id,
+                    stage="synthesizing",
+                    stage_display="合成训练图",
+                    status="running",
+                    detail=f"正在生成 {num_samples} 姿态双视图...",
+                    epochs=epochs,
+                )
                 subprocess.run(
                     [
                         py_bpy,
@@ -329,6 +402,14 @@ def api_train_monster_probe(
                 )
 
             GUARD.touch(f"Stage3_DINOv2Train:{monster_id}")
+            write_task_progress(
+                monster_id=monster_id,
+                stage="training",
+                stage_display="训练 DINOv2 姿态头",
+                status="running",
+                detail=f"开始 DINOv2 姿态估计训练（共 {epochs} 轮）...",
+                epochs=epochs,
+            )
             subprocess.run(
                 [
                     sys.executable,
@@ -343,12 +424,22 @@ def api_train_monster_probe(
                     str(ckpt_path),
                     "--epochs",
                     str(int(epochs)),
+                    "--progress_file",
+                    str(progress_file),
                 ],
                 check=True,
             )
             save_stage_state(monster_id, "stage3_dinov2", {"ckpt": str(ckpt_path), "epochs": int(epochs), "depth_visibility_enabled": features_enabled(), "feature_version": FEATURE_VERSION})
 
             GUARD.touch(f"Stage4_StudioExam:{monster_id}")
+            write_task_progress(
+                monster_id=monster_id,
+                stage="exam_rendering",
+                stage_display="视频考试渲染",
+                status="running",
+                detail="正在合成 96 帧连续动作视频测试集...",
+                epochs=epochs,
+            )
             subprocess.run(
                 [
                     py_bpy,
@@ -365,6 +456,14 @@ def api_train_monster_probe(
                     "96",
                 ],
                 check=True,
+            )
+            write_task_progress(
+                monster_id=monster_id,
+                stage="exam_inference",
+                stage_display="已有视频考试推理",
+                status="running",
+                detail="正在执行双视图 3D 姿态重构与骨骼误差评估...",
+                epochs=epochs,
             )
             subprocess.run(
                 [
@@ -384,10 +483,24 @@ def api_train_monster_probe(
             shutil.rmtree(synth_dir, ignore_errors=True)
             report_str = exam_report_path.read_text(encoding="utf-8")
             save_stage_state(monster_id, "stage4_exam", json.loads(report_str))
+            write_task_progress(
+                monster_id=monster_id,
+                stage="awaiting_exam_review",
+                stage_display="考试完成，等待 G3 审阅",
+                status="completed",
+                detail="Studio Exam 模拟考评估完成，结果已保存至 Drive，等待用户 G3 审阅。",
+                epochs=epochs,
+            )
             return report_str
         finally:
             GUARD.busy = False
             GUARD.touch("IDLE")
+            write_task_progress(
+                stage="idle",
+                stage_display="就绪（等待任务）",
+                status="idle",
+                detail="Worker 正在运行并监听请求，随时可提交新任务。",
+            )
             if auto_shutdown_after:
                 GUARD.hard_unassign_colab(reason="auto_shutdown_after_train_monster_probe")
 
@@ -421,6 +534,13 @@ def api_generate_actions_batch(
     with GUARD.lock:
         GUARD.busy = True
         GUARD.touch(f"Stage5_6_AnimateBatch:{monster_id}")
+        write_task_progress(
+            monster_id=monster_id,
+            stage="animating",
+            stage_display="MiniMax H3 动作生成",
+            status="running",
+            detail=f"正在为 {monster_id} 批量生成动作: {actions_csv}...",
+        )
         try:
             specs = [s.strip() for s in actions_csv.replace(",", " ").split() if s.strip()]
             runner = Path(__file__).resolve().parent / "pipeline_runner.py"
@@ -457,10 +577,23 @@ def api_generate_actions_batch(
                 ensure_ascii=False,
                 indent=2,
             )
+            write_task_progress(
+                monster_id=monster_id,
+                stage="animating_completed",
+                stage_display="动作生成与烘焙完成",
+                status="completed",
+                detail=f"成功完成 {len(summary)} 个动作生成与 GLB 烘焙。",
+            )
             return res_json, str(out_zip)
         finally:
             GUARD.busy = False
             GUARD.touch("IDLE")
+            write_task_progress(
+                stage="idle",
+                stage_display="就绪（等待任务）",
+                status="idle",
+                detail="Worker 正在运行并监听请求，随时可提交新任务。",
+            )
             if auto_shutdown_after:
                 GUARD.hard_unassign_colab(reason="auto_shutdown_after_animate_batch")
 
@@ -570,6 +703,12 @@ def launch_headless_worker(port: int = 7865) -> None:
         "telemetry": query_gpu_telemetry(),
     }
     REGISTRY_PATH.write_text(json.dumps(reg_info, indent=2, ensure_ascii=False), encoding="utf-8")
+    write_task_progress(
+        stage="idle",
+        stage_display="就绪（等待任务）",
+        status="idle",
+        detail="Worker 正在运行并监听请求，随时可提交新任务。",
+    )
     print(f"[Worker Online] Public API URL: {share_url} | Registry saved to {REGISTRY_PATH}", flush=True)
 
 

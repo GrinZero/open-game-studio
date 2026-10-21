@@ -21,7 +21,7 @@ Monster 是 Open Game Studio monorepo 中的角色绑定、姿态训练与动作
 [![Open in Colab](../../docs/images/open-in-colab.svg)](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb)
 
 1. 直接点击上方 **[Open in Colab](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb)** 徽章打开仓库中的 [Notebook](notebooks/colab.ipynb)，选择 G4 GPU。
-2. 依次运行 Cell 1（默认直接从 GitHub 拉取最新代码并配置，默认使用 `H3_PROFILE="full"` 满血权重与 `1344×768` 双视图分辨率，可选开启 `ENABLE_2K_RESOLUTION=True` 切换至 `2560×1440` 2K 全链路模式）、2（SkinTokens）、3（ComfyUI/H3）、4（启动 Worker）。首次安装和模型下载仍需等待；之后复用既有 Drive 缓存。
+2. 依次运行 Cell 1（默认直接从 GitHub 拉取最新代码并配置，默认使用 `H3_PROFILE="full"` 满血权重与 `1344×768` 双视图分辨率，可选开启 `ENABLE_2K_RESOLUTION=True` 切换至 `2560×1440` 2K 全链路模式）、2（SkinTokens）、3（ComfyUI/H3）、4（启动 Worker）。首次安装和模型下载仍需等待；之后复用既有 Drive 缓存。启动后可执行 Cell 5 查看实时任务进度（当前阶段、轮次、批次、loss、GPU 状态与预计剩余时间，自动定时刷新）。
 3. Worker 写入私有的 `MonsterStudio/runtime/endpoint_registry.json`（含 Gradio 地址、用户名、密码及协议版本），并在控制台输出一行 `connect` 配对命令。
 
 如果需要测试尚未推送到 GitHub 的本地修改，也可运行 `npm run monster:package`，把生成的 `packages/monster/dist/monster-<version>.tar.gz` 上传到 Google Drive 的 `MyDrive/MonsterStudio/releases/`，并在 Cell 1 填写 `RELEASE_ARCHIVE`（或打开同次生成的 `.ipynb`）。

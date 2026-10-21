@@ -21,7 +21,7 @@ RUNS_ROOT = VAR_EVALS_ROOT / "runs"
 
 
 def execute_tier1_fast(
-    benchmark_id: str = "fantasy_creature_2k_v1",
+    benchmark_id: str = "fantasy_creature_2k_v2",
     fixture_dir: Path | None = None,
     observations_override: dict[str, np.ndarray] | None = None,
     tier_label: str = "fast",

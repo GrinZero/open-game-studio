@@ -1,0 +1,720 @@
+{
+  "schema": "monster-eval-report-v1",
+  "benchmark_id": "fantasy_creature_2k_v2",
+  "solver_name": "taxonomy_kind_v2",
+  "tier": "full",
+  "created_at": "2026-10-21T11:37:48.690519+00:00",
+  "stages": {
+    "stage1_perception_2d": {
+      "front_uv_mae_px": 16.328,
+      "side_uv_mae_px": 35.885,
+      "overall_uv_mae_px": 26.107,
+      "uv_p95_px": 92.14,
+      "pck_at_8px": 27.42,
+      "pck_at_16px": 56.07,
+      "pck_at_32px": 81.33,
+      "depth_front_mae": 0.0454,
+      "depth_side_mae": 0.0462,
+      "depth_overall_mae": 0.0458,
+      "mean_confidence_front": 0.467,
+      "mean_confidence_side": 0.4209
+    },
+    "stage2_cleaning_epipolar": {
+      "cleaned_overall_uv_mae_px": 25.517,
+      "uv_mae_improvement_px": 0.5903,
+      "epipolar_v_consistency_raw_px": 22.965,
+      "epipolar_v_consistency_clean_px": 22.482,
+      "hampel_replaced_ratio_front_pct": 0.291,
+      "hampel_replaced_ratio_side_pct": 3.31,
+      "short_gap_max_frames": 3,
+      "cross_frame_confidence_replacement": false
+    },
+    "stage3_triangulation_3d": {
+      "raw_triangulated_mpjpe": 0.03324,
+      "sg_smoothed_mpjpe": 0.03113,
+      "raw_bone_length_cv_pct": 33.7704,
+      "sg_bone_length_cv_pct": 28.231,
+      "raw_accel_jitter": 0.01985,
+      "sg_accel_jitter": 0.00113,
+      "sg_jitter_reduction_pct": 94.29
+    },
+    "stage4_kinematic_fk": {
+      "fk_mpjpe": 0.03269,
+      "fk_bone_length_cv_pct": 0.0097,
+      "bone_length_drift_max": 1.3e-05,
+      "joint_limit_max_violation_deg": 0.0,
+      "rigid_local_drift_max_deg": 0.00089,
+      "root_anchors_count": 7,
+      "solver_elapsed_ms": 5803.87
+    },
+    "stage5_glb_roundtrip": {
+      "executed": true,
+      "valid": true,
+      "skin_roundtrip_max": 1e-06,
+      "source_unchanged": true,
+      "glb_sha256": "769aabaa5faadca31c82ae37e510f8e90adabb6a3eef0bcb9e0a3106f0e05ee2"
+    }
+  },
+  "stratified_kinematics": {
+    "schema": "monster-bone-taxonomy-v2",
+    "all_bones": {
+      "count": 77,
+      "direction_mean_deg": 12.574,
+      "direction_max_bone_deg": 30.983,
+      "full_rot_mean_deg": 23.647,
+      "nonleaf_rot_mean_deg": 23.265,
+      "endpoint_position_mean": 0.03269
+    },
+    "primary_bones": {
+      "count": 47,
+      "direction_mean_deg": 6.888,
+      "direction_max_bone_deg": 24.423,
+      "full_rot_mean_deg": 10.527,
+      "nonleaf_rot_mean_deg": 11.251,
+      "endpoint_position_mean": 0.0176
+    },
+    "by_kind": {
+      "root": {
+        "count": 1,
+        "direction_mean_deg": 1.675,
+        "direction_max_bone_deg": 1.675,
+        "full_rot_mean_deg": 3.048,
+        "nonleaf_rot_mean_deg": 3.048,
+        "endpoint_position_mean": 0.0045
+      },
+      "rigid": {
+        "count": 9,
+        "direction_mean_deg": 1.998,
+        "direction_max_bone_deg": 2.673,
+        "full_rot_mean_deg": 3.049,
+        "nonleaf_rot_mean_deg": 3.049,
+        "endpoint_position_mean": 0.01308
+      },
+      "spine": {
+        "count": 3,
+        "direction_mean_deg": 5.045,
+        "direction_max_bone_deg": 6.86,
+        "full_rot_mean_deg": 5.81,
+        "nonleaf_rot_mean_deg": 5.81,
+        "endpoint_position_mean": 0.00877
+      },
+      "head": {
+        "count": 2,
+        "direction_mean_deg": 8.122,
+        "direction_max_bone_deg": 8.618,
+        "full_rot_mean_deg": 10.337,
+        "nonleaf_rot_mean_deg": 9.748,
+        "endpoint_position_mean": 0.00905
+      },
+      "limb": {
+        "count": 8,
+        "direction_mean_deg": 13.038,
+        "direction_max_bone_deg": 24.423,
+        "full_rot_mean_deg": 26.567,
+        "nonleaf_rot_mean_deg": 26.567,
+        "endpoint_position_mean": 0.0282
+      },
+      "flex": {
+        "count": 24,
+        "direction_mean_deg": 7.017,
+        "direction_max_bone_deg": 13.688,
+        "full_rot_mean_deg": 8.901,
+        "nonleaf_rot_mean_deg": 8.646,
+        "endpoint_position_mean": 0.01812
+      },
+      "digit": {
+        "count": 30,
+        "direction_mean_deg": 21.482,
+        "direction_max_bone_deg": 30.983,
+        "full_rot_mean_deg": 44.202,
+        "nonleaf_rot_mean_deg": 44.289,
+        "endpoint_position_mean": 0.05633
+      }
+    },
+    "per_bone": {
+      "DIGIT_L_11_01": {
+        "direction": 30.9826,
+        "rotation": 48.2602,
+        "position": 0.0663
+      },
+      "DIGIT_L_11_02": {
+        "direction": 30.8304,
+        "rotation": 47.9188,
+        "position": 0.0713
+      },
+      "DIGIT_L_11_03": {
+        "direction": 30.5557,
+        "rotation": 47.6569,
+        "position": 0.0769
+      },
+      "DIGIT_L_12_01": {
+        "direction": 21.0317,
+        "rotation": 47.701,
+        "position": 0.0564
+      },
+      "DIGIT_L_12_02": {
+        "direction": 20.5973,
+        "rotation": 47.4497,
+        "position": 0.0576
+      },
+      "DIGIT_L_12_03": {
+        "direction": 20.2744,
+        "rotation": 47.2428,
+        "position": 0.06
+      },
+      "DIGIT_L_13_01": {
+        "direction": 26.072,
+        "rotation": 47.8426,
+        "position": 0.0645
+      },
+      "DIGIT_L_13_02": {
+        "direction": 27.1067,
+        "rotation": 47.4223,
+        "position": 0.0704
+      },
+      "DIGIT_L_13_03": {
+        "direction": 28.2843,
+        "rotation": 47.4115,
+        "position": 0.0767
+      },
+      "DIGIT_L_14_01": {
+        "direction": 22.1493,
+        "rotation": 47.547,
+        "position": 0.0613
+      },
+      "DIGIT_L_14_02": {
+        "direction": 26.3075,
+        "rotation": 47.4376,
+        "position": 0.0683
+      },
+      "DIGIT_L_14_03": {
+        "direction": 24.1145,
+        "rotation": 47.0974,
+        "position": 0.0752
+      },
+      "DIGIT_L_15_01": {
+        "direction": 21.8989,
+        "rotation": 47.9333,
+        "position": 0.0598
+      },
+      "DIGIT_L_15_02": {
+        "direction": 22.3544,
+        "rotation": 47.6527,
+        "position": 0.0635
+      },
+      "DIGIT_L_15_03": {
+        "direction": 21.5362,
+        "rotation": 47.3963,
+        "position": 0.0689
+      },
+      "DIGIT_R_11_01": {
+        "direction": 17.8203,
+        "rotation": 41.1571,
+        "position": 0.042
+      },
+      "DIGIT_R_11_02": {
+        "direction": 16.1242,
+        "rotation": 41.1592,
+        "position": 0.0448
+      },
+      "DIGIT_R_11_03": {
+        "direction": 15.965,
+        "rotation": 41.101,
+        "position": 0.0485
+      },
+      "DIGIT_R_12_01": {
+        "direction": 16.0971,
+        "rotation": 40.8591,
+        "position": 0.0424
+      },
+      "DIGIT_R_12_02": {
+        "direction": 15.6194,
+        "rotation": 40.4756,
+        "position": 0.0457
+      },
+      "DIGIT_R_12_03": {
+        "direction": 16.3466,
+        "rotation": 40.5226,
+        "position": 0.0502
+      },
+      "DIGIT_R_13_01": {
+        "direction": 16.7147,
+        "rotation": 40.772,
+        "position": 0.044
+      },
+      "DIGIT_R_13_02": {
+        "direction": 16.5543,
+        "rotation": 40.5025,
+        "position": 0.0471
+      },
+      "DIGIT_R_13_03": {
+        "direction": 18.7482,
+        "rotation": 40.4296,
+        "position": 0.0512
+      },
+      "DIGIT_R_14_01": {
+        "direction": 19.8469,
+        "rotation": 40.9968,
+        "position": 0.0464
+      },
+      "DIGIT_R_14_02": {
+        "direction": 20.4278,
+        "rotation": 41.145,
+        "position": 0.0496
+      },
+      "DIGIT_R_14_03": {
+        "direction": 19.7747,
+        "rotation": 40.7719,
+        "position": 0.0532
+      },
+      "DIGIT_R_15_01": {
+        "direction": 19.6876,
+        "rotation": 40.932,
+        "position": 0.0393
+      },
+      "DIGIT_R_15_02": {
+        "direction": 21.0245,
+        "rotation": 40.6213,
+        "position": 0.0419
+      },
+      "DIGIT_R_15_03": {
+        "direction": 19.6209,
+        "rotation": 40.6489,
+        "position": 0.0465
+      },
+      "FLEX_C_01_01": {
+        "direction": 8.8517,
+        "rotation": 9.4899,
+        "position": 0.0146
+      },
+      "FLEX_C_01_02": {
+        "direction": 10.6895,
+        "rotation": 12.315,
+        "position": 0.0163
+      },
+      "FLEX_L_01_01": {
+        "direction": 6.4966,
+        "rotation": 7.3709,
+        "position": 0.0128
+      },
+      "FLEX_L_01_02": {
+        "direction": 4.289,
+        "rotation": 6.3438,
+        "position": 0.0166
+      },
+      "FLEX_L_01_03": {
+        "direction": 2.306,
+        "rotation": 4.0615,
+        "position": 0.0182
+      },
+      "FLEX_L_02_01": {
+        "direction": 5.6972,
+        "rotation": 7.2758,
+        "position": 0.0163
+      },
+      "FLEX_L_02_02": {
+        "direction": 2.9357,
+        "rotation": 5.807,
+        "position": 0.0218
+      },
+      "FLEX_L_02_03": {
+        "direction": 9.2443,
+        "rotation": 9.9544,
+        "position": 0.0282
+      },
+      "FLEX_L_03_01": {
+        "direction": 8.1835,
+        "rotation": 9.9473,
+        "position": 0.0117
+      },
+      "FLEX_L_03_02": {
+        "direction": 7.0616,
+        "rotation": 8.9867,
+        "position": 0.0167
+      },
+      "FLEX_L_03_03": {
+        "direction": 6.8462,
+        "rotation": 8.7487,
+        "position": 0.0188
+      },
+      "FLEX_L_04_01": {
+        "direction": 5.1618,
+        "rotation": 7.4787,
+        "position": 0.0106
+      },
+      "FLEX_L_04_02": {
+        "direction": 4.0925,
+        "rotation": 7.6901,
+        "position": 0.0113
+      },
+      "FLEX_R_01_01": {
+        "direction": 5.1713,
+        "rotation": 7.1988,
+        "position": 0.0166
+      },
+      "FLEX_R_01_02": {
+        "direction": 6.4133,
+        "rotation": 8.4231,
+        "position": 0.0205
+      },
+      "FLEX_R_01_03": {
+        "direction": 3.8139,
+        "rotation": 6.5902,
+        "position": 0.0239
+      },
+      "FLEX_R_02_01": {
+        "direction": 7.3481,
+        "rotation": 8.4169,
+        "position": 0.0132
+      },
+      "FLEX_R_02_02": {
+        "direction": 11.8213,
+        "rotation": 12.4933,
+        "position": 0.0186
+      },
+      "FLEX_R_02_03": {
+        "direction": 9.8461,
+        "rotation": 12.9292,
+        "position": 0.0265
+      },
+      "FLEX_R_03_01": {
+        "direction": 4.5836,
+        "rotation": 6.0927,
+        "position": 0.0149
+      },
+      "FLEX_R_03_02": {
+        "direction": 13.6878,
+        "rotation": 15.3723,
+        "position": 0.0216
+      },
+      "FLEX_R_03_03": {
+        "direction": 10.5471,
+        "rotation": 13.9205,
+        "position": 0.0292
+      },
+      "FLEX_R_04_01": {
+        "direction": 8.592,
+        "rotation": 8.9869,
+        "position": 0.0166
+      },
+      "FLEX_R_04_02": {
+        "direction": 4.7264,
+        "rotation": 7.7303,
+        "position": 0.0195
+      },
+      "HEAD_C_00_01": {
+        "direction": 7.6263,
+        "rotation": 9.748,
+        "position": 0.0087
+      },
+      "HEAD_C_00_02": {
+        "direction": 8.6182,
+        "rotation": 10.9262,
+        "position": 0.0094
+      },
+      "LIMB_L_01_01": {
+        "direction": 7.4571,
+        "rotation": 8.0824,
+        "position": 0.0097
+      },
+      "LIMB_L_01_02": {
+        "direction": 3.742,
+        "rotation": 9.7783,
+        "position": 0.0137
+      },
+      "LIMB_L_01_03": {
+        "direction": 24.4231,
+        "rotation": 46.2321,
+        "position": 0.0397
+      },
+      "LIMB_L_01_04": {
+        "direction": 22.4819,
+        "rotation": 48.0496,
+        "position": 0.0571
+      },
+      "LIMB_R_01_01": {
+        "direction": 6.2695,
+        "rotation": 7.1244,
+        "position": 0.0099
+      },
+      "LIMB_R_01_02": {
+        "direction": 5.0087,
+        "rotation": 10.6579,
+        "position": 0.0171
+      },
+      "LIMB_R_01_03": {
+        "direction": 19.296,
+        "rotation": 41.4444,
+        "position": 0.0377
+      },
+      "LIMB_R_01_04": {
+        "direction": 15.6268,
+        "rotation": 41.1637,
+        "position": 0.0407
+      },
+      "RIGID_C_01_01": {
+        "direction": 1.6752,
+        "rotation": 3.0483,
+        "position": 0.0039
+      },
+      "RIGID_C_02_01": {
+        "direction": 2.123,
+        "rotation": 3.0492,
+        "position": 0.0149
+      },
+      "RIGID_C_02_02": {
+        "direction": 2.0721,
+        "rotation": 3.0494,
+        "position": 0.0158
+      },
+      "RIGID_C_03_01": {
+        "direction": 1.8003,
+        "rotation": 3.0486,
+        "position": 0.0183
+      },
+      "RIGID_L_01_01": {
+        "direction": 2.0146,
+        "rotation": 3.0492,
+        "position": 0.0086
+      },
+      "RIGID_L_01_02": {
+        "direction": 1.7439,
+        "rotation": 3.0492,
+        "position": 0.0133
+      },
+      "RIGID_R_01_01": {
+        "direction": 2.6732,
+        "rotation": 3.0485,
+        "position": 0.0091
+      },
+      "RIGID_R_01_02": {
+        "direction": 2.3887,
+        "rotation": 3.049,
+        "position": 0.0178
+      },
+      "RIGID_R_01_03": {
+        "direction": 1.49,
+        "rotation": 3.0489,
+        "position": 0.016
+      },
+      "ROOT_C_00_00": {
+        "direction": 1.6752,
+        "rotation": 3.0483,
+        "position": 0.0045
+      },
+      "SPINE_C_00_01": {
+        "direction": 6.8598,
+        "rotation": 7.3996,
+        "position": 0.0065
+      },
+      "SPINE_C_00_02": {
+        "direction": 4.2658,
+        "rotation": 5.2025,
+        "position": 0.0096
+      },
+      "SPINE_C_00_03": {
+        "direction": 4.0085,
+        "rotation": 4.8275,
+        "position": 0.0102
+      }
+    },
+    "worst_frames_primary": [
+      {
+        "frame": 117,
+        "all_direction_mean_deg": 25.268,
+        "primary_direction_mean_deg": 9.423,
+        "endpoint_mpjpe": 0.06245
+      },
+      {
+        "frame": 116,
+        "all_direction_mean_deg": 25.068,
+        "primary_direction_mean_deg": 9.401,
+        "endpoint_mpjpe": 0.06142
+      },
+      {
+        "frame": 118,
+        "all_direction_mean_deg": 25.333,
+        "primary_direction_mean_deg": 9.381,
+        "endpoint_mpjpe": 0.06293
+      },
+      {
+        "frame": 115,
+        "all_direction_mean_deg": 24.729,
+        "primary_direction_mean_deg": 9.307,
+        "endpoint_mpjpe": 0.05988
+      },
+      {
+        "frame": 119,
+        "all_direction_mean_deg": 25.283,
+        "primary_direction_mean_deg": 9.28,
+        "endpoint_mpjpe": 0.06288
+      },
+      {
+        "frame": 114,
+        "all_direction_mean_deg": 24.258,
+        "primary_direction_mean_deg": 9.163,
+        "endpoint_mpjpe": 0.05818
+      },
+      {
+        "frame": 120,
+        "all_direction_mean_deg": 25.166,
+        "primary_direction_mean_deg": 9.145,
+        "endpoint_mpjpe": 0.06236
+      },
+      {
+        "frame": 121,
+        "all_direction_mean_deg": 25.056,
+        "primary_direction_mean_deg": 9.002,
+        "endpoint_mpjpe": 0.06148
+      },
+      {
+        "frame": 113,
+        "all_direction_mean_deg": 23.683,
+        "primary_direction_mean_deg": 8.981,
+        "endpoint_mpjpe": 0.05656
+      },
+      {
+        "frame": 122,
+        "all_direction_mean_deg": 24.997,
+        "primary_direction_mean_deg": 8.877,
+        "endpoint_mpjpe": 0.06037
+      }
+    ]
+  },
+  "temporal_quality": {
+    "raw_3d_accel_mean": 0.01985,
+    "sg_3d_accel_mean": 0.00113,
+    "fk_3d_accel_mean": 0.00098,
+    "gt_3d_accel_mean": 0.00099,
+    "total_accel_jitter_reduction_pct": 95.07,
+    "fk_vs_gt_accel_ratio": 0.992,
+    "angular_step_mean_deg": 2.249,
+    "angular_step_p95_deg": 8.726,
+    "max_single_frame_root_step_deg": 1.437,
+    "estimated_primary_lag_frames": 0.154,
+    "estimated_primary_lag_ms": 6.42
+  },
+  "golden_frames": {
+    "all_passed": true,
+    "probe_count": 9,
+    "probes": [
+      {
+        "frame": 0,
+        "name": "bind_start",
+        "description": "Initial idle/stance entry frame; verifies zero root offset and stable bind alignment.",
+        "passed": true,
+        "root_rot_err_deg": 3.602,
+        "root_single_frame_step_deg": 0.0,
+        "primary_dir_mean_deg": 6.296,
+        "thresholds": {
+          "max_root_rot_deg": 5.0,
+          "max_primary_dir_deg": 8.0
+        }
+      },
+      {
+        "frame": 17,
+        "name": "root_flip_regression_guard",
+        "description": "Historical failure frame where collinear 2-point root fitting caused a 180-deg root flip; verifies multi-anchor IRLS Kabsch stability.",
+        "passed": true,
+        "root_rot_err_deg": 0.805,
+        "root_single_frame_step_deg": 0.18,
+        "primary_dir_mean_deg": 6.461,
+        "thresholds": {
+          "max_root_rot_deg": 5.0,
+          "max_primary_dir_deg": 8.0
+        }
+      },
+      {
+        "frame": 60,
+        "name": "stance_transition",
+        "description": "Mid-phase torso & upper limb transition; checks spine and upper-limb coordination.",
+        "passed": true,
+        "root_rot_err_deg": 2.887,
+        "root_single_frame_step_deg": 0.377,
+        "primary_dir_mean_deg": 6.986,
+        "thresholds": {
+          "max_root_rot_deg": 8.0,
+          "max_primary_dir_deg": 9.0
+        }
+      },
+      {
+        "frame": 131,
+        "name": "prayer_convergence",
+        "description": "Bilateral forearm/hand convergence in front of chest; exercises self-occlusion & forearm child-head pivot fusion.",
+        "passed": true,
+        "root_rot_err_deg": 4.13,
+        "root_single_frame_step_deg": 0.319,
+        "primary_dir_mean_deg": 7.391,
+        "thresholds": {
+          "max_root_rot_deg": 6.0,
+          "max_primary_dir_deg": 9.0
+        }
+      },
+      {
+        "frame": 211,
+        "name": "extension_release",
+        "description": "Wide lateral limb extension and flex-chain wave propagation.",
+        "passed": true,
+        "root_rot_err_deg": 3.845,
+        "root_single_frame_step_deg": 0.328,
+        "primary_dir_mean_deg": 6.13,
+        "thresholds": {
+          "max_root_rot_deg": 6.0,
+          "max_primary_dir_deg": 9.0
+        }
+      },
+      {
+        "frame": 287,
+        "name": "cycle_closure",
+        "description": "Final frame of the 12s (288-frame) 24fps exam clip; verifies zero cumulative drift.",
+        "passed": true,
+        "root_rot_err_deg": 4.312,
+        "root_single_frame_step_deg": 0.175,
+        "primary_dir_mean_deg": 6.259,
+        "thresholds": {
+          "max_root_rot_deg": 5.0,
+          "max_primary_dir_deg": 8.0
+        }
+      },
+      {
+        "frame": 125,
+        "name": "prayer_endpoint_regression_125",
+        "description": "Worst primary endpoint frames observed in the October 21 G2 rerun; preserved as failure probes.",
+        "passed": true,
+        "root_rot_err_deg": 4.209,
+        "root_single_frame_step_deg": 0.31,
+        "primary_dir_mean_deg": 8.497,
+        "thresholds": {
+          "max_root_rot_deg": 6.0,
+          "max_primary_dir_deg": 9.0
+        }
+      },
+      {
+        "frame": 126,
+        "name": "prayer_endpoint_regression_126",
+        "description": "Worst primary endpoint frames observed in the October 21 G2 rerun; preserved as failure probes.",
+        "passed": true,
+        "root_rot_err_deg": 4.144,
+        "root_single_frame_step_deg": 0.323,
+        "primary_dir_mean_deg": 8.324,
+        "thresholds": {
+          "max_root_rot_deg": 6.0,
+          "max_primary_dir_deg": 9.0
+        }
+      },
+      {
+        "frame": 127,
+        "name": "prayer_endpoint_regression_127",
+        "description": "Worst primary endpoint frames observed in the October 21 G2 rerun; preserved as failure probes.",
+        "passed": true,
+        "root_rot_err_deg": 4.092,
+        "root_single_frame_step_deg": 0.291,
+        "primary_dir_mean_deg": 8.117,
+        "thresholds": {
+          "max_root_rot_deg": 6.0,
+          "max_primary_dir_deg": 9.0
+        }
+      }
+    ]
+  }
+}

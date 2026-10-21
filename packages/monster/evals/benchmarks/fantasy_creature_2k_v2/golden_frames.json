@@ -1,6 +1,6 @@
 {
   "schema": "monster-golden-frames-v1",
-  "benchmark_id": "fantasy_creature_2k_v1",
+  "benchmark_id": "fantasy_creature_2k_v2",
   "probes": [
     {
       "frame": 0,
@@ -43,6 +43,27 @@
       "description": "Final frame of the 12s (288-frame) 24fps exam clip; verifies zero cumulative drift.",
       "max_root_rot_deg": 5.0,
       "max_primary_dir_deg": 8.0
+    },
+    {
+      "frame": 125,
+      "name": "prayer_endpoint_regression_125",
+      "description": "Worst primary endpoint frames observed in the October 21 G2 rerun; preserved as failure probes.",
+      "max_root_rot_deg": 6.0,
+      "max_primary_dir_deg": 9.0
+    },
+    {
+      "frame": 126,
+      "name": "prayer_endpoint_regression_126",
+      "description": "Worst primary endpoint frames observed in the October 21 G2 rerun; preserved as failure probes.",
+      "max_root_rot_deg": 6.0,
+      "max_primary_dir_deg": 9.0
+    },
+    {
+      "frame": 127,
+      "name": "prayer_endpoint_regression_127",
+      "description": "Worst primary endpoint frames observed in the October 21 G2 rerun; preserved as failure probes.",
+      "max_root_rot_deg": 6.0,
+      "max_primary_dir_deg": 9.0
     }
   ]
 }

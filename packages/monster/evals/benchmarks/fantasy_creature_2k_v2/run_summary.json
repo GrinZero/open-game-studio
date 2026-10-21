@@ -1,0 +1,615 @@
+{
+  "benchmark_id": "fantasy_creature_2k_v2",
+  "run_id": "fantasy_creature_g2_20261021_145300",
+  "G3": "pending",
+  "training": {
+    "samples": 5000,
+    "epochs": 15,
+    "seed": 2026102201,
+    "final_uv_loss": 0.012767705673607774
+  },
+  "epipolar_gate_passed": true,
+  "stratified_metrics": {
+    "schema": "monster-bone-taxonomy-v2",
+    "all_bones": {
+      "count": 77,
+      "direction_mean_deg": 14.438,
+      "direction_max_bone_deg": 31.343,
+      "full_rot_mean_deg": 26.882,
+      "nonleaf_rot_mean_deg": 26.357,
+      "endpoint_position_mean": 0.04111
+    },
+    "primary_bones": {
+      "count": 47,
+      "direction_mean_deg": 8.469,
+      "direction_max_bone_deg": 25.838,
+      "full_rot_mean_deg": 12.787,
+      "nonleaf_rot_mean_deg": 13.369,
+      "endpoint_position_mean": 0.02304
+    },
+    "by_kind": {
+      "root": {
+        "count": 1,
+        "direction_mean_deg": 2.221,
+        "direction_max_bone_deg": 2.221,
+        "full_rot_mean_deg": 3.948,
+        "nonleaf_rot_mean_deg": 3.948,
+        "endpoint_position_mean": 0.0048
+      },
+      "rigid": {
+        "count": 9,
+        "direction_mean_deg": 2.728,
+        "direction_max_bone_deg": 3.213,
+        "full_rot_mean_deg": 3.948,
+        "nonleaf_rot_mean_deg": 3.948,
+        "endpoint_position_mean": 0.02004
+      },
+      "spine": {
+        "count": 3,
+        "direction_mean_deg": 5.141,
+        "direction_max_bone_deg": 7.306,
+        "full_rot_mean_deg": 6.16,
+        "nonleaf_rot_mean_deg": 6.16,
+        "endpoint_position_mean": 0.008
+      },
+      "head": {
+        "count": 2,
+        "direction_mean_deg": 9.431,
+        "direction_max_bone_deg": 10.968,
+        "full_rot_mean_deg": 13.852,
+        "nonleaf_rot_mean_deg": 12.674,
+        "endpoint_position_mean": 0.0113
+      },
+      "limb": {
+        "count": 8,
+        "direction_mean_deg": 15.506,
+        "direction_max_bone_deg": 25.838,
+        "full_rot_mean_deg": 30.439,
+        "nonleaf_rot_mean_deg": 30.439,
+        "endpoint_position_mean": 0.03274
+      },
+      "flex": {
+        "count": 24,
+        "direction_mean_deg": 8.873,
+        "direction_max_bone_deg": 18.888,
+        "full_rot_mean_deg": 11.325,
+        "nonleaf_rot_mean_deg": 10.778,
+        "endpoint_position_mean": 0.02455
+      },
+      "digit": {
+        "count": 30,
+        "direction_mean_deg": 23.789,
+        "direction_max_bone_deg": 31.343,
+        "full_rot_mean_deg": 48.964,
+        "nonleaf_rot_mean_deg": 49.086,
+        "endpoint_position_mean": 0.06941
+      }
+    },
+    "per_bone": {
+      "DIGIT_L_11_01": {
+        "direction": 31.3427,
+        "rotation": 52.7155,
+        "position": 0.0745
+      },
+      "DIGIT_L_11_02": {
+        "direction": 31.3277,
+        "rotation": 52.5128,
+        "position": 0.0808
+      },
+      "DIGIT_L_11_03": {
+        "direction": 30.6684,
+        "rotation": 51.9799,
+        "position": 0.0873
+      },
+      "DIGIT_L_12_01": {
+        "direction": 25.6752,
+        "rotation": 52.3383,
+        "position": 0.0611
+      },
+      "DIGIT_L_12_02": {
+        "direction": 27.4196,
+        "rotation": 52.1016,
+        "position": 0.0651
+      },
+      "DIGIT_L_12_03": {
+        "direction": 25.8562,
+        "rotation": 51.4556,
+        "position": 0.0718
+      },
+      "DIGIT_L_13_01": {
+        "direction": 26.9626,
+        "rotation": 52.481,
+        "position": 0.0727
+      },
+      "DIGIT_L_13_02": {
+        "direction": 27.6206,
+        "rotation": 51.9657,
+        "position": 0.0801
+      },
+      "DIGIT_L_13_03": {
+        "direction": 28.3957,
+        "rotation": 51.773,
+        "position": 0.0873
+      },
+      "DIGIT_L_14_01": {
+        "direction": 24.4343,
+        "rotation": 52.2472,
+        "position": 0.0698
+      },
+      "DIGIT_L_14_02": {
+        "direction": 27.0412,
+        "rotation": 51.9366,
+        "position": 0.0787
+      },
+      "DIGIT_L_14_03": {
+        "direction": 25.327,
+        "rotation": 51.5522,
+        "position": 0.0874
+      },
+      "DIGIT_L_15_01": {
+        "direction": 24.7581,
+        "rotation": 52.4719,
+        "position": 0.0686
+      },
+      "DIGIT_L_15_02": {
+        "direction": 25.0027,
+        "rotation": 52.2326,
+        "position": 0.0751
+      },
+      "DIGIT_L_15_03": {
+        "direction": 24.2844,
+        "rotation": 51.9395,
+        "position": 0.0833
+      },
+      "DIGIT_R_11_01": {
+        "direction": 19.9479,
+        "rotation": 46.0545,
+        "position": 0.0578
+      },
+      "DIGIT_R_11_02": {
+        "direction": 17.7381,
+        "rotation": 45.966,
+        "position": 0.0617
+      },
+      "DIGIT_R_11_03": {
+        "direction": 17.9808,
+        "rotation": 46.0014,
+        "position": 0.0668
+      },
+      "DIGIT_R_12_01": {
+        "direction": 18.1374,
+        "rotation": 46.0751,
+        "position": 0.0583
+      },
+      "DIGIT_R_12_02": {
+        "direction": 17.8915,
+        "rotation": 45.8785,
+        "position": 0.0629
+      },
+      "DIGIT_R_12_03": {
+        "direction": 18.5009,
+        "rotation": 45.9253,
+        "position": 0.0688
+      },
+      "DIGIT_R_13_01": {
+        "direction": 18.6525,
+        "rotation": 45.7851,
+        "position": 0.0595
+      },
+      "DIGIT_R_13_02": {
+        "direction": 19.633,
+        "rotation": 45.615,
+        "position": 0.0639
+      },
+      "DIGIT_R_13_03": {
+        "direction": 20.7304,
+        "rotation": 45.4256,
+        "position": 0.0686
+      },
+      "DIGIT_R_14_01": {
+        "direction": 21.8269,
+        "rotation": 45.9365,
+        "position": 0.0612
+      },
+      "DIGIT_R_14_02": {
+        "direction": 23.0026,
+        "rotation": 45.9256,
+        "position": 0.0652
+      },
+      "DIGIT_R_14_03": {
+        "direction": 22.6005,
+        "rotation": 45.7122,
+        "position": 0.0695
+      },
+      "DIGIT_R_15_01": {
+        "direction": 22.9226,
+        "rotation": 45.8435,
+        "position": 0.0535
+      },
+      "DIGIT_R_15_02": {
+        "direction": 25.0453,
+        "rotation": 45.6461,
+        "position": 0.0576
+      },
+      "DIGIT_R_15_03": {
+        "direction": 22.9429,
+        "rotation": 45.4323,
+        "position": 0.0633
+      },
+      "FLEX_C_01_01": {
+        "direction": 10.0205,
+        "rotation": 11.1965,
+        "position": 0.0212
+      },
+      "FLEX_C_01_02": {
+        "direction": 18.8877,
+        "rotation": 20.1627,
+        "position": 0.0232
+      },
+      "FLEX_L_01_01": {
+        "direction": 6.6666,
+        "rotation": 7.5778,
+        "position": 0.0198
+      },
+      "FLEX_L_01_02": {
+        "direction": 4.6526,
+        "rotation": 6.9376,
+        "position": 0.0238
+      },
+      "FLEX_L_01_03": {
+        "direction": 3.0224,
+        "rotation": 5.0613,
+        "position": 0.0257
+      },
+      "FLEX_L_02_01": {
+        "direction": 7.8591,
+        "rotation": 9.0856,
+        "position": 0.0246
+      },
+      "FLEX_L_02_02": {
+        "direction": 3.8843,
+        "rotation": 7.7781,
+        "position": 0.0314
+      },
+      "FLEX_L_02_03": {
+        "direction": 10.1998,
+        "rotation": 11.1707,
+        "position": 0.0382
+      },
+      "FLEX_L_03_01": {
+        "direction": 8.7276,
+        "rotation": 10.6128,
+        "position": 0.0152
+      },
+      "FLEX_L_03_02": {
+        "direction": 7.5183,
+        "rotation": 10.2683,
+        "position": 0.0188
+      },
+      "FLEX_L_03_03": {
+        "direction": 8.5114,
+        "rotation": 11.1003,
+        "position": 0.0216
+      },
+      "FLEX_L_04_01": {
+        "direction": 6.2978,
+        "rotation": 9.2404,
+        "position": 0.0167
+      },
+      "FLEX_L_04_02": {
+        "direction": 4.7488,
+        "rotation": 9.6332,
+        "position": 0.0179
+      },
+      "FLEX_R_01_01": {
+        "direction": 7.6973,
+        "rotation": 9.5098,
+        "position": 0.0231
+      },
+      "FLEX_R_01_02": {
+        "direction": 11.8247,
+        "rotation": 13.7268,
+        "position": 0.0293
+      },
+      "FLEX_R_01_03": {
+        "direction": 5.0074,
+        "rotation": 9.7491,
+        "position": 0.034
+      },
+      "FLEX_R_02_01": {
+        "direction": 10.9585,
+        "rotation": 12.0616,
+        "position": 0.0198
+      },
+      "FLEX_R_02_02": {
+        "direction": 12.1262,
+        "rotation": 13.5614,
+        "position": 0.0277
+      },
+      "FLEX_R_02_03": {
+        "direction": 10.7308,
+        "rotation": 14.4528,
+        "position": 0.0336
+      },
+      "FLEX_R_03_01": {
+        "direction": 7.9894,
+        "rotation": 9.0085,
+        "position": 0.0211
+      },
+      "FLEX_R_03_02": {
+        "direction": 14.3113,
+        "rotation": 16.3493,
+        "position": 0.0247
+      },
+      "FLEX_R_03_03": {
+        "direction": 12.1104,
+        "rotation": 15.9951,
+        "position": 0.0304
+      },
+      "FLEX_R_04_01": {
+        "direction": 13.3972,
+        "rotation": 14.7517,
+        "position": 0.0218
+      },
+      "FLEX_R_04_02": {
+        "direction": 5.7963,
+        "rotation": 12.8098,
+        "position": 0.0256
+      },
+      "HEAD_C_00_01": {
+        "direction": 7.8937,
+        "rotation": 12.674,
+        "position": 0.0104
+      },
+      "HEAD_C_00_02": {
+        "direction": 10.9676,
+        "rotation": 15.0309,
+        "position": 0.0122
+      },
+      "LIMB_L_01_01": {
+        "direction": 11.6949,
+        "rotation": 12.1446,
+        "position": 0.0119
+      },
+      "LIMB_L_01_02": {
+        "direction": 5.3612,
+        "rotation": 9.1012,
+        "position": 0.0149
+      },
+      "LIMB_L_01_03": {
+        "direction": 25.8379,
+        "rotation": 49.2944,
+        "position": 0.0433
+      },
+      "LIMB_L_01_04": {
+        "direction": 24.8099,
+        "rotation": 52.6797,
+        "position": 0.06
+      },
+      "LIMB_R_01_01": {
+        "direction": 6.8331,
+        "rotation": 7.7804,
+        "position": 0.0105
+      },
+      "LIMB_R_01_02": {
+        "direction": 9.5477,
+        "rotation": 19.8125,
+        "position": 0.0233
+      },
+      "LIMB_R_01_03": {
+        "direction": 21.7708,
+        "rotation": 46.5825,
+        "position": 0.045
+      },
+      "LIMB_R_01_04": {
+        "direction": 18.1886,
+        "rotation": 46.1178,
+        "position": 0.053
+      },
+      "RIGID_C_01_01": {
+        "direction": 2.2205,
+        "rotation": 3.9478,
+        "position": 0.0061
+      },
+      "RIGID_C_02_01": {
+        "direction": 2.504,
+        "rotation": 3.9492,
+        "position": 0.0252
+      },
+      "RIGID_C_02_02": {
+        "direction": 2.1168,
+        "rotation": 3.9497,
+        "position": 0.0261
+      },
+      "RIGID_C_03_01": {
+        "direction": 3.0036,
+        "rotation": 3.9482,
+        "position": 0.0278
+      },
+      "RIGID_L_01_01": {
+        "direction": 3.151,
+        "rotation": 3.9476,
+        "position": 0.0113
+      },
+      "RIGID_L_01_02": {
+        "direction": 3.084,
+        "rotation": 3.9489,
+        "position": 0.0232
+      },
+      "RIGID_R_01_01": {
+        "direction": 3.2126,
+        "rotation": 3.9476,
+        "position": 0.0126
+      },
+      "RIGID_R_01_02": {
+        "direction": 3.1785,
+        "rotation": 3.948,
+        "position": 0.0245
+      },
+      "RIGID_R_01_03": {
+        "direction": 2.0771,
+        "rotation": 3.9481,
+        "position": 0.0236
+      },
+      "ROOT_C_00_00": {
+        "direction": 2.2209,
+        "rotation": 3.9478,
+        "position": 0.0048
+      },
+      "SPINE_C_00_01": {
+        "direction": 7.3062,
+        "rotation": 8.1026,
+        "position": 0.0064
+      },
+      "SPINE_C_00_02": {
+        "direction": 3.819,
+        "rotation": 5.0253,
+        "position": 0.0084
+      },
+      "SPINE_C_00_03": {
+        "direction": 4.2987,
+        "rotation": 5.3528,
+        "position": 0.0092
+      }
+    }
+  },
+  "known_failures": [
+    "Prayer hand convergence is inaccurate.",
+    "Digit and primary-bone rotation errors exceed existing acceptance targets."
+  ],
+  "quality_accepted": false,
+  "cached_latest_solver": {
+    "all_bones": {
+      "count": 77,
+      "direction_mean_deg": 13.017,
+      "direction_max_bone_deg": 29.585,
+      "full_rot_mean_deg": 24.434,
+      "nonleaf_rot_mean_deg": 23.985,
+      "endpoint_position_mean": 0.03476
+    },
+    "golden_frames": {
+      "all_passed": true,
+      "probe_count": 9,
+      "probes": [
+        {
+          "frame": 0,
+          "name": "bind_start",
+          "description": "Initial idle/stance entry frame; verifies zero root offset and stable bind alignment.",
+          "passed": true,
+          "root_rot_err_deg": 4.361,
+          "root_single_frame_step_deg": 0.0,
+          "primary_dir_mean_deg": 6.247,
+          "thresholds": {
+            "max_root_rot_deg": 5.0,
+            "max_primary_dir_deg": 8.0
+          }
+        },
+        {
+          "frame": 17,
+          "name": "root_flip_regression_guard",
+          "description": "Historical failure frame where collinear 2-point root fitting caused a 180-deg root flip; verifies multi-anchor IRLS Kabsch stability.",
+          "passed": true,
+          "root_rot_err_deg": 1.018,
+          "root_single_frame_step_deg": 0.995,
+          "primary_dir_mean_deg": 7.008,
+          "thresholds": {
+            "max_root_rot_deg": 5.0,
+            "max_primary_dir_deg": 8.0
+          }
+        },
+        {
+          "frame": 60,
+          "name": "stance_transition",
+          "description": "Mid-phase torso & upper limb transition; checks spine and upper-limb coordination.",
+          "passed": true,
+          "root_rot_err_deg": 4.708,
+          "root_single_frame_step_deg": 1.657,
+          "primary_dir_mean_deg": 7.986,
+          "thresholds": {
+            "max_root_rot_deg": 8.0,
+            "max_primary_dir_deg": 9.0
+          }
+        },
+        {
+          "frame": 131,
+          "name": "prayer_convergence",
+          "description": "Bilateral forearm/hand convergence in front of chest; exercises self-occlusion & forearm child-head pivot fusion.",
+          "passed": true,
+          "root_rot_err_deg": 4.76,
+          "root_single_frame_step_deg": 0.744,
+          "primary_dir_mean_deg": 8.402,
+          "thresholds": {
+            "max_root_rot_deg": 6.0,
+            "max_primary_dir_deg": 9.0
+          }
+        },
+        {
+          "frame": 211,
+          "name": "extension_release",
+          "description": "Wide lateral limb extension and flex-chain wave propagation.",
+          "passed": true,
+          "root_rot_err_deg": 1.73,
+          "root_single_frame_step_deg": 0.217,
+          "primary_dir_mean_deg": 6.485,
+          "thresholds": {
+            "max_root_rot_deg": 6.0,
+            "max_primary_dir_deg": 9.0
+          }
+        },
+        {
+          "frame": 287,
+          "name": "cycle_closure",
+          "description": "Final frame of the 12s (288-frame) 24fps exam clip; verifies zero cumulative drift.",
+          "passed": true,
+          "root_rot_err_deg": 4.361,
+          "root_single_frame_step_deg": 0.077,
+          "primary_dir_mean_deg": 6.187,
+          "thresholds": {
+            "max_root_rot_deg": 5.0,
+            "max_primary_dir_deg": 8.0
+          }
+        },
+        {
+          "frame": 125,
+          "name": "prayer_endpoint_regression_125",
+          "description": "Worst primary endpoint frames observed in the October 21 G2 rerun; preserved as failure probes.",
+          "passed": true,
+          "root_rot_err_deg": 5.248,
+          "root_single_frame_step_deg": 0.98,
+          "primary_dir_mean_deg": 7.819,
+          "thresholds": {
+            "max_root_rot_deg": 6.0,
+            "max_primary_dir_deg": 9.0
+          }
+        },
+        {
+          "frame": 126,
+          "name": "prayer_endpoint_regression_126",
+          "description": "Worst primary endpoint frames observed in the October 21 G2 rerun; preserved as failure probes.",
+          "passed": true,
+          "root_rot_err_deg": 5.12,
+          "root_single_frame_step_deg": 0.643,
+          "primary_dir_mean_deg": 8.171,
+          "thresholds": {
+            "max_root_rot_deg": 6.0,
+            "max_primary_dir_deg": 9.0
+          }
+        },
+        {
+          "frame": 127,
+          "name": "prayer_endpoint_regression_127",
+          "description": "Worst primary endpoint frames observed in the October 21 G2 rerun; preserved as failure probes.",
+          "passed": true,
+          "root_rot_err_deg": 4.72,
+          "root_single_frame_step_deg": 0.472,
+          "primary_dir_mean_deg": 8.301,
+          "thresholds": {
+            "max_root_rot_deg": 6.0,
+            "max_primary_dir_deg": 9.0
+          }
+        }
+      ]
+    },
+    "note": "Latest adapter uses different 2D cleaning / gating / fusion than the frozen cloud exam. Do not compare these as the same metric run."
+  }
+}

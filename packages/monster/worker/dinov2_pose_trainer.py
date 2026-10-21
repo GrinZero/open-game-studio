@@ -22,6 +22,8 @@ import json
 import math
 import os
 import shutil
+import subprocess
+import time
 from types import MethodType
 import warnings
 from datetime import datetime
@@ -31,10 +33,12 @@ from pose_features import (features_enabled, DATASET_SCHEMA, FEATURE_VERSION, va
 from bone_taxonomy import (
     BONE_TAXONOMY_SCHEMA,
     classify_rig_bones,
+    clean_uv_short_gaps_hampel,
     compute_stratified_motion_metrics,
     reconstruct_frames_with_kind_solvers,
     savgol_smooth_array,
     short_gap_fill_1d_or_nd,
+    whittaker_smooth_trajectory,
 )
 from pathlib import Path
 from typing import Any
@@ -351,8 +355,79 @@ def enhanced_pose_losses(pred_uv, logits, aux, gt_uv, labels):
             "total": 10.0*uv_loss + hm_loss + 0.25*depth_loss + 0.25*vis_loss}
 
 
+def _format_eta(seconds: float) -> str:
+    if seconds <= 0:
+        return "即将完成"
+    sec = int(round(seconds))
+    if sec < 60:
+        return f"约 {sec} 秒"
+    mins = round(sec / 60)
+    if mins < 60:
+        return f"约 {mins} 分钟"
+    hours = mins // 60
+    rem_mins = mins % 60
+    return f"约 {hours} 小时 {rem_mins} 分钟"
+
+
+def _query_telemetry() -> dict[str, Any]:
+    gpu_name = "unknown"
+    vram_used = 0.0
+    vram_total = 0.0
+    util = 0.0
+    try:
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            vram_used = round(torch.cuda.memory_allocated(0) / (1024 ** 2), 1)
+            vram_total = round(torch.cuda.get_device_properties(0).total_memory / (1024 ** 2), 1)
+    except Exception:
+        pass
+    try:
+        raw = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"],
+            text=True,
+            timeout=1,
+        ).strip()
+        parts = [p.strip() for p in raw.split(",")]
+        if len(parts) >= 4:
+            gpu_name = parts[0]
+            util = float(parts[1])
+            vram_used = float(parts[2])
+            vram_total = float(parts[3])
+    except Exception:
+        pass
+    display_str = (
+        f"{gpu_name} · 显存: {vram_used:.0f} / {vram_total:.0f} MiB · 利用率: {util:.0f}%"
+        if vram_total > 0
+        else (f"{gpu_name}" if gpu_name != "unknown" else "CPU 模式")
+    )
+    return {
+        "name": gpu_name,
+        "vram_used_mib": vram_used,
+        "vram_total_mib": vram_total,
+        "gpu_util_pct": util,
+        "display": display_str,
+    }
+
+
+def _write_progress_files(targets: list[Path], data: dict[str, Any]) -> None:
+    for target in targets:
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(target)
+        except Exception:
+            pass
+
+
 def train_monster_dinov2_probe(
-    synth_dir: str, meta_path: str, out_ckpt: str, epochs: int = 15, batch_size: int = 32, lr: float = 1e-3
+    synth_dir: str,
+    meta_path: str,
+    out_ckpt: str,
+    epochs: int = 15,
+    batch_size: int = 32,
+    lr: float = 1e-3,
+    progress_file: str | None = None,
 ) -> None:
     require_torch()
     if epochs < 1 or batch_size < 1:
@@ -384,13 +459,33 @@ def train_monster_dinov2_probe(
     optimizer = torch.optim.AdamW(parameters, lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     history = []
+    targets: list[Path] = []
+    if progress_file:
+        targets.append(Path(progress_file))
+    ckpt_dir = Path(out_ckpt).parent
+    targets.append(ckpt_dir / "training_progress.json")
+    targets.append(ckpt_dir / "task_progress.json")
+    synth_parent = Path(synth_dir).parent
+    if synth_parent != ckpt_dir:
+        targets.append(synth_parent / "training_progress.json")
+        targets.append(synth_parent / "task_progress.json")
+    drive_root = os.environ.get("MONSTER_DRIVE_ROOT")
+    if drive_root:
+        targets.append(Path(drive_root) / "runtime" / "current_task_progress.json")
+    work_root = os.environ.get("MONSTER_WORK_ROOT")
+    if work_root:
+        targets.append(Path(work_root) / "runtime" / "current_task_progress.json")
+
+    total_start_time = time.time()
     for ep in range(1, epochs+1):
+        epoch_start_time = time.time()
         model.backbone.eval()
         model.head.train()
         if enhanced:
             model.aux_head.train()
         totals_gpu: dict[str, torch.Tensor] = {}
-        for batch in loader:
+        total_batches = len(loader)
+        for step, batch in enumerate(loader, 1):
             imgs = batch[0].to(device, non_blocking=non_blocking)
             gt_uv = batch[1].to(device, non_blocking=non_blocking)
             optimizer.zero_grad(set_to_none=True)
@@ -410,12 +505,74 @@ def train_monster_dinov2_probe(
             for key, value in losses.items():
                 val_det = value.detach().float()
                 totals_gpu[key] = totals_gpu[key] + val_det if key in totals_gpu else val_det
+
+            if step == 1 or step % 5 == 0 or step == total_batches:
+                now = time.time()
+                epoch_elapsed = now - epoch_start_time
+                avg_batch_s = epoch_elapsed / max(1, step)
+                rem_batches = (total_batches - step) + max(0, epochs - ep) * total_batches
+                eta_s = rem_batches * avg_batch_s
+                completed_total_steps = (ep - 1) * total_batches + step
+                all_total_steps = epochs * total_batches
+                pct = min(100.0, max(0.0, 100.0 * completed_total_steps / max(1, all_total_steps)))
+                loss_snapshot = {k: round(float(v.detach().cpu().item()), 6) for k, v in losses.items()}
+                stamp = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S")
+                telemetry = _query_telemetry()
+                progress_payload = {
+                    "stage": "training",
+                    "stage_display": "训练 DINOv2 姿态头",
+                    "status": "running",
+                    "epoch": ep,
+                    "epochs": epochs,
+                    "completed_batches": step,
+                    "batches_per_epoch": total_batches,
+                    "overall_pct": round(pct, 1),
+                    "epoch_elapsed_s": round(epoch_elapsed, 1),
+                    "total_elapsed_s": round(now - total_start_time, 1),
+                    "eta_seconds": round(eta_s, 1),
+                    "eta_str": _format_eta(eta_s),
+                    "losses": loss_snapshot,
+                    "batch_loss": loss_snapshot,
+                    "history": list(history),
+                    "gpu": telemetry,
+                    "updated_unix": now,
+                    "updated_at": stamp,
+                }
+                _write_progress_files(targets, progress_payload)
+
         if "total" in totals_gpu and not bool(torch.isfinite(totals_gpu["total"]).all()):
             raise RuntimeError("Non-finite pose loss; checkpoint was not replaced")
         totals = {key: float(value.item()) for key, value in totals_gpu.items()}
         scheduler.step()
-        history.append({"epoch": ep, **{key: value/max(1, len(loader)) for key, value in totals.items()}})
+        epoch_summary = {"epoch": ep, **{key: value/max(1, len(loader)) for key, value in totals.items()}}
+        history.append(epoch_summary)
         print(f"[Stage 3 {FEATURE_VERSION} enhanced={enhanced}] {history[-1]}")
+        now = time.time()
+        rem_batches = max(0, epochs - ep) * total_batches
+        avg_batch_s = (now - epoch_start_time) / max(1, total_batches)
+        eta_s = rem_batches * avg_batch_s
+        pct = min(100.0, max(0.0, 100.0 * ep / max(1, epochs)))
+        progress_payload = {
+            "stage": "training",
+            "stage_display": "训练 DINOv2 姿态头",
+            "status": "completed" if ep == epochs else "running",
+            "epoch": ep,
+            "epochs": epochs,
+            "completed_batches": total_batches,
+            "batches_per_epoch": total_batches,
+            "overall_pct": round(pct, 1),
+            "epoch_elapsed_s": round(now - epoch_start_time, 1),
+            "total_elapsed_s": round(now - total_start_time, 1),
+            "eta_seconds": round(eta_s, 1),
+            "eta_str": _format_eta(eta_s) if ep < epochs else "训练完成",
+            "losses": {k: round(v / max(1, total_batches), 6) for k, v in totals.items()},
+            "history": list(history),
+            "gpu": _query_telemetry(),
+            "updated_unix": now,
+            "updated_at": datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S"),
+            "training_completed": ep == epochs,
+        }
+        _write_progress_files(targets, progress_payload)
     target = Path(out_ckpt)
     target.parent.mkdir(parents=True, exist_ok=True)
     checkpoint = {"bone_names": bone_names, "bones_meta": meta["bones"], "num_keypoints": num_keypoints,
@@ -562,11 +719,17 @@ def evaluate_epipolar_consistency_and_triangulate(
 
     enhanced = depth_front_all is not None
     if enhanced:
+        uv_f_enh = clean_uv_short_gaps_hampel(uv_front_all.astype(np.float64), scale=res_scale, max_gap=3)
+        uv_s_enh = clean_uv_short_gaps_hampel(uv_side_all.astype(np.float64), scale=res_scale, max_gap=3)
+        epipolar_dv_px = np.abs(uv_f_enh[..., 1] - uv_s_enh[..., 1])
+        epipolar_gate = np.exp(-0.5 * (epipolar_dv_px / (28.0 * res_scale)) ** 2)
+        cf_gated = np.clip(conf_front_all.astype(np.float64) * (0.35 + 0.65 * epipolar_gate), 0.01, 1.0)
+        cs_gated = np.clip(conf_side_all.astype(np.float64) * (0.35 + 0.65 * epipolar_gate), 0.01, 1.0)
         pts_3d, joint_conf = fuse_depth_visibility(
-            uv_f_clean,
-            uv_s_clean,
-            conf_f_clean,
-            conf_s_clean,
+            uv_f_enh,
+            uv_s_enh,
+            cf_gated,
+            cs_gated,
             calib,
             depth_front_all,
             depth_side_all,
@@ -575,6 +738,12 @@ def evaluate_epipolar_consistency_and_triangulate(
             logvar_front_all,
             logvar_side_all,
         )
+        pts_3d = whittaker_smooth_trajectory(
+            np.asarray(pts_3d, dtype=np.float64),
+            weights=np.asarray(joint_conf, dtype=np.float64) ** 2,
+            lam_accel=4.0,
+            lam_jerk=10.0,
+        ).astype(np.float32)
         # Adaptive confidence normalization so low-logit checkpoints never zero out stereo_valid
         cf_norm = conf_front_all / np.maximum(1e-4, np.max(conf_front_all, axis=0, keepdims=True).clip(0.25, 1.0))
         cs_norm = conf_side_all / np.maximum(1e-4, np.max(conf_side_all, axis=0, keepdims=True).clip(0.25, 1.0))
@@ -598,30 +767,31 @@ def evaluate_epipolar_consistency_and_triangulate(
         else:
             gate_passed = False
 
-    # 3D trajectory spike cleanup & zero-phase 5-tap Savitzky-Golay smoothing
-    for k in range(K):
-        b_name = bone_names[k // 2]
-        depth = int(bones_meta.get(b_name, {}).get("depth", 1)) if bones_meta else 1
-        side_valid = conf_s_clean[:, k] >= 0.45
-        if not enhanced and np.any(side_valid) and not np.all(side_valid):
-            pts_3d[:, k, 1] = short_gap_fill_1d_or_nd(pts_3d[:, k, 1], ~side_valid, max_gap=3)
+    # 3D trajectory spike cleanup & zero-phase 5-tap Savitzky-Golay smoothing (legacy non-enhanced path)
+    if not enhanced:
+        for k in range(K):
+            b_name = bone_names[k // 2]
+            depth = int(bones_meta.get(b_name, {}).get("depth", 1)) if bones_meta else 1
+            side_valid = conf_s_clean[:, k] >= 0.45
+            if np.any(side_valid) and not np.all(side_valid):
+                pts_3d[:, k, 1] = short_gap_fill_1d_or_nd(pts_3d[:, k, 1], ~side_valid, max_gap=3)
 
-        valid_mask = joint_conf[:, k] >= 0.40
-        if not enhanced and np.any(valid_mask) and not np.all(valid_mask):
-            for dim in (0, 2):
-                pts_3d[:, k, dim] = short_gap_fill_1d_or_nd(pts_3d[:, k, dim], ~valid_mask, max_gap=3)
+            valid_mask = joint_conf[:, k] >= 0.40
+            if np.any(valid_mask) and not np.all(valid_mask):
+                for dim in (0, 2):
+                    pts_3d[:, k, dim] = short_gap_fill_1d_or_nd(pts_3d[:, k, dim], ~valid_mask, max_gap=3)
 
-        if T >= 5:
-            # 5-tap symmetric quadratic Savitzky-Golay filter (preserves stride amplitude, removes high-freq noise)
-            for dim in range(3):
-                p5 = np.pad(pts_3d[:, k, dim].astype(np.float64), (2, 2), mode="edge")
-                sg = (-3.0 * p5[:-4] + 12.0 * p5[1:-3] + 17.0 * p5[2:-2] + 12.0 * p5[3:-1] - 3.0 * p5[4:]) / 35.0
-                pts_3d[:, k, dim] = sg.astype(np.float32)
-            # Light 3-tap Gaussian polish for distal limbs (depth >= 2) when not using enhanced FK solver
-            if depth >= 2 and not enhanced:
+            if T >= 5:
+                # 5-tap symmetric quadratic Savitzky-Golay filter (preserves stride amplitude, removes high-freq noise)
                 for dim in range(3):
-                    p3 = np.pad(pts_3d[:, k, dim], (1, 1), mode="edge")
-                    pts_3d[:, k, dim] = 0.22 * p3[:-2] + 0.56 * p3[1:-1] + 0.22 * p3[2:]
+                    p5 = np.pad(pts_3d[:, k, dim].astype(np.float64), (2, 2), mode="edge")
+                    sg = (-3.0 * p5[:-4] + 12.0 * p5[1:-3] + 17.0 * p5[2:-2] + 12.0 * p5[3:-1] - 3.0 * p5[4:]) / 35.0
+                    pts_3d[:, k, dim] = sg.astype(np.float32)
+                # Light 3-tap Gaussian polish for distal limbs (depth >= 2) when not using enhanced FK solver
+                if depth >= 2:
+                    for dim in range(3):
+                        p3 = np.pad(pts_3d[:, k, dim], (1, 1), mode="edge")
+                        pts_3d[:, k, dim] = 0.22 * p3[:-2] + 0.56 * p3[1:-1] + 0.22 * p3[2:]
 
     classified_meta = classify_rig_bones(bones_meta) if bones_meta else None
     if enhanced and classified_meta:
@@ -1051,10 +1221,11 @@ def main() -> None:
     parser.add_argument("--video_frames_dir", help="Directory of extracted video frames for Stage 5/6")
     parser.add_argument("--out_json", help="Output JSON report or 3D trajectory file")
     parser.add_argument("--epochs", type=int, default=15)
+    parser.add_argument("--progress_file", help="Path to write training progress JSON")
     args = parser.parse_args()
 
     if args.mode == "train":
-        train_monster_dinov2_probe(args.synth_dir, args.meta_path, args.ckpt_path, epochs=args.epochs)
+        train_monster_dinov2_probe(args.synth_dir, args.meta_path, args.ckpt_path, epochs=args.epochs, progress_file=args.progress_file)
     elif args.mode == "exam":
         evaluate_stage4_studio_exam(args.ckpt_path, args.exam_dir, args.out_json)
     elif args.mode == "triangulate_video":

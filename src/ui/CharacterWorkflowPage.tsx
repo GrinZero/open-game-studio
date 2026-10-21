@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   ReactFlow,
   Background,
@@ -60,6 +60,17 @@ import {
   useAssetFileUrl,
 } from "./api";
 import { ModelPreview } from "./ModelPreview";
+import { characterLaunch } from "./workbench-launch";
+import {
+  CharacterSourceDialog,
+  CharacterTaskDialog,
+} from "./CharacterCreationDialog";
+import {
+  CHARACTER_STAGE_GUIDANCE,
+  nodeGuidance,
+  viewNodeKey,
+} from "./character-workflow-guidance";
+import { VrmPreview, type VrmViewerSettings } from "./VrmPreview";
 
 function triggerDownload(projectId: string, revisionId: string, index = 0) {
   const route = fileUrl(projectId, revisionId, index);
@@ -88,6 +99,37 @@ function RevisionModelViewer({
     );
   }
   return <ModelPreview src={url} name={name} interactive detailed />;
+}
+
+function RevisionVrmViewer({
+  projectId,
+  revisionId,
+  name,
+  settings,
+  onSettingsChange,
+}: {
+  projectId: string;
+  revisionId: string;
+  name: string;
+  settings: VrmViewerSettings;
+  onSettingsChange: (change: Partial<VrmViewerSettings>) => void;
+}) {
+  const { url, error } = useAssetFileUrl(projectId, revisionId, 0);
+  if (!url)
+    return (
+      <div className="char-slot-placeholder" role={error ? "alert" : "status"}>
+        {error || "加载 VRM 文件中…"}
+      </div>
+    );
+  return (
+    <VrmPreview
+      key={url}
+      src={url}
+      name={name}
+      initialSettings={settings}
+      onSettingsChange={onSettingsChange}
+    />
+  );
 }
 
 interface LocalCharakuruProjectInfo {
@@ -184,18 +226,20 @@ function RevisionImageThumb({
   revisionId,
   alt,
   showGuides,
+  emptyState,
 }: {
   projectId: string;
   revisionId?: string;
   alt: string;
   showGuides?: boolean;
+  emptyState?: ReactNode;
 }) {
   const { url, error } = useAssetFileUrl(projectId, revisionId, 0);
   if (!revisionId) {
     return (
       <div className="char-slot-placeholder">
         <ImageIcon size={20} />
-        <span>尚未生成</span>
+        <span>{emptyState || "等待制作，请查看本阶段的操作指引。"}</span>
       </div>
     );
   }
@@ -216,6 +260,68 @@ function RevisionImageThumb({
           <span className="guide-line waist" title="腰臀线基准 (Waist/Hip)" />
           <span className="guide-line knee" title="膝/裙摆线基准 (Knee/Hem)" />
         </div>
+      )}
+    </div>
+  );
+}
+
+function CharacterSourcePicker({
+  projectId,
+  assets,
+  value,
+  disabled,
+  onChange,
+  onUpload,
+}: {
+  projectId: string;
+  assets: Asset[];
+  value: string;
+  disabled: boolean;
+  onChange: (revisionId: string) => void;
+  onUpload: (file: File) => Promise<void>;
+}) {
+  return (
+    <div className="char-source-picker">
+      <label className="field">
+        角色原画
+        <select
+          aria-label="角色原画"
+          value={value}
+          disabled={disabled}
+          onChange={(e) => onChange(e.target.value)}
+        >
+          <option value="">请选择角色原画</option>
+          {assets.map((asset) => (
+            <optgroup key={asset.id} label={asset.name}>
+              {asset.revisions.map((rev) => (
+                <option key={rev.id} value={rev.id}>
+                  {asset.name} · v{rev.number}
+                </option>
+              ))}
+            </optgroup>
+          ))}
+        </select>
+      </label>
+      <label className="field">
+        或上传原画
+        <input
+          aria-label="或上传原画"
+          type="file"
+          accept="image/png,image/jpeg,image/webp"
+          disabled={disabled}
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            e.target.value = "";
+            if (file) void onUpload(file);
+          }}
+        />
+      </label>
+      {value && (
+        <RevisionImageThumb
+          projectId={projectId}
+          revisionId={value}
+          alt="已选角色原画预览"
+        />
       )}
     </div>
   );
@@ -253,7 +359,11 @@ function DagFlowNodeCard({ data }: NodeProps) {
       </div>
       <div className="char-dag-node-title">{node.title}</div>
       <div className="char-dag-node-meta">
-        <span>{ node.stale ? "需重跑 (Stale)" : statusLabelMap[node.status] || node.status }</span>
+        <span>
+          {node.stale
+            ? "需重跑 (Stale)"
+            : statusLabelMap[node.status] || node.status}
+        </span>
         {node.outputRevisionIds.length > 0 && (
           <span className="mono">×{node.outputRevisionIds.length}</span>
         )}
@@ -262,9 +372,13 @@ function DagFlowNodeCard({ data }: NodeProps) {
         <div className="char-dag-lease-bar">
           <div
             className="char-dag-lease-fill"
-            style={{ width: `${Math.min(100, Math.max(8, node.lease.progress))}%` }}
+            style={{
+              width: `${Math.min(100, Math.max(8, node.lease.progress))}%`,
+            }}
           />
-          <small>{node.lease.agentName} ({node.lease.progress}%)</small>
+          <small>
+            {node.lease.agentName} ({node.lease.progress}%)
+          </small>
         </div>
       )}
       <Handle type="source" position={Position.Right} />
@@ -298,10 +412,14 @@ export function CharacterWorkflowPage({
     [runs, activeRunId],
   );
 
-  const [activeStage, setActiveStage] =
-    useState<CharacterStageGroup>("reference");
+  const launchedNode = run?.dag?.find(
+    (node) => node.key === characterLaunch(s.project.id)?.nodeKey,
+  );
+  const [activeStage, setActiveStage] = useState<CharacterStageGroup>(
+    launchedNode?.stageGroup || "reference",
+  );
   const [selectedNodeKey, setSelectedNodeKey] = useState<string>(
-    "head_multiview",
+    launchedNode?.key || "head_multiview",
   );
   const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
@@ -309,12 +427,20 @@ export function CharacterWorkflowPage({
     LocalCharakuruProjectInfo[]
   >([]);
   const [showAgentProtocol, setShowAgentProtocol] = useState(false);
+  const [showFlow, setShowFlow] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newCharName, setNewCharName] = useState("新二次元角色");
   const [newCharPrompt, setNewCharPrompt] = useState(
     "日系二次元 3D 角色，MToon 赛璐璐材质，VRM 1.0 标准 55 骨骼 + SpringBone 物理摇摆",
   );
   const [newCharImageRevId, setNewCharImageRevId] = useState("");
+  const [sourcePickerRunId, setSourcePickerRunId] = useState<string>();
+  const [replacementSourceRevId, setReplacementSourceRevId] = useState("");
+  const [codexTarget, setCodexTarget] = useState<{
+    runId: string;
+    nodeKey: string;
+    slotKey?: MultiviewSlotKey;
+  }>();
   const [customCharakitPath, setCustomCharakitPath] = useState("");
   const [gateComment, setGateComment] = useState("");
   const [slotEditPrompts, setSlotEditPrompts] = useState<
@@ -357,8 +483,7 @@ export function CharacterWorkflowPage({
           id: `${dep}->${n.key}`,
           source: dep,
           target: n.key,
-          animated:
-            n.status === "running" || n.status.startsWith("awaiting_"),
+          animated: n.status === "running" || n.status.startsWith("awaiting_"),
           markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14 },
           style: {
             stroke:
@@ -387,11 +512,86 @@ export function CharacterWorkflowPage({
     return map;
   }, [s.assets]);
 
+  function openSourceDialog() {
+    if (!run) return;
+    setReplacementSourceRevId(state?.views.original.revisionId || "");
+    setErrorMsg("");
+    setSourcePickerRunId(run.id);
+  }
+
+  function focusNode(key: string) {
+    const node = dagNodes.find((item) => item.key === key);
+    if (!node) return;
+    setActiveStage(node.stageGroup);
+    setSelectedNodeKey(key);
+    document
+      .getElementById("character-stage-guide")
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function openNodeTask(key: string, slotKey?: MultiviewSlotKey) {
+    if (!run) return;
+    const guidance = nodeGuidance(run, key);
+    if (guidance.blockedBy.length) {
+      focusNode(guidance.blockedBy[0]!.key);
+      return;
+    }
+    if (guidance.running) {
+      focusNode(key);
+      return;
+    }
+    if (key === "source_illustration") {
+      openSourceDialog();
+      return;
+    }
+    setSelectedNodeKey(key);
+    setActiveStage(guidance.node!.stageGroup);
+    setCodexTarget({ runId: run.id, nodeKey: key, slotKey });
+  }
+
+  function emptyNode(key: string, slotKey?: MultiviewSlotKey) {
+    if (!run) return null;
+    const guidance = nodeGuidance(run, key);
+    return (
+      <span className="character-empty-guidance">
+        <strong>
+          {guidance.running
+            ? "正在制作"
+            : guidance.blockedBy.length
+              ? "等待前置步骤"
+              : "等待制作"}
+        </strong>
+        <span>{guidance.reason}</span>
+        <button
+          type="button"
+          className="button small"
+          disabled={busy || guidance.running}
+          onClick={() => openNodeTask(key, slotKey)}
+        >
+          {guidance.blockedBy.length
+            ? "前往前置步骤"
+            : key === "source_illustration"
+              ? "选择或生成原画"
+              : "与 Codex 制作"}
+        </button>
+      </span>
+    );
+  }
+
   async function invokeAction<T = WorkflowRun>(
     action: string,
     body: Record<string, unknown>,
     successMsg?: string,
   ): Promise<T | undefined> {
+    if (action === "advance-node") {
+      openNodeTask(String(body.nodeKey));
+      return undefined;
+    }
+    if (action === "edit-view" && !body.revisionId) {
+      const slotKey = body.slotKey as MultiviewSlotKey;
+      openNodeTask(viewNodeKey(slotKey), slotKey);
+      return undefined;
+    }
     setBusy(true);
     setErrorMsg("");
     try {
@@ -399,6 +599,7 @@ export function CharacterWorkflowPage({
         `/api/projects/${s.project.id}/character-workflow/${action}`,
         {
           method: "POST",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
         },
       );
@@ -428,6 +629,10 @@ export function CharacterWorkflowPage({
   }
 
   async function handleCreateRun() {
+    if (!newCharImageRevId) {
+      setErrorMsg("请先选择或上传角色原画");
+      return;
+    }
     const created = await invokeAction<WorkflowRun>(
       "create",
       {
@@ -435,32 +640,43 @@ export function CharacterWorkflowPage({
         stylePrompt: newCharPrompt,
         sourceImageRevisionId: newCharImageRevId || undefined,
       },
-      `已创建角色工作流：${newCharName}`,
+      `已创建角色：${newCharName}`,
     );
     if (created?.id) {
       onSelectRun(created.id);
       setShowCreateModal(false);
+      setNewCharImageRevId("");
     }
   }
 
-  async function handleAutoAdvance() {
+  async function uploadSourceImage(file: File, select: (id: string) => void) {
+    setBusy(true);
+    setErrorMsg("");
+    try {
+      const form = new FormData();
+      form.append("files", file);
+      const revision = await request<AssetRevision>(
+        `/api/projects/${s.project.id}/import`,
+        { method: "POST", body: form },
+      );
+      await refresh();
+      select(revision.id);
+    } catch (error) {
+      setErrorMsg(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function handleAutoAdvance() {
     if (!run) return;
-    const res = await invokeAction<{
-      run: WorkflowRun;
-      advancedNodes: string[];
-      stoppedAtGate?: string;
-    }>("auto-advance", { runId: run.id });
-    if (res) {
-      const gateNode = res.run.dag?.find((n) => n.key === res.stoppedAtGate);
-      if (gateNode) {
-        setActiveStage(gateNode.stageGroup);
-        setSelectedNodeKey(gateNode.key);
-        notify(
-          `已推进 ${res.advancedNodes.length} 个节点，停在审核把关：${gateNode.title}`,
-        );
-      } else {
-        notify(`已自动推进 ${res.advancedNodes.length} 个 DAG 节点`);
-      }
+    const next = dagNodes.find((node) => {
+      const guidance = nodeGuidance(run, node.key);
+      return guidance.ready && !guidance.complete;
+    });
+    if (next) {
+      if (next.mode === "review") focusNode(next.key);
+      else openNodeTask(next.key);
     }
   }
 
@@ -492,25 +708,8 @@ export function CharacterWorkflowPage({
     }
   }
 
-  async function handleSyncToCodex() {
-    if (!run) return;
-    const summaryText = [
-      `# Open Game Studio · 角色工作流 DAG 上下文`,
-      `- 项目: ${s.project.name} (${s.project.id})`,
-      `- 项目根目录: ${s.project.root}`,
-      `- 当前运行: ${run.id} (版本 v${run.revision})`,
-      `- 角色名称: ${state?.characterName || "角色"}`,
-      `- 当前选中 DAG 节点: ${selectedDagNode?.key} (${selectedDagNode?.title}) [${selectedDagNode?.status}]`,
-      `- 头部选型: ${state?.selectedHeadCandidateId || "未选"} | 身体选型: ${state?.selectedBodyCandidateId || "未选"}`,
-      `- 外部 Agent 认领协议: POST /api/projects/${s.project.id}/character-workflow/claim (支持并行认领 head_multiview / body_multiview / head_candidates / body_candidates / retexture_*)`,
-      `- MCP 工具调用: job_control(action="claim_dag_node"|"advance_dag_node"|"auto_advance_dag") 或 workflow_submit_artifact(stepKey="${selectedDagNode?.key}")`,
-    ].join("\n");
-    try {
-      await navigator.clipboard.writeText(summaryText);
-      notify("已复制角色工作流 DAG 上下文与 Agent 接入指令到剪贴板");
-    } catch {
-      notify("已准备角色工作流上下文");
-    }
+  function handleSyncToCodex() {
+    if (selectedDagNode) openNodeTask(selectedDagNode.key);
   }
 
   async function handleExportVrmBundle() {
@@ -518,26 +717,16 @@ export function CharacterWorkflowPage({
     setBusy(true);
     setErrorMsg("");
     try {
-      // First ensure vrm_export node is completed
-      const exportedRun = await request<WorkflowRun>(
-        `/api/projects/${s.project.id}/character-workflow/advance-node`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            runId: run.id,
-            nodeKey: "vrm_export",
-            executor: "local",
-          }),
-        },
-      );
-      const vrmRevId =
-        exportedRun.dagState?.vrmDelivery.vrmRevisionId ||
-        exportedRun.steps[7]?.inputRevisionIds[0];
+      const vrmRevId = state?.vrmDelivery.vrmRevisionId;
+      if (!vrmRevId) {
+        openNodeTask("vrm_export");
+        return;
+      }
       if (vrmRevId) {
         await call("export_bundle", {
           projectId: s.project.id,
           revisionIds: [vrmRevId],
-          idempotencyKey: `vrm-export-${run.id}-${exportedRun.revision}`,
+          idempotencyKey: `vrm-export-${run.id}-${run.revision}`,
         });
       }
       await refresh();
@@ -560,9 +749,9 @@ export function CharacterWorkflowPage({
         <div className="char-page-title-block">
           <div className="char-title-row">
             <Workflow size={20} />
-            <h1>角色工作流 · 全流程有向无环图 (DAG)</h1>
+            <h1>角色制作</h1>
             <span className="char-badge accent">
-              {completedDagCount} / {dagNodes.length || 23} 节点已就绪
+              {completedDagCount} / {dagNodes.length || 23} 步骤已完成
             </span>
             {run?.branchFrom && (
               <button
@@ -583,7 +772,9 @@ export function CharacterWorkflowPage({
             )}
           </div>
           <p className="char-subtitle">
-            从单张角色立绘到可商用 VRM 1.0 成品：支持头/身并行多视图、4×2 候选分支选型、168+ 部件自动分群、5 路并行 4K 贴图、61 点关节 Marker 与 90 帧 SpringBone 物理验证。
+            从单张角色立绘到可商用 VRM 1.0 成品：支持头/身并行多视图、4×2
+            候选分支选型、168+ 部件自动分群、5 路并行 4K 贴图、61 点关节 Marker
+            与 90 帧 SpringBone 物理验证。
           </p>
         </div>
 
@@ -615,7 +806,7 @@ export function CharacterWorkflowPage({
             onClick={() => setShowCreateModal(!showCreateModal)}
           >
             <Sparkles size={14} />
-            新建角色工作流
+            新建角色
           </button>
           {localCharakuru.length > 0 && (
             <button
@@ -638,16 +829,14 @@ export function CharacterWorkflowPage({
             className="button small"
             onClick={() => setShowAgentProtocol(!showAgentProtocol)}
           >
-            <Terminal size={14} />
-            多 Agent 接入协议
+            <Terminal size={14} />多 Agent 接入协议
           </button>
           <button
             type="button"
             className="button small"
             onClick={handleSyncToCodex}
           >
-            <Copy size={14} />
-            同步到 Codex
+            <Copy size={14} />在 Codex 中处理当前步骤
           </button>
           {run && (
             <button
@@ -657,7 +846,7 @@ export function CharacterWorkflowPage({
               onClick={handleAutoAdvance}
             >
               <Play size={14} />
-              推进至下一审核关卡
+              查看下一步
             </button>
           )}
         </div>
@@ -674,7 +863,7 @@ export function CharacterWorkflowPage({
       {showCreateModal && (
         <div className="char-drawer-card">
           <div className="char-drawer-head">
-            <h3>新建角色工作流 / 导入 .charakit 归档</h3>
+            <h3>新建角色 / 导入 .charakit 归档</h3>
             <button
               type="button"
               className="button small"
@@ -685,7 +874,7 @@ export function CharacterWorkflowPage({
           </div>
           <div className="char-create-grid">
             <div className="char-create-col">
-              <h4>从项目原画启动新角色 DAG</h4>
+              <h4>选择原画，创建角色</h4>
               <label className="field">
                 角色名称
                 <input
@@ -694,20 +883,16 @@ export function CharacterWorkflowPage({
                   placeholder="例如：星铸巡林者"
                 />
               </label>
-              <label className="field">
-                原画立绘资源（可选）
-                <select
-                  value={newCharImageRevId}
-                  onChange={(e) => setNewCharImageRevId(e.target.value)}
-                >
-                  <option value="">自动选用项目首张立绘或稍后上传</option>
-                  {imageAssets.map((a) => (
-                    <option key={a.id} value={a.latestRevisionId}>
-                      {a.name} (v{a.revisions[0]?.number || 1})
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <CharacterSourcePicker
+                projectId={s.project.id}
+                assets={imageAssets}
+                value={newCharImageRevId}
+                disabled={busy}
+                onChange={setNewCharImageRevId}
+                onUpload={(file) =>
+                  uploadSourceImage(file, setNewCharImageRevId)
+                }
+              />
               <label className="field">
                 风格与规格要求
                 <textarea
@@ -719,11 +904,11 @@ export function CharacterWorkflowPage({
               <button
                 type="button"
                 className="button small primary"
-                disabled={busy}
+                disabled={busy || !newCharImageRevId}
                 onClick={handleCreateRun}
               >
                 <Play size={14} />
-                创建并初始化 23 节点 DAG
+                创建角色
               </button>
             </div>
             <div className="char-create-col">
@@ -781,9 +966,13 @@ export function CharacterWorkflowPage({
         <div className="char-drawer-card protocol">
           <div className="char-drawer-head">
             <div>
-              <h3>多 Agent 接入与并行任务认领协议 (External Agent DAG Protocol)</h3>
+              <h3>
+                多 Agent 接入与并行任务认领协议 (External Agent DAG Protocol)
+              </h3>
               <p className="muted">
-                无需手动复制 SKILL：Codex、Claude Code、Blender MCP Worker 或 Tripo Worker 可直接通过 MCP 工具或 HTTP 接口并发认领就绪节点、续期租约并回填不可变版本。
+                无需手动复制 SKILL：Codex、Claude Code、Blender MCP Worker 或
+                Tripo Worker 可直接通过 MCP 工具或 HTTP
+                接口并发认领就绪节点、续期租约并回填不可变版本。
               </p>
             </div>
             <button
@@ -798,7 +987,10 @@ export function CharacterWorkflowPage({
             <div className="char-protocol-box">
               <strong>1. 查询可并行认领节点 (GET)</strong>
               <pre className="mono">{`GET /api/projects/${s.project.id}/character-workflow/claimable${run ? `?runId=${run.id}` : ""}`}</pre>
-              <small>返回所有处于 awaiting_agent / stale 的并行节点、冻结输入文件绝对路径及技能契约。</small>
+              <small>
+                返回所有处于 awaiting_agent / stale
+                的并行节点、冻结输入文件绝对路径及技能契约。
+              </small>
             </div>
             <div className="char-protocol-box">
               <strong>2. 认领节点并获取租约 (POST / MCP)</strong>
@@ -810,7 +1002,13 @@ export function CharacterWorkflowPage({
   "agentName": "Tripo 3D Agent",
   "leaseSeconds": 300
 }`}</pre>
-              <small>或调用 MCP 工具：<code>job_control(action="claim_dag_node", nodeKey="{selectedDagNode?.key || "head_multiview"}")</code></small>
+              <small>
+                或调用 MCP 工具：
+                <code>
+                  job_control(action="claim_dag_node", nodeKey="
+                  {selectedDagNode?.key || "head_multiview"}")
+                </code>
+              </small>
             </div>
             <div className="char-protocol-box">
               <strong>3. 提交节点产物并解锁下游 (POST / MCP)</strong>
@@ -821,7 +1019,14 @@ export function CharacterWorkflowPage({
   "fileRefs": ["/abs/path/to/output.png"],
   "note": "Agent 完成制作"
 }`}</pre>
-              <small>或调用 MCP 工具：<code>workflow_submit_artifact(stepKey="{selectedDagNode?.key || "head_multiview"}", revisionIds=[...])</code></small>
+              <small>
+                或调用 MCP 工具：
+                <code>
+                  workflow_submit_artifact(stepKey="
+                  {selectedDagNode?.key || "head_multiview"}",
+                  revisionIds=[...])
+                </code>
+              </small>
             </div>
           </div>
         </div>
@@ -830,19 +1035,23 @@ export function CharacterWorkflowPage({
       {!run || !state ? (
         <div className="char-empty-hero">
           <Workflow size={40} />
-          <h2>开始你的第一个 3D 角色工作流 (DAG)</h2>
+          <h2>创建你的第一个 3D 角色</h2>
           <p>
-            支持直接从单张立绘启动 23 节点全流程制作，或一键导入本机 Charakuru 角色工程（含 8 向部位图、头/身 3D 候选、168 部件拆解、贴图引导图与导出 VRM）。
+            支持直接从单张立绘启动 23 节点全流程制作，或一键导入本机 Charakuru
+            角色工程（含 8 向部位图、头/身 3D 候选、168
+            部件拆解、贴图引导图与导出 VRM）。
           </p>
-          <div style={{ display: "flex", gap: "12px", justifyContent: "center" }}>
+          <div
+            style={{ display: "flex", gap: "12px", justifyContent: "center" }}
+          >
             <button
               type="button"
               className="button primary"
               disabled={busy}
-              onClick={handleCreateRun}
+              onClick={() => setShowCreateModal(true)}
             >
               <Sparkles size={15} />
-              新建角色工作流
+              新建角色
             </button>
             {localCharakuru.length > 0 && (
               <button
@@ -864,178 +1073,244 @@ export function CharacterWorkflowPage({
         </div>
       ) : (
         <>
-          {/* Interactive DAG Graph + Node Inspector */}
-          <div className="char-dag-board-wrap">
-            <div className="char-dag-flow-canvas">
-              <div className="char-dag-board-toolbar">
-                <span>
-                  <strong>DAG 拓扑图</strong> · 点击任意节点可定位对应工作台或单独指派 Agent
-                </span>
-                <div className="char-dag-legend">
-                  <span><i className="dot succeeded" /> 已完成</span>
-                  <span><i className="dot ready" /> 就绪可认领</span>
-                  <span><i className="dot running" /> Agent 执行中</span>
-                  <span><i className="dot gate" /> 审核关卡 (Gate)</span>
-                  <span><i className="dot stale" /> 上游变更需重跑</span>
-                </div>
-              </div>
-              <ReactFlow
-                nodes={flowNodes}
-                edges={flowEdges}
-                nodeTypes={dagNodeTypes}
-                fitView
-                minZoom={0.25}
-                maxZoom={1.5}
-                style={{ background: "var(--bg-surface)" }}
-                proOptions={{ hideAttribution: true }}
-                onNodeClick={(_e, node) => {
-                  setSelectedNodeKey(node.id);
-                  const found = dagNodes.find((d) => d.key === node.id);
-                  if (found) setActiveStage(found.stageGroup);
-                }}
+          <section className="character-next-actions" aria-label="现在该做什么">
+            <div>
+              <span className="character-guide-kicker">现在该做什么</span>
+              <h2>
+                {state.views.original.revisionId
+                  ? "先确认原画，再完成下面的制作"
+                  : "先准备角色原画"}
+              </h2>
+              <p>
+                左侧对话提出要求，制作结果会自动更新到这里。 原画 → 多视图 → 3D
+                候选 → 拆解贴图 → 比例与绑定 → 动作检查 → 交付
+              </p>
+              {state.views.original.revisionId && (
+                <p>
+                  当前原画：
+                  <strong>
+                    {revLookup.get(state.views.original.revisionId)?.asset
+                      .name || "已选图片"}
+                  </strong>
+                  。请确认它就是要制作的角色。
+                </p>
+              )}
+              <button
+                type="button"
+                className="button small"
+                onClick={openSourceDialog}
               >
-                <Background gap={20} size={1} />
-                <Controls showInteractive={false} />
-              </ReactFlow>
+                查看或更换原画
+              </button>
             </div>
-
-            {selectedDagNode && (
-              <div className="char-dag-node-inspector">
-                <div className="char-node-insp-head">
-                  <div>
-                    <span className="mono muted">{selectedDagNode.key}</span>
-                    <h3>{selectedDagNode.title}</h3>
-                  </div>
-                  <span className={`char-badge ${selectedDagNode.status === "succeeded" && !selectedDagNode.stale ? "green" : "accent"}`}>
-                    {selectedDagNode.stale
-                      ? "上游已变更 (Stale)"
-                      : statusLabelMap[selectedDagNode.status] ||
-                        selectedDagNode.status}
-                  </span>
-                </div>
-                <p className="char-node-desc">{selectedDagNode.description}</p>
-                <div className="char-node-kv">
-                  <div>
-                    <small>前置依赖节点</small>
-                    <code className="mono">
-                      {selectedDagNode.dependsOn.length
-                        ? selectedDagNode.dependsOn.join(", ")
-                        : "无 (起始节点)"}
-                    </code>
-                  </div>
-                  <div>
-                    <small>绑定技能契约</small>
-                    <code className="mono">
-                      {selectedDagNode.agentSkill || "人工确认关卡"}
-                    </code>
-                  </div>
-                  <div>
-                    <small>输入/输出不可变版本</small>
-                    <code className="mono">
-                      输入 {selectedDagNode.inputRevisionIds.length} · 产出{" "}
-                      {selectedDagNode.outputRevisionIds.length}
-                    </code>
-                  </div>
-                </div>
-                {selectedDagNode.lease && (
-                  <div className="char-node-lease-box">
-                    <strong>
-                      当前租约：{selectedDagNode.lease.agentName} (
-                      {selectedDagNode.lease.progress}%)
-                    </strong>
-                    <p>{selectedDagNode.lease.message}</p>
-                  </div>
-                )}
-                <div className="char-node-actions">
-                  {selectedDagNode.mode !== "review" ? (
-                    <>
-                      <button
-                        type="button"
-                        className="button small primary"
-                        disabled={busy}
-                        onClick={() =>
-                          invokeAction(
-                            "advance-node",
-                            {
-                              runId: run.id,
-                              nodeKey: selectedDagNode.key,
-                              executor: "local",
-                            },
-                            `已完成节点：${selectedDagNode.title}`,
-                          )
-                        }
-                      >
-                        <Play size={13} />
-                        立即执行此节点
-                      </button>
-                      <button
-                        type="button"
-                        className="button small"
-                        disabled={busy}
-                        onClick={() =>
-                          invokeAction(
-                            "advance-node",
-                            {
-                              runId: run.id,
-                              nodeKey: selectedDagNode.key,
-                              executor: "codex",
-                            },
-                            `已派发给本机 Codex：${selectedDagNode.title}`,
-                          )
-                        }
-                      >
-                        <Cpu size={13} />
-                        派发给 Codex
-                      </button>
-                      <button
-                        type="button"
-                        className="button small"
-                        disabled={busy}
-                        onClick={() =>
-                          invokeAction(
-                            "claim",
-                            {
-                              runId: run.id,
-                              nodeKey: selectedDagNode.key,
-                              agentId: "studio-operator",
-                              agentName: "Studio External Agent",
-                            },
-                            `已认领节点租约：${selectedDagNode.title}`,
-                          )
-                        }
-                      >
-                        <Terminal size={13} />
-                        模拟外部 Agent 认领
-                      </button>
-                    </>
-                  ) : (
+            <div className="character-next-list">
+              {dagNodes
+                .filter((node) => {
+                  const guidance = nodeGuidance(run, node.key);
+                  return guidance.ready && !guidance.complete;
+                })
+                .slice(0, 3)
+                .map((node) => (
+                  <div key={node.key}>
+                    <strong>{node.title}</strong>
+                    <p>{nodeGuidance(run, node.key).reason}</p>
                     <button
                       type="button"
                       className="button small primary"
                       disabled={busy}
                       onClick={() =>
-                        invokeAction(
-                          "decide-gate",
-                          {
-                            runId: run.id,
-                            nodeKey: selectedDagNode.key,
-                            decision: "accept",
-                            comment:
-                              gateComment || `审核通过：${selectedDagNode.title}`,
-                          },
-                          `已通过审核关卡：${selectedDagNode.title}`,
-                        )
+                        node.mode === "review"
+                          ? focusNode(node.key)
+                          : openNodeTask(node.key)
                       }
                     >
-                      <CheckCircle2 size={13} />
-                      通过此审核关卡
+                      {node.mode === "review"
+                        ? "去检查并审核"
+                        : node.key === "source_illustration"
+                          ? "选择或生成原画"
+                          : `与 Codex 制作${node.title.replace("生成", "")}`}
                     </button>
-                  )}
+                  </div>
+                ))}
+              {!dagNodes.some((node) => {
+                const guidance = nodeGuidance(run, node.key);
+                return guidance.ready && !guidance.complete;
+              }) && (
+                <p>
+                  {run.status === "succeeded"
+                    ? "制作已完成，可以前往交付页预览和下载。"
+                    : "当前任务正在制作，进度与结果会自动更新。"}
+                </p>
+              )}
+              <p className="panel-hint">
+                与左侧 Codex 对话协作，制作进度和产物会自动同步到这里。
+              </p>
+            </div>
+          </section>
+          <button
+            type="button"
+            className="button small character-flow-toggle"
+            aria-expanded={showFlow}
+            onClick={() => setShowFlow(!showFlow)}
+          >
+            {showFlow ? "收起流程图与步骤详情" : "查看流程图与步骤详情"}
+          </button>
+          {showFlow && (
+            <>
+              {/* Interactive DAG Graph + Node Inspector */}
+              <div className="char-dag-board-wrap">
+                <div className="char-dag-flow-canvas">
+                  <div className="char-dag-board-toolbar">
+                    <span>
+                      <strong>DAG 拓扑图</strong> ·
+                      点击任意节点可定位对应工作台或单独指派 Agent
+                    </span>
+                    <div className="char-dag-legend">
+                      <span>
+                        <i className="dot succeeded" /> 已完成
+                      </span>
+                      <span>
+                        <i className="dot ready" /> 就绪可认领
+                      </span>
+                      <span>
+                        <i className="dot running" /> Agent 执行中
+                      </span>
+                      <span>
+                        <i className="dot gate" /> 审核关卡 (Gate)
+                      </span>
+                      <span>
+                        <i className="dot stale" /> 上游变更需重跑
+                      </span>
+                    </div>
+                  </div>
+                  <ReactFlow
+                    nodes={flowNodes}
+                    edges={flowEdges}
+                    nodeTypes={dagNodeTypes}
+                    fitView
+                    minZoom={0.25}
+                    maxZoom={1.5}
+                    style={{ background: "var(--bg-surface)" }}
+                    proOptions={{ hideAttribution: true }}
+                    onNodeClick={(_e, node) => {
+                      setSelectedNodeKey(node.id);
+                      const found = dagNodes.find((d) => d.key === node.id);
+                      if (found) setActiveStage(found.stageGroup);
+                    }}
+                  >
+                    <Background gap={20} size={1} />
+                    <Controls showInteractive={false} />
+                  </ReactFlow>
                 </div>
-              </div>
-            )}
-          </div>
 
+                {selectedDagNode && (
+                  <div className="char-dag-node-inspector">
+                    <div className="char-node-insp-head">
+                      <div>
+                        <span className="mono muted">
+                          {selectedDagNode.key}
+                        </span>
+                        <h3>{selectedDagNode.title}</h3>
+                      </div>
+                      <span
+                        className={`char-badge ${selectedDagNode.status === "succeeded" && !selectedDagNode.stale ? "green" : "accent"}`}
+                      >
+                        {selectedDagNode.stale
+                          ? "上游已变更 (Stale)"
+                          : statusLabelMap[selectedDagNode.status] ||
+                            selectedDagNode.status}
+                      </span>
+                    </div>
+                    <p className="char-node-desc">
+                      {selectedDagNode.description}
+                    </p>
+                    <div className="char-node-kv">
+                      <div>
+                        <small>前置依赖节点</small>
+                        <code className="mono">
+                          {selectedDagNode.dependsOn.length
+                            ? selectedDagNode.dependsOn.join(", ")
+                            : "无 (起始节点)"}
+                        </code>
+                      </div>
+                      <div>
+                        <small>绑定技能契约</small>
+                        <code className="mono">
+                          {selectedDagNode.agentSkill || "人工确认关卡"}
+                        </code>
+                      </div>
+                      <div>
+                        <small>输入/输出不可变版本</small>
+                        <code className="mono">
+                          输入 {selectedDagNode.inputRevisionIds.length} · 产出{" "}
+                          {selectedDagNode.outputRevisionIds.length}
+                        </code>
+                      </div>
+                    </div>
+                    {selectedDagNode.lease && (
+                      <div className="char-node-lease-box">
+                        <strong>
+                          当前租约：{selectedDagNode.lease.agentName} (
+                          {selectedDagNode.lease.progress}%)
+                        </strong>
+                        <p>{selectedDagNode.lease.message}</p>
+                      </div>
+                    )}
+                    <p className="character-node-guidance">
+                      {nodeGuidance(run, selectedDagNode.key).reason}
+                    </p>
+                    <div className="char-node-actions">
+                      {selectedDagNode.mode !== "review" ? (
+                        <button
+                          type="button"
+                          className="button small primary"
+                          disabled={
+                            busy || selectedDagNode.status === "running"
+                          }
+                          onClick={() => openNodeTask(selectedDagNode.key)}
+                        >
+                          <Cpu size={13} />
+                          {nodeGuidance(run, selectedDagNode.key).blockedBy
+                            .length
+                            ? "前往前置步骤"
+                            : selectedDagNode.key === "source_illustration"
+                              ? "选择或生成原画"
+                              : "与 Codex 制作此步骤"}
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="button small primary"
+                          disabled={
+                            busy ||
+                            !nodeGuidance(run, selectedDagNode.key).ready ||
+                            nodeGuidance(run, selectedDagNode.key).complete
+                          }
+                          onClick={() =>
+                            invokeAction(
+                              "decide-gate",
+                              {
+                                runId: run.id,
+                                nodeKey: selectedDagNode.key,
+                                decision: "accept",
+                                comment:
+                                  gateComment ||
+                                  `审核通过：${selectedDagNode.title}`,
+                              },
+                              `已通过审核关卡：${selectedDagNode.title}`,
+                            )
+                          }
+                        >
+                          <CheckCircle2 size={13} />
+                          通过此审核关卡
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
           {/* 6 Stage Navigation Tabs */}
           <div className="char-stage-tabs" role="tablist">
             {STAGE_TABS.map((tab) => {
@@ -1066,6 +1341,74 @@ export function CharacterWorkflowPage({
             })}
           </div>
 
+          <section
+            className="character-stage-guide"
+            id="character-stage-guide"
+            aria-label="本阶段操作指引"
+          >
+            <h2>{STAGE_TABS.find((tab) => tab.key === activeStage)?.title}</h2>
+            <p>
+              <strong>你需要做：</strong>
+              {CHARACTER_STAGE_GUIDANCE[activeStage].task}
+            </p>
+            <p>
+              <strong>完成后：</strong>
+              {CHARACTER_STAGE_GUIDANCE[activeStage].after}
+            </p>
+            <ol className="character-stage-checklist">
+              {dagNodes
+                .filter((node) => node.stageGroup === activeStage)
+                .map((node) => {
+                  const guidance = nodeGuidance(run, node.key);
+                  return (
+                    <li
+                      key={node.key}
+                      className={selectedNodeKey === node.key ? "current" : ""}
+                    >
+                      <span
+                        className={`character-step-status ${guidance.complete ? "complete" : ""}`}
+                      >
+                        {guidance.complete ? (
+                          <CheckCircle2 size={17} />
+                        ) : guidance.running ? (
+                          <RefreshCw size={17} />
+                        ) : (
+                          <span>
+                            {node.mode === "review" ? "审核" : "制作"}
+                          </span>
+                        )}
+                      </span>
+                      <div>
+                        <strong>{node.title}</strong>
+                        <p>{guidance.reason}</p>
+                      </div>
+                      <button
+                        type="button"
+                        className="button small"
+                        disabled={busy || guidance.running}
+                        onClick={() =>
+                          node.mode === "review" && guidance.ready
+                            ? focusNode(node.key)
+                            : openNodeTask(node.key)
+                        }
+                      >
+                        {guidance.complete
+                          ? "查看 / 调整"
+                          : guidance.running
+                            ? "制作中"
+                            : guidance.blockedBy.length
+                              ? "前往前置步骤"
+                              : node.mode === "review"
+                                ? "查看审核内容"
+                                : node.key === "source_illustration"
+                                  ? "选择或生成"
+                                  : "与 Codex 制作"}
+                      </button>
+                    </li>
+                  );
+                })}
+            </ol>
+          </section>
           {/* STAGE 1: Reference & 8-View + 3 Balance Views */}
           {activeStage === "reference" && (
             <div className="char-workbench-panel">
@@ -1073,7 +1416,8 @@ export function CharacterWorkflowPage({
                 <div>
                   <h2>阶段 1 · 8向正交部位图与全身平衡三视图工作台</h2>
                   <p>
-                    头部四视图（仅含头与发）与身体四视图（颈部以下去头 A-Pose）并行生成，配合水平对齐参考线校验眼线、肩线、腰臀线与裙摆高度。
+                    头部四视图（仅含头与发）与身体四视图（颈部以下去头
+                    A-Pose）并行生成，配合水平对齐参考线校验眼线、肩线、腰臀线与裙摆高度。
                   </p>
                 </div>
                 <div className="char-workbench-controls">
@@ -1093,7 +1437,9 @@ export function CharacterWorkflowPage({
                   <button
                     type="button"
                     className="button small"
-                    disabled={busy}
+                    disabled={
+                      busy || !nodeGuidance(run, "head_multiview").ready
+                    }
                     onClick={() =>
                       invokeAction(
                         "advance-node",
@@ -1102,12 +1448,14 @@ export function CharacterWorkflowPage({
                       )
                     }
                   >
-                    生成头部四视图
+                    与 Codex 制作头部四视图
                   </button>
                   <button
                     type="button"
                     className="button small"
-                    disabled={busy}
+                    disabled={
+                      busy || !nodeGuidance(run, "body_multiview").ready
+                    }
                     onClick={() =>
                       invokeAction(
                         "advance-node",
@@ -1116,12 +1464,16 @@ export function CharacterWorkflowPage({
                       )
                     }
                   >
-                    生成身体四视图
+                    与 Codex 制作身体四视图
                   </button>
                   <button
                     type="button"
                     className="button small primary"
-                    disabled={busy}
+                    disabled={
+                      busy ||
+                      !nodeGuidance(run, "images_gate").ready ||
+                      nodeGuidance(run, "images_gate").complete
+                    }
                     onClick={() =>
                       invokeAction(
                         "decide-gate",
@@ -1129,7 +1481,8 @@ export function CharacterWorkflowPage({
                           runId: run.id,
                           nodeKey: "images_gate",
                           decision: "accept",
-                          comment: "8向部位视图与全身平衡三视图水平线对齐确认通过",
+                          comment:
+                            "8向部位视图与全身平衡三视图水平线对齐确认通过",
                         },
                         "已确认多视图审核关卡，解锁头/身 3D 候选生成",
                       )
@@ -1162,46 +1515,63 @@ export function CharacterWorkflowPage({
                         <RevisionImageThumb
                           projectId={s.project.id}
                           revisionId={slot.revisionId}
+                          emptyState={emptyNode(viewNodeKey(slotKey), slotKey)}
                           alt={slot.label}
                           showGuides={state.placement.showHorizontalGuides}
                         />
-                        <div className="char-view-card-foot">
-                          <input
-                            value={slotEditPrompts[slotKey] || ""}
-                            onChange={(e) =>
-                              setSlotEditPrompts({
-                                ...slotEditPrompts,
-                                [slotKey]: e.target.value,
-                              })
-                            }
-                            placeholder="单图微调提示词 (如：修正袖口纹样)…"
-                          />
-                          <button
-                            type="button"
-                            className="button small"
-                            disabled={busy}
-                            onClick={() =>
-                              invokeAction(
-                                "edit-view",
-                                {
-                                  runId: run.id,
-                                  slotKey,
-                                  editPrompt:
-                                    slotEditPrompts[slotKey] || "局部重绘微调",
-                                },
-                                `已更新视图槽位：${slot.label}`,
-                              )
-                            }
-                          >
-                            单图重绘
-                          </button>
-                        </div>
+                        {slotKey === "original" ? (
+                          <div className="char-source-actions">
+                            <button
+                              type="button"
+                              className="button small"
+                              disabled={busy}
+                              onClick={openSourceDialog}
+                            >
+                              {slot.revisionId ? "更换原画" : "选择或生成原画"}
+                            </button>
+                          </div>
+                        ) : slot.revisionId ? (
+                          <div className="char-view-card-foot">
+                            <input
+                              value={slotEditPrompts[slotKey] || ""}
+                              onChange={(e) =>
+                                setSlotEditPrompts({
+                                  ...slotEditPrompts,
+                                  [slotKey]: e.target.value,
+                                })
+                              }
+                              placeholder="单图微调提示词 (如：修正袖口纹样)…"
+                            />
+                            <button
+                              type="button"
+                              className="button small"
+                              disabled={busy}
+                              onClick={() =>
+                                invokeAction(
+                                  "edit-view",
+                                  {
+                                    runId: run.id,
+                                    slotKey,
+                                    editPrompt:
+                                      slotEditPrompts[slotKey] ||
+                                      "局部重绘微调",
+                                  },
+                                  `已更新视图槽位：${slot.label}`,
+                                )
+                              }
+                            >
+                              与 Codex 调整此视图
+                            </button>
+                          </div>
+                        ) : null}
                       </div>
                     );
                   })}
                 </div>
 
-                <h3>头部正交四视图 (Head 4-Views · 眼线/耳线/发际线水平对齐)</h3>
+                <h3>
+                  头部正交四视图 (Head 4-Views · 眼线/耳线/发际线水平对齐)
+                </h3>
                 <div className="char-views-grid four">
                   {(
                     [
@@ -1221,46 +1591,53 @@ export function CharacterWorkflowPage({
                         <RevisionImageThumb
                           projectId={s.project.id}
                           revisionId={slot.revisionId}
+                          emptyState={emptyNode(viewNodeKey(slotKey), slotKey)}
                           alt={slot.label}
                           showGuides={state.placement.showHorizontalGuides}
                         />
-                        <div className="char-view-card-foot">
-                          <input
-                            value={slotEditPrompts[slotKey] || ""}
-                            onChange={(e) =>
-                              setSlotEditPrompts({
-                                ...slotEditPrompts,
-                                [slotKey]: e.target.value,
-                              })
-                            }
-                            placeholder="单张头部视图微调指令…"
-                          />
-                          <button
-                            type="button"
-                            className="button small"
-                            disabled={busy}
-                            onClick={() =>
-                              invokeAction(
-                                "edit-view",
-                                {
-                                  runId: run.id,
-                                  slotKey,
-                                  editPrompt:
-                                    slotEditPrompts[slotKey] || "头部视图微调",
-                                },
-                                `已更新头部视图：${slot.label}`,
-                              )
-                            }
-                          >
-                            重绘此视角
-                          </button>
-                        </div>
+                        {slot.revisionId && (
+                          <div className="char-view-card-foot">
+                            <input
+                              value={slotEditPrompts[slotKey] || ""}
+                              onChange={(e) =>
+                                setSlotEditPrompts({
+                                  ...slotEditPrompts,
+                                  [slotKey]: e.target.value,
+                                })
+                              }
+                              placeholder="单张头部视图微调指令…"
+                            />
+                            <button
+                              type="button"
+                              className="button small"
+                              disabled={busy}
+                              onClick={() =>
+                                invokeAction(
+                                  "edit-view",
+                                  {
+                                    runId: run.id,
+                                    slotKey,
+                                    editPrompt:
+                                      slotEditPrompts[slotKey] ||
+                                      "头部视图微调",
+                                  },
+                                  `已更新头部视图：${slot.label}`,
+                                )
+                              }
+                            >
+                              与 Codex 调整此视角
+                            </button>
+                          </div>
+                        )}
                       </div>
                     );
                   })}
                 </div>
 
-                <h3>身体去头 A-Pose 正交四视图 (Body 4-Views · 肩线/腰臀线/裙摆水平对齐)</h3>
+                <h3>
+                  身体去头 A-Pose 正交四视图 (Body 4-Views ·
+                  肩线/腰臀线/裙摆水平对齐)
+                </h3>
                 <div className="char-views-grid four">
                   {(
                     [
@@ -1280,40 +1657,44 @@ export function CharacterWorkflowPage({
                         <RevisionImageThumb
                           projectId={s.project.id}
                           revisionId={slot.revisionId}
+                          emptyState={emptyNode(viewNodeKey(slotKey), slotKey)}
                           alt={slot.label}
                           showGuides={state.placement.showHorizontalGuides}
                         />
-                        <div className="char-view-card-foot">
-                          <input
-                            value={slotEditPrompts[slotKey] || ""}
-                            onChange={(e) =>
-                              setSlotEditPrompts({
-                                ...slotEditPrompts,
-                                [slotKey]: e.target.value,
-                              })
-                            }
-                            placeholder="单张身体视图微调指令…"
-                          />
-                          <button
-                            type="button"
-                            className="button small"
-                            disabled={busy}
-                            onClick={() =>
-                              invokeAction(
-                                "edit-view",
-                                {
-                                  runId: run.id,
-                                  slotKey,
-                                  editPrompt:
-                                    slotEditPrompts[slotKey] || "身体视图微调",
-                                },
-                                `已更新身体视图：${slot.label}`,
-                              )
-                            }
-                          >
-                            重绘此视角
-                          </button>
-                        </div>
+                        {slot.revisionId && (
+                          <div className="char-view-card-foot">
+                            <input
+                              value={slotEditPrompts[slotKey] || ""}
+                              onChange={(e) =>
+                                setSlotEditPrompts({
+                                  ...slotEditPrompts,
+                                  [slotKey]: e.target.value,
+                                })
+                              }
+                              placeholder="单张身体视图微调指令…"
+                            />
+                            <button
+                              type="button"
+                              className="button small"
+                              disabled={busy}
+                              onClick={() =>
+                                invokeAction(
+                                  "edit-view",
+                                  {
+                                    runId: run.id,
+                                    slotKey,
+                                    editPrompt:
+                                      slotEditPrompts[slotKey] ||
+                                      "身体视图微调",
+                                  },
+                                  `已更新身体视图：${slot.label}`,
+                                )
+                              }
+                            >
+                              与 Codex 调整此视角
+                            </button>
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -1327,16 +1708,21 @@ export function CharacterWorkflowPage({
             <div className="char-workbench-panel">
               <div className="char-workbench-head">
                 <div>
-                  <h2>阶段 2 · 头部 ×4 与身体 ×4 3D 候选对比与非破坏分支选型</h2>
+                  <h2>
+                    阶段 2 · 头部 ×4 与身体 ×4 3D 候选对比与非破坏分支选型
+                  </h2>
                   <p>
-                    浏览候选不会意外篡改选择；点击「采用此候选」显式锁定版本。若下游已完成重贴图，切换候选将自动派生新分支 Run，原分支贴图不丢失。
+                    浏览候选不会意外篡改选择；点击「采用此候选」显式锁定版本。若下游已完成重贴图，切换候选将自动派生新分支
+                    Run，原分支贴图不丢失。
                   </p>
                 </div>
                 <div className="char-workbench-controls">
                   <button
                     type="button"
                     className="button small"
-                    disabled={busy}
+                    disabled={
+                      busy || !nodeGuidance(run, "head_candidates").ready
+                    }
                     onClick={() =>
                       invokeAction(
                         "advance-node",
@@ -1345,12 +1731,14 @@ export function CharacterWorkflowPage({
                       )
                     }
                   >
-                    生成头部 4 候选
+                    与 Codex 制作头部 4 候选
                   </button>
                   <button
                     type="button"
                     className="button small"
-                    disabled={busy}
+                    disabled={
+                      busy || !nodeGuidance(run, "body_candidates").ready
+                    }
                     onClick={() =>
                       invokeAction(
                         "advance-node",
@@ -1359,13 +1747,15 @@ export function CharacterWorkflowPage({
                       )
                     }
                   >
-                    生成身体 4 候选
+                    与 Codex 制作身体 4 候选
                   </button>
                   <button
                     type="button"
                     className="button small primary"
                     disabled={
                       busy ||
+                      !nodeGuidance(run, "candidates_gate").ready ||
+                      nodeGuidance(run, "candidates_gate").complete ||
                       !state.selectedHeadCandidateId ||
                       !state.selectedBodyCandidateId
                     }
@@ -1388,7 +1778,10 @@ export function CharacterWorkflowPage({
                 </div>
               </div>
 
-              <h3>头部 3D 候选 (Head Candidates 1–4) · 当前采用：{state.selectedHeadCandidateId || "未选择"}</h3>
+              <h3>
+                头部 3D 候选 (Head Candidates 1–4) · 当前采用：
+                {state.selectedHeadCandidateId || "未选择"}
+              </h3>
               <div className="char-candidates-grid">
                 {state.headCandidates.map((cand) => {
                   const isSelected = state.selectedHeadCandidateId === cand.id;
@@ -1406,28 +1799,41 @@ export function CharacterWorkflowPage({
                         </span>
                       </div>
                       <div className="char-candidate-preview">
-                        <RevisionImageThumb
-                          projectId={s.project.id}
-                          revisionId={
-                            cand.previewRevisionId ||
-                            state.views.head_front.revisionId
-                          }
-                          alt={cand.label}
-                        />
-                        <div className="char-candidate-overlay-stats">
-                          <span>顶点: {cand.vertices?.toLocaleString() || "24,600"}</span>
-                          <span>面数: {cand.faces?.toLocaleString() || "48,200"}</span>
-                          <span>连通子件: {cand.componentsCount || 135}</span>
-                        </div>
+                        {cand.revisionId ? (
+                          <RevisionModelViewer
+                            projectId={s.project.id}
+                            revisionId={cand.revisionId}
+                            name={cand.label}
+                          />
+                        ) : (
+                          <RevisionImageThumb
+                            projectId={s.project.id}
+                            alt={cand.label}
+                            emptyState={emptyNode("head_candidates")}
+                          />
+                        )}
+                        {cand.revisionId && (
+                          <div className="char-candidate-overlay-stats">
+                            <span>
+                              顶点:{" "}
+                              {cand.vertices?.toLocaleString() || "未统计"}
+                            </span>
+                            <span>
+                              面数: {cand.faces?.toLocaleString() || "未统计"}
+                            </span>
+                          </div>
+                        )}
                       </div>
                       <p className="char-cand-summary">
-                        {cand.summary || cand.topologyGrade || "高模四边面拓扑候选"}
+                        {cand.summary ||
+                          cand.topologyGrade ||
+                          "完成头部四候选制作后，在此比较并采用一个。"}
                       </p>
                       <div className="char-cand-actions">
                         <button
                           type="button"
                           className={`button small ${isSelected ? "primary" : ""}`}
-                          disabled={busy || isSelected}
+                          disabled={busy || isSelected || !cand.revisionId}
                           onClick={() => handleSelectCandidate("head", cand.id)}
                         >
                           {isSelected ? "已采用此头部" : "采用此头部候选"}
@@ -1437,11 +1843,7 @@ export function CharacterWorkflowPage({
                             type="button"
                             className="button small"
                             onClick={() =>
-                              triggerDownload(
-                                s.project.id,
-                                cand.revisionId!,
-                                0,
-                              )
+                              triggerDownload(s.project.id, cand.revisionId!, 0)
                             }
                           >
                             <Download size={13} />
@@ -1453,7 +1855,10 @@ export function CharacterWorkflowPage({
                 })}
               </div>
 
-              <h3>身体 3D 候选 (Body Candidates 1–4) · 当前采用：{state.selectedBodyCandidateId || "未选择"}</h3>
+              <h3>
+                身体 3D 候选 (Body Candidates 1–4) · 当前采用：
+                {state.selectedBodyCandidateId || "未选择"}
+              </h3>
               <div className="char-candidates-grid">
                 {state.bodyCandidates.map((cand) => {
                   const isSelected = state.selectedBodyCandidateId === cand.id;
@@ -1471,28 +1876,41 @@ export function CharacterWorkflowPage({
                         </span>
                       </div>
                       <div className="char-candidate-preview">
-                        <RevisionImageThumb
-                          projectId={s.project.id}
-                          revisionId={
-                            cand.previewRevisionId ||
-                            state.views.body_front.revisionId
-                          }
-                          alt={cand.label}
-                        />
-                        <div className="char-candidate-overlay-stats">
-                          <span>顶点: {cand.vertices?.toLocaleString() || "19,800"}</span>
-                          <span>面数: {cand.faces?.toLocaleString() || "39,100"}</span>
-                          <span>连通子件: {cand.componentsCount || 33}</span>
-                        </div>
+                        {cand.revisionId ? (
+                          <RevisionModelViewer
+                            projectId={s.project.id}
+                            revisionId={cand.revisionId}
+                            name={cand.label}
+                          />
+                        ) : (
+                          <RevisionImageThumb
+                            projectId={s.project.id}
+                            alt={cand.label}
+                            emptyState={emptyNode("body_candidates")}
+                          />
+                        )}
+                        {cand.revisionId && (
+                          <div className="char-candidate-overlay-stats">
+                            <span>
+                              顶点:{" "}
+                              {cand.vertices?.toLocaleString() || "未统计"}
+                            </span>
+                            <span>
+                              面数: {cand.faces?.toLocaleString() || "未统计"}
+                            </span>
+                          </div>
+                        )}
                       </div>
                       <p className="char-cand-summary">
-                        {cand.summary || cand.topologyGrade || "A-Pose 去头高模身体候选"}
+                        {cand.summary ||
+                          cand.topologyGrade ||
+                          "完成身体四候选制作后，在此比较并采用一个。"}
                       </p>
                       <div className="char-cand-actions">
                         <button
                           type="button"
                           className={`button small ${isSelected ? "primary" : ""}`}
-                          disabled={busy || isSelected}
+                          disabled={busy || isSelected || !cand.revisionId}
                           onClick={() => handleSelectCandidate("body", cand.id)}
                         >
                           {isSelected ? "已采用此身体" : "采用此身体候选"}
@@ -1502,11 +1920,7 @@ export function CharacterWorkflowPage({
                             type="button"
                             className="button small"
                             onClick={() =>
-                              triggerDownload(
-                                s.project.id,
-                                cand.revisionId!,
-                                0,
-                              )
+                              triggerDownload(s.project.id, cand.revisionId!, 0)
                             }
                           >
                             <Download size={13} />
@@ -1527,16 +1941,21 @@ export function CharacterWorkflowPage({
                 <div>
                   <h2>阶段 3 · 网格部件拆解、五分类 4K 重贴图与独立摇摆组</h2>
                   <p>
-                    已拆解 {state.segmentation.components.length} 个连通网格部件（共{" "}
+                    已拆解 {state.segmentation.components.length}{" "}
+                    个连通网格部件（共{" "}
                     {state.segmentation.totalVertices.toLocaleString()} 顶点 /{" "}
-                    {state.segmentation.totalFaces.toLocaleString()} 面），归入 5 大标准贴图组并行重贴图，同时将物理摇摆件拆入独立 SpringGroups。
+                    {state.segmentation.totalFaces.toLocaleString()} 面），归入
+                    5 大标准贴图组并行重贴图，同时将物理摇摆件拆入独立
+                    SpringGroups。
                   </p>
                 </div>
                 <div className="char-workbench-controls">
                   <button
                     type="button"
                     className="button small"
-                    disabled={busy}
+                    disabled={
+                      busy || !nodeGuidance(run, "mesh_segmentation").ready
+                    }
                     onClick={() =>
                       invokeAction(
                         "advance-node",
@@ -1550,7 +1969,7 @@ export function CharacterWorkflowPage({
                   <button
                     type="button"
                     className="button small"
-                    disabled={busy}
+                    disabled={busy || !nodeGuidance(run, "uv_guide_prep").ready}
                     onClick={() =>
                       invokeAction(
                         "advance-node",
@@ -1564,7 +1983,9 @@ export function CharacterWorkflowPage({
                   <button
                     type="button"
                     className="button small primary"
-                    disabled={busy}
+                    disabled={
+                      busy || !nodeGuidance(run, "mtoon_assembly").ready
+                    }
                     onClick={() =>
                       invokeAction(
                         "advance-node",
@@ -1602,23 +2023,18 @@ export function CharacterWorkflowPage({
                           <small>UV 引导图 (Guide)</small>
                           <RevisionImageThumb
                             projectId={s.project.id}
-                            revisionId={
-                              tg.uvGuideRevisionId ||
-                              state.views.head_front.revisionId
-                            }
+                            revisionId={tg.uvGuideRevisionId}
                             alt={`${tg.label} UV Guide`}
+                            emptyState={emptyNode("uv_guide_prep")}
                           />
                         </div>
                         <div>
                           <small>参考图 / 4K 贴图</small>
                           <RevisionImageThumb
                             projectId={s.project.id}
-                            revisionId={
-                              tg.referenceRevisionId ||
-                              tg.textureImageRevisionId ||
-                              state.views.original.revisionId
-                            }
+                            revisionId={tg.textureImageRevisionId}
                             alt={`${tg.label} Texture`}
+                            emptyState={emptyNode(`retexture_${gid}`)}
                           />
                         </div>
                       </div>
@@ -1632,7 +2048,9 @@ export function CharacterWorkflowPage({
                       <button
                         type="button"
                         className="button small full"
-                        disabled={busy}
+                        disabled={
+                          busy || !nodeGuidance(run, `retexture_${gid}`).ready
+                        }
                         onClick={() =>
                           invokeAction(
                             "advance-node",
@@ -1691,7 +2109,9 @@ export function CharacterWorkflowPage({
                           .map((comp) => (
                             <tr key={comp.id}>
                               <td className="mono">{comp.name}</td>
-                              <td>{comp.source === "head" ? "头部" : "身体"}</td>
+                              <td>
+                                {comp.source === "head" ? "头部" : "身体"}
+                              </td>
                               <td className="mono">
                                 {comp.vertices} / {comp.faces}
                               </td>
@@ -1825,9 +2245,12 @@ export function CharacterWorkflowPage({
             <div className="char-workbench-panel">
               <div className="char-workbench-head">
                 <div>
-                  <h2>阶段 4 · 头身比例对齐、米制身高标尺与 61 点关节 Marker</h2>
+                  <h2>
+                    阶段 4 · 头身比例对齐、米制身高标尺与 61 点关节 Marker
+                  </h2>
                   <p>
-                    对照半透明全身平衡三视图与米制身高标尺调节头/发/身位移与缩放，并校核 21 个身体关节 + 40 个手指关节 Marker。
+                    对照半透明全身平衡三视图与米制身高标尺调节头/发/身位移与缩放，并校核
+                    21 个身体关节 + 40 个手指关节 Marker。
                   </p>
                 </div>
                 <div className="char-workbench-controls">
@@ -1858,7 +2281,11 @@ export function CharacterWorkflowPage({
                   <button
                     type="button"
                     className="button small primary"
-                    disabled={busy}
+                    disabled={
+                      busy ||
+                      !nodeGuidance(run, "proportions_gate").ready ||
+                      nodeGuidance(run, "proportions_gate").complete
+                    }
                     onClick={() =>
                       invokeAction(
                         "decide-gate",
@@ -1884,20 +2311,39 @@ export function CharacterWorkflowPage({
                   <div className="char-proportion-stage">
                     {state.placement.showHeightRuler && (
                       <div className="char-height-ruler">
-                        <span>{state.placement.targetHeightMeters.toFixed(2)}m (头顶)</span>
-                        <span>{(state.placement.targetHeightMeters * 0.82).toFixed(2)}m (肩颈)</span>
-                        <span>{(state.placement.targetHeightMeters * 0.56).toFixed(2)}m (骨盆)</span>
-                        <span>{(state.placement.targetHeightMeters * 0.28).toFixed(2)}m (膝盖)</span>
+                        <span>
+                          {state.placement.targetHeightMeters.toFixed(2)}m
+                          (头顶)
+                        </span>
+                        <span>
+                          {(state.placement.targetHeightMeters * 0.82).toFixed(
+                            2,
+                          )}
+                          m (肩颈)
+                        </span>
+                        <span>
+                          {(state.placement.targetHeightMeters * 0.56).toFixed(
+                            2,
+                          )}
+                          m (骨盆)
+                        </span>
+                        <span>
+                          {(state.placement.targetHeightMeters * 0.28).toFixed(
+                            2,
+                          )}
+                          m (膝盖)
+                        </span>
                         <span>0.00m (地面)</span>
                       </div>
                     )}
                     <div className="char-proportion-preview">
                       <RevisionImageThumb
                         projectId={s.project.id}
-                        revisionId={
-                          state.views.balance_front.revisionId ||
-                          state.views.original.revisionId
-                        }
+                        revisionId={state.views.balance_front.revisionId}
+                        emptyState={emptyNode(
+                          "balance_three_views",
+                          "balance_front",
+                        )}
                         alt="全身平衡对位参考"
                         showGuides={true}
                       />
@@ -2040,16 +2486,21 @@ export function CharacterWorkflowPage({
             <div className="char-workbench-panel">
               <div className="char-workbench-head">
                 <div>
-                  <h2>阶段 5 · Humanoid 骨骼映射、素体权重传递与 90 帧物理自动检验</h2>
+                  <h2>
+                    阶段 5 · Humanoid 骨骼映射、素体权重传递与 90 帧物理自动检验
+                  </h2>
                   <p>
-                    构建 {state.rigging.humanoidBoneCount} 根 VRM 1.0 标准骨骼，从标准素体 ({state.rigging.weightTransfer.donorMesh}) 传递平滑蒙皮权重，并运行 90 帧物理开关对比模拟。
+                    构建 {state.rigging.humanoidBoneCount} 根 VRM 1.0
+                    标准骨骼，从标准素体 (
+                    {state.rigging.weightTransfer.donorMesh})
+                    传递平滑蒙皮权重，并运行 90 帧物理开关对比模拟。
                   </p>
                 </div>
                 <div className="char-workbench-controls">
                   <button
                     type="button"
                     className="button small"
-                    disabled={busy}
+                    disabled={busy || !nodeGuidance(run, "humanoid_rig").ready}
                     onClick={() =>
                       invokeAction(
                         "advance-node",
@@ -2063,7 +2514,9 @@ export function CharacterWorkflowPage({
                   <button
                     type="button"
                     className="button small"
-                    disabled={busy}
+                    disabled={
+                      busy || !nodeGuidance(run, "weight_transfer").ready
+                    }
                     onClick={() =>
                       invokeAction(
                         "advance-node",
@@ -2077,7 +2530,7 @@ export function CharacterWorkflowPage({
                   <button
                     type="button"
                     className="button small"
-                    disabled={busy}
+                    disabled={busy || !nodeGuidance(run, "spring_verify").ready}
                     onClick={() =>
                       invokeAction(
                         "advance-node",
@@ -2091,7 +2544,11 @@ export function CharacterWorkflowPage({
                   <button
                     type="button"
                     className="button small primary"
-                    disabled={busy}
+                    disabled={
+                      busy ||
+                      !nodeGuidance(run, "motion_gate").ready ||
+                      nodeGuidance(run, "motion_gate").complete
+                    }
                     onClick={() =>
                       invokeAction(
                         "decide-gate",
@@ -2132,7 +2589,9 @@ export function CharacterWorkflowPage({
                             <strong>{ch.name}</strong>
                           </td>
                           <td className="mono">{ch.boneCount} 节</td>
-                          <td className="mono">{ch.peakDisplacementMeters} m</td>
+                          <td className="mono">
+                            {ch.peakDisplacementMeters} m
+                          </td>
                           <td className="mono">第 {ch.settledFrame} 帧</td>
                           <td className="mono">{ch.colliderHits} 次穿模</td>
                           <td>
@@ -2151,7 +2610,9 @@ export function CharacterWorkflowPage({
                 <div className="char-subpanel">
                   <h3>VRM 1.0 Humanoid 核心骨骼映射 & 素体权重传递</h3>
                   <p className="muted">
-                    供体素体：<code>{state.rigging.weightTransfer.donorMesh}</code> · 接缝平滑：
+                    供体素体：
+                    <code>{state.rigging.weightTransfer.donorMesh}</code> ·
+                    接缝平滑：
                     {state.rigging.weightTransfer.smoothedSeams.join(", ")}
                   </p>
                   <div className="char-component-table-wrap">
@@ -2188,7 +2649,9 @@ export function CharacterWorkflowPage({
                 <div>
                   <h2>阶段 6 · VRM 1.0 动作预览、商业授权元数据与成果交接</h2>
                   <p>
-                    在线预览导出成品（支持步行与自定义 VRMA 动作、物理开关、骨骼与线框切换），写入 VRM 1.0 元数据并打包不可变交付包。
+                    在线测试导出成品（内置人形动作、自定义
+                    VRMA、物理开关、骨骼与线框切换），写入 VRM 1.0
+                    元数据并打包不可变交付包。
                   </p>
                 </div>
                 <div className="char-workbench-controls">
@@ -2236,55 +2699,27 @@ export function CharacterWorkflowPage({
                 </div>
               </div>
 
-              <div className="char-split-two">
+              <div className="char-split-two char-delivery-layout">
                 <div className="char-subpanel">
-                  <div className="char-subpanel-head">
-                    <h3>3D VRM 实时动作与物理预览台</h3>
-                    <div style={{ display: "flex", gap: "8px" }}>
-                      <select
-                        value={state.vrmDelivery.motionClip}
-                        onChange={(e) =>
-                          invokeAction("update-vrm-meta", {
-                            runId: run.id,
-                            viewer: { motionClip: e.target.value },
-                          })
-                        }
-                      >
-                        <option value="walk_cycle_90f.vrma">标准步行测试 (walk_cycle_90f.vrma)</option>
-                        <option value="idle_breathe.vrma">待机呼吸与微风 (idle_breathe.vrma)</option>
-                        <option value="turn_180_skirt_test.vrma">转身裙摆防穿模测试 (turn_180.vrma)</option>
-                      </select>
-                      <button
-                        type="button"
-                        className={`button small ${state.vrmDelivery.physicsEnabled ? "primary" : ""}`}
-                        onClick={() =>
-                          invokeAction("update-vrm-meta", {
-                            runId: run.id,
-                            viewer: {
-                              physicsEnabled: !state.vrmDelivery.physicsEnabled,
-                            },
-                          })
-                        }
-                      >
-                        物理: {state.vrmDelivery.physicsEnabled ? "ON" : "OFF"}
-                      </button>
+                  <h3>3D VRM 实时动作与物理预览台</h3>
+                  {state.vrmDelivery.vrmRevisionId ? (
+                    <RevisionVrmViewer
+                      projectId={s.project.id}
+                      revisionId={state.vrmDelivery.vrmRevisionId}
+                      name={`${state.characterName}.vrm`}
+                      settings={state.vrmDelivery}
+                      onSettingsChange={(viewer) =>
+                        invokeAction("update-vrm-meta", {
+                          runId: run.id,
+                          viewer,
+                        })
+                      }
+                    />
+                  ) : (
+                    <div className="char-vrm-stage char-slot-placeholder">
+                      {emptyNode("vrm_export")}
                     </div>
-                  </div>
-                  <div className="char-vrm-stage">
-                    {state.vrmDelivery.vrmRevisionId ? (
-                      <RevisionModelViewer
-                        projectId={s.project.id}
-                        revisionId={state.vrmDelivery.vrmRevisionId}
-                        name={`${state.characterName}.vrm`}
-                      />
-                    ) : (
-                      <RevisionImageThumb
-                        projectId={s.project.id}
-                        revisionId={state.views.original.revisionId}
-                        alt={state.characterName}
-                      />
-                    )}
-                  </div>
+                  )}
                 </div>
 
                 <div className="char-subpanel">
@@ -2342,9 +2777,15 @@ export function CharacterWorkflowPage({
                           })
                         }
                       >
-                        <option value="personalNonProfit">仅限个人非商业使用 (personalNonProfit)</option>
-                        <option value="personalProfit">允许个人商业使用 (personalProfit)</option>
-                        <option value="corporation">允许企业与商业项目使用 (corporation)</option>
+                        <option value="personalNonProfit">
+                          仅限个人非商业使用 (personalNonProfit)
+                        </option>
+                        <option value="personalProfit">
+                          允许个人商业使用 (personalProfit)
+                        </option>
+                        <option value="corporation">
+                          允许企业与商业项目使用 (corporation)
+                        </option>
                       </select>
                     </label>
                     <label className="field">
@@ -2358,9 +2799,15 @@ export function CharacterWorkflowPage({
                           })
                         }
                       >
-                        <option value="prohibited">禁止修改 (prohibited)</option>
-                        <option value="allowModification">允许修改 (allowModification)</option>
-                        <option value="allowModificationRedistribution">允许修改并再分发 (allowModificationRedistribution)</option>
+                        <option value="prohibited">
+                          禁止修改 (prohibited)
+                        </option>
+                        <option value="allowModification">
+                          允许修改 (allowModification)
+                        </option>
+                        <option value="allowModificationRedistribution">
+                          允许修改并再分发 (allowModificationRedistribution)
+                        </option>
                       </select>
                     </label>
                     <label className="field">
@@ -2381,6 +2828,49 @@ export function CharacterWorkflowPage({
             </div>
           )}
         </>
+      )}
+      {run && sourcePickerRunId === run.id && (
+        <CharacterSourceDialog
+          key={run.id}
+          snapshot={s}
+          run={run}
+          selectedRevisionId={replacementSourceRevId}
+          onSelect={setReplacementSourceRevId}
+          onUpload={(file) =>
+            uploadSourceImage(file, setReplacementSourceRevId)
+          }
+          busy={busy}
+          error={errorMsg}
+          notify={notify}
+          onClose={() => setSourcePickerRunId(undefined)}
+          onAdopt={async () => {
+            const updated = await invokeAction(
+              "edit-view",
+              {
+                runId: run.id,
+                slotKey: "original",
+                revisionId: replacementSourceRevId,
+                expectedRevision: run.revision,
+              },
+              "已更换角色原画，下游制作需重新生成和审核",
+            );
+            if (updated) setSourcePickerRunId(undefined);
+          }}
+        />
+      )}
+      {run && codexTarget?.runId === run.id && (
+        <CharacterTaskDialog
+          key={`${run.id}:${codexTarget.nodeKey}:${codexTarget.slotKey || "group"}`}
+          snapshot={s}
+          run={run}
+          nodeKey={codexTarget.nodeKey}
+          slotKey={codexTarget.slotKey}
+          initialPrompt={
+            codexTarget.slotKey ? slotEditPrompts[codexTarget.slotKey] : ""
+          }
+          onClose={() => setCodexTarget(undefined)}
+          notify={notify}
+        />
       )}
     </div>
   );

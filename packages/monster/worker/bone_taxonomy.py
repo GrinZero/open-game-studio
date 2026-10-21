@@ -650,6 +650,67 @@ def clean_uv_short_gaps_hampel(uv: np.ndarray, scale: float = 1.0, max_gap: int 
     return out
 
 
+_WHITTAKER_PENALTY_CACHE: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+
+
+def _get_whittaker_diff_gramians(T: int) -> tuple[np.ndarray, np.ndarray]:
+    """Returns cached `(D2^T D2, D3^T D3)` difference Gramian matrices of shape `(T, T)`."""
+    cached = _WHITTAKER_PENALTY_CACHE.get(T)
+    if cached is not None:
+        return cached
+    eye = np.eye(T, dtype=np.float64)
+    d2 = eye[2:] - 2.0 * eye[1:-1] + eye[:-2]
+    d3 = eye[3:] - 3.0 * eye[2:-1] + 3.0 * eye[1:-2] - eye[:-3]
+    gram = (d2.T @ d2, d3.T @ d3)
+    if len(_WHITTAKER_PENALTY_CACHE) < 16:
+        _WHITTAKER_PENALTY_CACHE[T] = gram
+    return gram
+
+
+def whittaker_smooth_trajectory(
+    y: np.ndarray,
+    weights: np.ndarray | None = None,
+    lam_accel: float = 4.0,
+    lam_jerk: float = 10.0,
+) -> np.ndarray:
+    """Zero-phase confidence-weighted Whittaker-Henderson + Minimum-Jerk (Flash & Hogan 1985;
+    Eilers 2003) trajectory smoother along axis 0:
+        min_X  sum_t w_t ||x_t - y_t||^2 + lam_accel ||D_2 X||_F^2 + lam_jerk ||D_3 X||_F^2
+    Supports 2D `(T, D)` and 3D `(T, K, D)` arrays. Falls back to `savgol_smooth_array` when `T < 7`.
+    """
+    T = int(y.shape[0])
+    if T < 7 or (lam_accel <= 0.0 and lam_jerk <= 0.0):
+        return savgol_smooth_array(y)
+
+    arr = np.asarray(y, dtype=np.float64)
+    g2, g3 = _get_whittaker_diff_gramians(T)
+    penalty = float(lam_accel) * g2 + float(lam_jerk) * g3
+
+    if arr.ndim == 2:
+        if weights is None:
+            w = np.ones(T, dtype=np.float64)
+        else:
+            w = np.clip(np.asarray(weights, dtype=np.float64).reshape(T), 0.05, 1.0)
+        A = np.diag(w) + penalty
+        return np.linalg.solve(A, w[:, None] * arr)
+
+    if arr.ndim == 3:
+        _, K, D = arr.shape
+        out = np.empty_like(arr, dtype=np.float64)
+        if weights is None:
+            A = np.eye(T, dtype=np.float64) + penalty
+            flat = arr.reshape(T, K * D)
+            return np.linalg.solve(A, flat).reshape(T, K, D)
+        w_all = np.clip(np.asarray(weights, dtype=np.float64), 0.05, 1.0)
+        for k in range(K):
+            wk = w_all[:, k]
+            A = np.diag(wk) + penalty
+            out[:, k, :] = np.linalg.solve(A, wk[:, None] * arr[:, k, :])
+        return out
+
+    return savgol_smooth_array(y)
+
+
 def savgol_smooth_array(x: np.ndarray) -> np.ndarray:
     """Zero-phase 5-tap quadratic Savitzky-Golay filter `[-3, 12, 17, 12, -3] / 35` along axis 0."""
     if len(x) < 5:
@@ -1361,6 +1422,97 @@ def reconstruct_frames_with_kind_solvers(
         prev_ry = curr_ry
         frames_out.append({"frame": f, "bones": bmap})
 
+    # Kind-specific zero-phase Whittaker-Henderson + Minimum-Jerk (lam_accel, lam_jerk) on S^3
+    whittaker_so3_by_kind = {
+        "root": (25.0, 60.0),
+        "rigid": (0.0, 0.0),
+        "spine": (18.0, 40.0),
+        "head": (18.0, 40.0),
+        "jaw": (14.0, 30.0),
+        "limb": (8.0, 18.0),
+        "flex": (16.0, 35.0),
+        "tail": (16.0, 35.0),
+        "wing": (12.0, 25.0),
+        "digit": (12.0, 25.0),
+    }
+
+    if T >= 7:
+        local_quats: dict[str, np.ndarray] = {n: np.zeros((T, 4), dtype=np.float64) for n in names}
+        bone_confs: dict[str, np.ndarray] = {n: np.zeros(T, dtype=np.float64) for n in names}
+        root_pos_seq = np.zeros((T, 3), dtype=np.float64)
+
+        for f in range(T):
+            bmap_f = frames_out[f]["bones"]
+            root_pos_seq[f] = np.asarray(bmap_f[root]["head_3d"], dtype=np.float64)
+            for n in order:
+                p = classified_bones[n].get("parent")
+                R_w = np.asarray(bmap_f[n]["rot_mat_world"], dtype=np.float64)
+                if p and p in bmap_f:
+                    R_p = np.asarray(bmap_f[p]["rot_mat_world"], dtype=np.float64)
+                    R_init = R_p @ (rest_R[p].T @ rest_R[n])
+                else:
+                    R_init = rest_R[n]
+                R_delta = R_init.T @ R_w
+                q = mat_to_quat_wxyz_numpy(R_delta)
+                if f > 0 and float(np.dot(local_quats[n][f - 1], q)) < 0.0:
+                    q = -q
+                local_quats[n][f] = q
+                bone_confs[n][f] = float(bmap_f[n].get("confidence", 0.5))
+
+        root_l2, root_l3 = whittaker_so3_by_kind["root"]
+        root_pos_sm = whittaker_smooth_trajectory(
+            root_pos_seq, weights=bone_confs[root] ** 2, lam_accel=root_l2, lam_jerk=root_l3
+        )
+        sm_quats: dict[str, np.ndarray] = {}
+        for n in order:
+            info = classified_bones[n]
+            k = str(info.get("kind", "limb"))
+            if k == "rigid" or bool(info.get("fixed_local", False)):
+                sm_quats[n] = local_quats[n]
+                continue
+            l2, l3 = whittaker_so3_by_kind.get(k, (10.0, 20.0))
+            q_sm = whittaker_smooth_trajectory(
+                local_quats[n], weights=bone_confs[n] ** 2, lam_accel=l2, lam_jerk=l3
+            )
+            q_sm /= np.maximum(1e-12, np.linalg.norm(q_sm, axis=-1, keepdims=True))
+            sm_quats[n] = q_sm
+
+        max_violation = 0.0
+        for f in range(T):
+            posed_R = {}
+            heads = {}
+            bmap_f = frames_out[f]["bones"]
+            for n in order:
+                info = classified_bones[n]
+                p = info.get("parent")
+                k = str(info.get("kind", "limb"))
+                lims = info["limits_rad"]
+                if p and p in posed_R:
+                    init_R = posed_R[p] @ (rest_R[p].T @ rest_R[n])
+                    head = heads[p] + posed_R[p] @ (rest_R[p].T @ (rest_H[n] - rest_H[p]))
+                else:
+                    init_R = rest_R[n]
+                    head = root_pos_sm[f]
+
+                if k == "rigid" or bool(info.get("fixed_local", False)):
+                    delta = np.eye(3, dtype=np.float64)
+                else:
+                    delta = clamp_local_delta_euler(quat_wxyz_to_mat_numpy(sm_quats[n][f]), lims)
+                R_world = init_R @ delta
+                posed_R[n] = R_world
+                heads[n] = head
+                rest_len = float(info.get("rest_length", np.linalg.norm(rest_T[n] - rest_H[n])))
+                tail = head + R_world[:, 1] * rest_len
+
+                vals = matrix_to_euler_xyz_numpy(delta)
+                chk_lims = np.array(lims, dtype=np.float64)
+                violation = float(np.maximum(chk_lims[:, 0] - vals, vals - chk_lims[:, 1]).max())
+                max_violation = max(max_violation, max(0.0, violation))
+
+                bmap_f[n]["head_3d"] = [round(float(x), 5) for x in head]
+                bmap_f[n]["tail_3d"] = [round(float(x), 5) for x in tail]
+                bmap_f[n]["rot_mat_world"] = [[round(float(x), 5) for x in row] for row in R_world]
+
     kind_counts: dict[str, int] = {}
     for n in names:
         k = str(classified_bones[n].get("kind", "limb"))
@@ -1371,6 +1523,7 @@ def reconstruct_frames_with_kind_solvers(
         "frames": T,
         "cross_frame_confidence_replacement": False,
         "short_gap_max_frames": 3,
+        "post_smoothing": "whittaker_minimum_jerk_so3_v1",
         "root_anchors": anchors,
         "final_limit_max_violation_rad": round(float(max_violation), 6),
         "fixed_local_bones": [n for n in names if classified_bones[n].get("fixed_local")],

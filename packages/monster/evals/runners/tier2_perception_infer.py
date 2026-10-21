@@ -170,7 +170,7 @@ def run_dinov2_2k_inference(
 
 
 def execute_tier2_infer(
-    benchmark_id: str = "fantasy_creature_2k_v1",
+    benchmark_id: str = "fantasy_creature_2k_v2",
     fixture_dir: Path | None = None,
     save_baseline: bool = False,
 ) -> dict[str, Any]:

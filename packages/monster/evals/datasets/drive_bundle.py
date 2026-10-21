@@ -17,7 +17,7 @@ from typing import Any
 
 EVALS_ROOT = Path(__file__).resolve().parents[1]
 BENCHMARKS_ROOT = EVALS_ROOT / "benchmarks"
-DEFAULT_BENCHMARK_ID = "fantasy_creature_2k_v1"
+DEFAULT_BENCHMARK_ID = "fantasy_creature_2k_v2"
 MONSTER_ROOT = EVALS_ROOT.parent
 REPO_ROOT = MONSTER_ROOT.parents[1]
 VAR_EVALS_ROOT = Path(os.environ.get("MONSTER_EVAL_VAR_ROOT", str(REPO_ROOT / "var" / "monster" / "evals")))
@@ -160,14 +160,17 @@ def build_deterministic_tar_gz(source_dir: Path, archive_path: Path) -> dict[str
 
 
 def pack_from_starmaker_2k(
-    benchmark_id: str = "fantasy_creature_2k_v1",
+    benchmark_id: str = "fantasy_creature_2k_v2",
     starmaker_runs_root: Path = STARMAKER_DEFAULT_ROOT,
     share_url: str = "",
 ) -> dict[str, Any]:
     """Collects the validated 2K exam & model fixtures from `star-maker` into `var/monster/evals/`,
-    creates `var/monster/evals/archives/fantasy_creature_2k_v1.tar.gz` for Google Drive sharing,
+    creates `var/monster/evals/archives/fantasy_creature_2k_v2.tar.gz` for Google Drive sharing,
     and writes the exact SHA-256 lock manifest to `packages/monster/evals/benchmarks/<benchmark_id>/manifest.json`.
     """
+    if (BENCHMARKS_ROOT / benchmark_id / "manifest.json").exists() or (VAR_EVALS_ROOT / "fixtures" / benchmark_id).exists():
+        raise FileExistsError(f"Refusing to overwrite archived benchmark {benchmark_id}; choose a new benchmark ID.")
+
     r2k = starmaker_runs_root / "fantasy_creature_train_2k_v0001_20261021"
     rv9 = starmaker_runs_root / "fantasy_creature_train_v9_20261021"
     o3 = r2k / "optimized_v0003"
@@ -289,7 +292,7 @@ def pack_from_starmaker_2k(
 
 
 def pull_fixture_bundle(
-    benchmark_id: str = "fantasy_creature_2k_v1",
+    benchmark_id: str = "fantasy_creature_2k_v2",
     url_or_id: str | None = None,
     from_archive: str | Path | None = None,
 ) -> dict[str, Any]:

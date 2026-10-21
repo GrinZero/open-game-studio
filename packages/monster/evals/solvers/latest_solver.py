@@ -29,6 +29,7 @@ from bone_taxonomy import (  # noqa: E402
     clean_uv_short_gaps_hampel,
     reconstruct_frames_with_kind_solvers,
     savgol_smooth_array,
+    whittaker_smooth_trajectory,
 )
 from pose_features import fuse_depth_visibility  # noqa: E402
 
@@ -139,7 +140,9 @@ def run_latest_solver(
     )
     pts_3d_raw = np.asarray(pts_3d_raw, dtype=np.float64)
     trust_raw = np.asarray(trust_raw, dtype=np.float64)
-    pts_3d_smoothed = savgol_smooth_array(pts_3d_raw)
+    pts_3d_smoothed = whittaker_smooth_trajectory(
+        pts_3d_raw, weights=trust_raw ** 2, lam_accel=4.0, lam_jerk=10.0
+    )
 
     stage3_triangulation = {
         "pts_3d_raw": pts_3d_raw,

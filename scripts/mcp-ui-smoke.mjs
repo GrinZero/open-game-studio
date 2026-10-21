@@ -1,3 +1,4 @@
+import { verifyCharacterSource } from "./character-source-smoke.mjs";
 import { verifyNodeSizing } from "./node-sizing-smoke.mjs";
 import { verifyCanvasTools } from "./canvas-tools-smoke.mjs";
 import { verifyResourceComposer } from "./resource-composer-smoke.mjs";
@@ -82,8 +83,14 @@ const host = await build({
 import { AppBridge, PostMessageTransport } from '@modelcontextprotocol/ext-apps/app-bridge';
 const iframe = document.querySelector('iframe');
 const initialMode = new URLSearchParams(location.search).get('mode');
-const bridge = new AppBridge(null, {name:'test-host',version:'1.0.0'}, {serverTools:{},serverResources:{},downloadFile:{},updateModelContext:{text:{}}}, {hostContext:{theme:'dark',...(initialMode ? {displayMode:initialMode} : {})}});
+const bridge = new AppBridge(null, {name:'test-host',version:'1.0.0'}, {serverTools:{},serverResources:{},downloadFile:{},updateModelContext:{text:{}},message:{text:{}}}, {hostContext:{theme:'dark',...(initialMode ? {displayMode:initialMode} : {})}});
 window.__referenceUpdates = [];
+window.__modelMessages = [];
+bridge.onmessage = async args => {
+  if (window.__rejectModelMessage) return {isError:true};
+  window.__modelMessages.push(args);
+  return {};
+};
 bridge.onupdatemodelcontext = async args => {
   if (window.__rejectReferenceUpdate) throw new Error('引用更新被宿主拒绝');
   window.__referenceUpdates.push(args);
@@ -203,7 +210,52 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await page.waitForFunction(() => document.body.dataset.connected === "true");
   const ui = page.frameLocator("iframe");
-  if (process.env.STUDIO_TEST_LAUNCH_ONLY) {
+  if (process.env.STUDIO_TEST_CHARACTER_SOURCE_ONLY) {
+    mkdirSync("var/qa", { recursive: true });
+    const api = async (route, body) => {
+      const response = await fetch(
+        `${binaryOrigin}${route}`,
+        body
+          ? {
+              method: "POST",
+              ...(body instanceof FormData
+                ? {}
+                : { headers: { "Content-Type": "application/json" } }),
+              body: body instanceof FormData ? body : JSON.stringify(body),
+            }
+          : undefined,
+      );
+      const result = await response.json();
+      assert.equal(response.ok, true, JSON.stringify(result));
+      return result;
+    };
+    await page.goto(`${binaryOrigin}/?projectId=${project.id}`);
+    await verifyCharacterSource({
+      page,
+      api,
+      projectId: project.id,
+      prefix: "http",
+    });
+    const embeddedProject = await api("/api/tools/project_manage", {
+      action: "create",
+      name: "角色原画内嵌验收",
+      root: path.join(dir, "character-embedded"),
+    });
+    await page.goto(
+      `http://127.0.0.1:${server.address().port}/?projectId=${embeddedProject.id}`,
+    );
+    await verifyCharacterSource({
+      page,
+      ui,
+      api,
+      projectId: embeddedProject.id,
+      prefix: "mcp",
+    });
+    assert.deepEqual(errors, []);
+    console.log(
+      "PASS: HTTP/MCP character creation requires explicit image choice, previews images, uploads, cancels and replaces source revisions.",
+    );
+  } else if (process.env.STUDIO_TEST_LAUNCH_ONLY) {
     mkdirSync("var/qa", { recursive: true });
     await ui.locator(".project-card").waitFor();
     await verifyResponsiveHome({ page, ui, prefix: "mcp" });

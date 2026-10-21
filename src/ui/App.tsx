@@ -18,7 +18,12 @@ import { CodexHandoff } from "./CodexHandoff";
 import { CodexReferenceBar } from "./CodexReferences";
 import { VersionBadge } from "./VersionBadge";
 import { CharacterWorkflowPage } from "./CharacterWorkflowPage";
-import { launchProject, subscribeLaunch } from "./workbench-launch";
+import {
+  launchProject,
+  subscribeLaunch,
+  characterLaunch,
+} from "./workbench-launch";
+import { ProjectLiveSync } from "./ProjectLiveSync";
 import {
   useCallback,
   useEffect,
@@ -289,6 +294,8 @@ export function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [snapshot, setSnapshot] = useState<ProjectSnapshot>();
   const [projectId, setProjectId] = useState<string | undefined>(launchProject);
+  const activeProject = useRef(projectId);
+  activeProject.current = projectId;
   const [homeNavigation, setHomeNavigation] = useResponsivePanel(
     "(max-width: 1100px)",
   );
@@ -342,8 +349,10 @@ export function App() {
   }, []);
 
   const refresh = useCallback(async () => {
-    if (projectId)
-      setSnapshot(await request<ProjectSnapshot>(`/api/projects/${projectId}`));
+    if (projectId) {
+      const next = await request<ProjectSnapshot>(`/api/projects/${projectId}`);
+      if (activeProject.current === projectId) setSnapshot(next);
+    }
     await refreshProjects();
   }, [projectId, refreshProjects]);
 
@@ -941,7 +950,8 @@ function Workspace({
   resolvedTheme: "dark" | "light";
   toggleTheme: () => void;
 }) {
-  const [view, setView] = useState<View>("canvas");
+  const launchTarget = characterLaunch(s.project.id);
+  const [view, setView] = useState<View>(launchTarget ? "character" : "canvas");
   const [canvasId, setCanvasId] = useState(
     s.canvases.find((c) => !c.archived)?.id || "",
   );
@@ -949,7 +959,7 @@ function Workspace({
   const activeCanvasId = useRef(canvasId);
   activeCanvasId.current = canvasId;
   const [assetId, setAssetId] = useState<string>();
-  const [runId, setRunId] = useState<string>();
+  const [runId, setRunId] = useState<string | undefined>(launchTarget?.runId);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
@@ -1068,13 +1078,6 @@ function Workspace({
     },
     [refresh, perform],
   );
-
-  useEffect(() => {
-    const t = setInterval(() => {
-      if (!saving && !busy) refresh().catch(() => {});
-    }, 6000);
-    return () => clearInterval(t);
-  }, [refresh, saving, busy]);
 
   const patch = useCallback(
     async (target: "graph" | "layout", ops: unknown[]) => {
@@ -1205,8 +1208,9 @@ function Workspace({
           },
         );
         if (importPosition) {
-          const fallbackTitle = (pendingPaths[0].split(/[\\/]/).pop() || "")
-            .replace(/\.[^.]+$/, "");
+          const fallbackTitle = (
+            pendingPaths[0].split(/[\\/]/).pop() || ""
+          ).replace(/\.[^.]+$/, "");
           const node: StudioNode = {
             id: uuid(),
             type: "asset",
@@ -1548,6 +1552,11 @@ function Workspace({
               )}{" "}
               {saving ? "正在保存" : saveError ? "保存失败" : "已保存到本地"}
             </span>
+            <ProjectLiveSync
+              projectId={s.project.id}
+              refresh={refresh}
+              paused={saving || busy}
+            />
             {view === "canvas" && (
               <IconButton
                 label={assetDock ? "收起资源栏" : "展开资源栏"}
@@ -1998,8 +2007,7 @@ function Workspace({
                       setAssetId(undefined);
                       setSelected([]);
                       setCanvasId(r.canvasId);
-                      setView("canvas");
-                      setInspector(true);
+                      navigate("character");
                     }}
                   >
                     <div className="run-icon">

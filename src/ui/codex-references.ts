@@ -49,6 +49,13 @@ export class CodexReferenceStore {
       frozen.project.id,
       frozen.canvas.id,
       frozen.selection.map((item) => item.nodeId).sort(),
+      ...(frozen.characterTarget
+        ? [
+            frozen.characterTarget.runId,
+            frozen.characterTarget.nodeKey,
+            frozen.characterTarget.slotKey,
+          ]
+        : []),
     ]);
     return this.change((current) => [
       ...current.filter((item) => item.key !== key),

@@ -315,6 +315,8 @@ def register_new_monster(monster_id: str, input_glb: Path, num_synth: int = 5000
             str(ckpt_path),
             "--epochs",
             str(epochs),
+            "--progress_file",
+            str(monster_work / "training_progress.json"),
         ]
     )
 

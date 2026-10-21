@@ -72,10 +72,17 @@ function makeValidPngBytes(seed = 0): Buffer {
 }
 
 function makeValidBlendBytes(tag = "CharacterAssembly"): Buffer {
-  return Buffer.from(`BLENDER-v300-${tag}-OpenGameStudio-EditableSource`, "utf8");
+  return Buffer.from(
+    `BLENDER-v300-${tag}-OpenGameStudio-EditableSource`,
+    "utf8",
+  );
 }
 
-function getRunOrFail(core: StudioCore, projectId: string, runId: string): WorkflowRun {
+function getRunOrFail(
+  core: StudioCore,
+  projectId: string,
+  runId: string,
+): WorkflowRun {
   const s = core.snapshot(projectId);
   const run = s.runs.find((r) => r.id === runId);
   if (!run) throw new StudioError(404, "角色工作流运行不存在");
@@ -101,9 +108,7 @@ function saveRun(
           "INSERT INTO reviews(id,data) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
         ).run(review.id, JSON.stringify(review));
       }
-      db.prepare(
-        "INSERT INTO events(kind,data,created_at) VALUES (?,?,?)",
-      ).run(
+      db.prepare("INSERT INTO events(kind,data,created_at) VALUES (?,?,?)").run(
         "character_dag.updated",
         JSON.stringify({ runId: run.id, revision: run.revision }),
         now(),
@@ -214,12 +219,10 @@ export function createStandaloneCharacterRun(
   let imageRev: AssetRevision | undefined;
   if (a.sourceImageRevisionId) {
     imageRev = snap.assets
+      .filter((asset) => !asset.archived && asset.kind === "image")
       .flatMap((asset) => asset.revisions)
       .find((r) => r.id === a.sourceImageRevisionId);
-  } else {
-    imageRev = snap.assets
-      .filter((asset) => !asset.archived && asset.kind === "image")
-      .flatMap((asset) => asset.revisions)[0];
+    if (!imageRev) throw new StudioError(400, "请选择项目中可用的原画图片版本");
   }
 
   const briefRev = core.importFiles(
@@ -283,10 +286,12 @@ export function createStandaloneCharacterRun(
   // Complete node 0 (source_illustration) with brief + source image so head_multiview & body_multiview unlock in parallel
   const rootNode = run.dag[0];
   rootNode.outputRevisionIds = inputRevisionIds;
-  rootNode.status = "succeeded";
+  rootNode.status = imageRev ? "succeeded" : "awaiting_manual";
   rootNode.stale = false;
   rootNode.completedInputStamp = rootNode.inputStamp || "init";
-  rootNode.note = `已冻结原画与企划：${a.characterName}`;
+  rootNode.note = imageRev
+    ? `已冻结原画与企划：${a.characterName}`
+    : "请先选择或上传角色原画";
   run.steps[0].outputRevisionIds = [briefRev.id];
   run.steps[0].status = "succeeded";
   run.steps[0].stale = false;
@@ -295,10 +300,7 @@ export function createStandaloneCharacterRun(
   return saveRun(core, a.projectId, run);
 }
 
-export function listClaimableDagNodes(
-  core: StudioCore,
-  input: unknown,
-) {
+export function listClaimableDagNodes(core: StudioCore, input: unknown) {
   const a = z
     .object({
       projectId: z.string().min(1).max(100),
@@ -582,7 +584,8 @@ export function submitDagNodeOutput(
       "head_back",
     ];
     slots.forEach((slotKey, i) => {
-      const rid = submittedRevs[i] || submittedRevs[0] || state.views.original.revisionId;
+      const rid =
+        submittedRevs[i] || submittedRevs[0] || state.views.original.revisionId;
       if (rid) {
         const rev = revById.get(rid);
         state.views[slotKey].revisionId = rid;
@@ -599,7 +602,8 @@ export function submitDagNodeOutput(
       "body_back",
     ];
     slots.forEach((slotKey, i) => {
-      const rid = submittedRevs[i] || submittedRevs[0] || state.views.original.revisionId;
+      const rid =
+        submittedRevs[i] || submittedRevs[0] || state.views.original.revisionId;
       if (rid) {
         const rev = revById.get(rid);
         state.views[slotKey].revisionId = rid;
@@ -616,9 +620,7 @@ export function submitDagNodeOutput(
     ];
     slots.forEach((slotKey, i) => {
       const rid =
-        submittedRevs[i] ||
-        submittedRevs[0] ||
-        state.views.original.revisionId;
+        submittedRevs[i] || submittedRevs[0] || state.views.original.revisionId;
       if (rid) {
         const rev = revById.get(rid);
         state.views[slotKey].revisionId = rid;
@@ -791,7 +793,7 @@ function buildDefaultSegmentation(): {
       vertices: 6410,
       faces: 12680,
       centroid: [0, 1.41, 0.04],
-      boundsMin: [-0.11, 1.30, -0.06],
+      boundsMin: [-0.11, 1.3, -0.06],
       boundsMax: [0.11, 1.52, 0.12],
       textureGroup: "head",
       materialName: "MToon_Face",
@@ -1028,12 +1030,7 @@ export function selectDagCandidate(
       forked.dagState!.textureGroups[gid].status = "pending";
       forked.dagState!.textureGroups[gid].mtoonConverted = false;
     }
-    const resetStages = new Set([
-      "texture",
-      "proportions",
-      "rig",
-      "delivery",
-    ]);
+    const resetStages = new Set(["texture", "proportions", "rig", "delivery"]);
     for (const n of forked.dag || []) {
       if (resetStages.has(n.stageGroup)) {
         n.status = "pending";
@@ -1059,7 +1056,8 @@ export function selectDagCandidate(
   }
   if (target.revisionId) {
     const candNode = run.dag?.find(
-      (n) => n.key === (a.source === "head" ? "head_candidates" : "body_candidates"),
+      (n) =>
+        n.key === (a.source === "head" ? "head_candidates" : "body_candidates"),
     );
     if (candNode && !candNode.outputRevisionIds.includes(target.revisionId)) {
       candNode.outputRevisionIds.unshift(target.revisionId);
@@ -1081,28 +1079,37 @@ export function editCharacterViewSlot(
       slotKey: z.string().min(1).max(40),
       editPrompt: z.string().max(2000).default(""),
       revisionId: z.string().optional(),
+      expectedRevision: z.number().int().optional(),
     })
     .parse(input);
 
   const run = getRunOrFail(core, a.projectId, a.runId);
+  if (a.expectedRevision !== undefined && run.revision !== a.expectedRevision)
+    throw new StudioError(409, "角色已更新，请刷新后重新选择原画");
   const slotKey = a.slotKey as MultiviewSlotKey;
   const slot = run.dagState?.views[slotKey];
   if (!slot) throw new StudioError(404, `视图槽位不存在：${a.slotKey}`);
+  if (
+    slotKey === "original" &&
+    run.dag?.some((node) => node.status === "running")
+  )
+    throw new StudioError(409, "请等待当前角色制作结束后再更换原画");
 
   let revId = a.revisionId;
   let relPath = slot.relativePath;
   if (!revId) {
     // Create a new revision for this single-slot edit
-    const existingBytes =
-      slot.revisionId
-        ? (() => {
-            try {
-              return readFileSync(core.assetFile(a.projectId, slot.revisionId, 0).file);
-            } catch {
-              return makeValidPngBytes();
-            }
-          })()
-        : makeValidPngBytes();
+    const existingBytes = slot.revisionId
+      ? (() => {
+          try {
+            return readFileSync(
+              core.assetFile(a.projectId, slot.revisionId, 0).file,
+            );
+          } catch {
+            return makeValidPngBytes();
+          }
+        })()
+      : makeValidPngBytes();
     const imported = core.importFiles(
       a.projectId,
       [{ name: `${slotKey}.png`, bytes: existingBytes }],
@@ -1119,8 +1126,10 @@ export function editCharacterViewSlot(
   } else {
     const snap = core.snapshot(a.projectId);
     const rev = snap.assets
+      .filter((asset) => !asset.archived && asset.kind === "image")
       .flatMap((x) => x.revisions)
       .find((r) => r.id === revId);
+    if (!rev) throw new StudioError(400, "请选择项目中可用的原画图片版本");
     relPath = rev?.files[0]?.relativePath;
   }
 
@@ -1141,8 +1150,76 @@ export function editCharacterViewSlot(
           ? "balance_three_views"
           : "source_illustration";
   const dagNode = freshRun.dag?.find((n) => n.key === parentNodeKey);
-  if (dagNode && revId && !dagNode.outputRevisionIds.includes(revId)) {
-    dagNode.outputRevisionIds = [revId, ...dagNode.outputRevisionIds.slice(0, 7)];
+  if (slotKey === "original" && dagNode && revId) {
+    if (slot.revisionId === revId) return run;
+    const oldSourceId = slot.revisionId;
+    const replaceSource = (ids: string[]) => [
+      revId,
+      ...ids.filter((id) => id !== oldSourceId && id !== revId),
+    ];
+    freshRun.inputRevisionIds = replaceSource(freshRun.inputRevisionIds);
+    const sourceAsset = core
+      .snapshot(a.projectId)
+      .assets.find((asset) =>
+        asset.revisions.some((revision) => revision.id === revId),
+      )!;
+    const sourceRevision = sourceAsset.revisions.find(
+      (revision) => revision.id === revId,
+    )!;
+    if (freshRun.inputSnapshot) {
+      freshRun.inputSnapshot.revisionIds = replaceSource(
+        freshRun.inputSnapshot.revisionIds,
+      );
+      freshRun.inputSnapshot.items = [
+        ...freshRun.inputSnapshot.items.filter(
+          (item) => !oldSourceId || item.revisionId !== oldSourceId,
+        ),
+        {
+          title: sourceAsset.name,
+          type: "asset",
+          role: "reference",
+          assetId: sourceAsset.id,
+          revisionId: revId,
+          version: sourceRevision.number,
+          kind: "image",
+          files: sourceRevision.files,
+        },
+      ];
+    }
+    const previousState = freshRun.dagState!;
+    freshRun.dagState = createInitialCharacterWorkflowState(
+      previousState.characterName,
+      previousState.stylePrompt,
+      revId,
+      relPath,
+    );
+    freshRun.dagState.vrmDelivery.meta = previousState.vrmDelivery.meta;
+    freshRun.dagState.placement.targetHeightMeters =
+      previousState.placement.targetHeightMeters;
+    freshRun.dagState.placement.showHorizontalGuides =
+      previousState.placement.showHorizontalGuides;
+    dagNode.inputRevisionIds = replaceSource(dagNode.inputRevisionIds);
+    dagNode.outputRevisionIds = replaceSource(dagNode.outputRevisionIds);
+    dagNode.status = "succeeded";
+    dagNode.stale = false;
+    dagNode.note = "已采用用户选择的角色原画";
+    delete dagNode.lease;
+    // Keep immutable assets, but require all dependent work and gates to rerun.
+    for (const node of freshRun.dag || []) {
+      if (node === dagNode) continue;
+      node.stale =
+        node.outputRevisionIds.length > 0 || node.status === "succeeded";
+      node.status = "pending";
+      delete node.lease;
+    }
+    freshRun.status = "active";
+    recomputeCharacterDag(freshRun);
+    dagNode.completedInputStamp = dagNode.inputStamp;
+  } else if (dagNode && revId && !dagNode.outputRevisionIds.includes(revId)) {
+    dagNode.outputRevisionIds = [
+      revId,
+      ...dagNode.outputRevisionIds.slice(0, 7),
+    ];
   }
   recomputeCharacterDag(freshRun);
   freshRun.revision++;
@@ -1281,9 +1358,7 @@ export function updateDagClassification(
     }
   }
   if (a.springGroupUpdate) {
-    const sg = state.springGroups.find(
-      (g) => g.id === a.springGroupUpdate!.id,
-    );
+    const sg = state.springGroups.find((g) => g.id === a.springGroupUpdate!.id);
     if (sg) {
       if (a.springGroupUpdate.stiffness !== undefined)
         sg.stiffness = a.springGroupUpdate.stiffness;
@@ -1355,10 +1430,7 @@ export function updateDagVrmMeta(
   return saveRun(core, a.projectId, run);
 }
 
-export function advanceDagNode(
-  core: StudioCore,
-  input: unknown,
-): WorkflowRun {
+export function advanceDagNode(core: StudioCore, input: unknown): WorkflowRun {
   const a = z
     .object({
       projectId: z.string().min(1).max(100),
@@ -1371,6 +1443,9 @@ export function advanceDagNode(
   const run = getRunOrFail(core, a.projectId, a.runId);
   const node = run.dag?.find((n) => n.key === a.nodeKey);
   if (!node) throw new StudioError(404, `DAG 节点不存在：${a.nodeKey}`);
+
+  if (!run.dagState?.views.original.revisionId)
+    throw new StudioError(400, "请先选择或上传角色原画");
 
   if (node.mode === "review") {
     return decideDagGate(core, {
@@ -1393,7 +1468,9 @@ export function advanceDagNode(
   let baseImgBytes = makeValidPngBytes();
   if (origRevId) {
     try {
-      baseImgBytes = readFileSync(core.assetFile(a.projectId, origRevId, 0).file);
+      baseImgBytes = readFileSync(
+        core.assetFile(a.projectId, origRevId, 0).file,
+      );
     } catch {
       baseImgBytes = makeValidPngBytes();
     }
@@ -1919,7 +1996,8 @@ with zipfile.ZipFile(zp, 'r') as z:
     if (!ver?.path) continue;
     const imp = importExtractedFile(
       ver.path,
-      MULTIVIEW_SLOT_META.find((m) => m.key === targetSlot)?.label || targetSlot,
+      MULTIVIEW_SLOT_META.find((m) => m.key === targetSlot)?.label ||
+        targetSlot,
     );
     if (imp) {
       state.views[targetSlot].revisionId = imp.revId;
@@ -1934,15 +2012,24 @@ with zipfile.ZipFile(zp, 'r') as z:
     }
   }
   // Fill balance 3-views with original / front / left / back if not explicitly in archive
-  if (!state.views.balance_front.revisionId && state.views.original.revisionId) {
+  if (
+    !state.views.balance_front.revisionId &&
+    state.views.original.revisionId
+  ) {
     state.views.balance_front.revisionId = state.views.original.revisionId;
     state.views.balance_front.relativePath = state.views.original.relativePath;
   }
-  if (!state.views.balance_left.revisionId && state.views.body_left.revisionId) {
+  if (
+    !state.views.balance_left.revisionId &&
+    state.views.body_left.revisionId
+  ) {
     state.views.balance_left.revisionId = state.views.body_left.revisionId;
     state.views.balance_left.relativePath = state.views.body_left.relativePath;
   }
-  if (!state.views.balance_back.revisionId && state.views.body_back.revisionId) {
+  if (
+    !state.views.balance_back.revisionId &&
+    state.views.body_back.revisionId
+  ) {
     state.views.balance_back.revisionId = state.views.body_back.revisionId;
     state.views.balance_back.relativePath = state.views.body_back.relativePath;
   }
@@ -2010,7 +2097,11 @@ with zipfile.ZipFile(zp, 'r') as z:
   const roleToGroup = (role: string, idStr: string): TextureGroupId => {
     const r = (role || "").toLowerCase();
     if (r.includes("hair")) return "hair";
-    if (r.includes("face") || r.includes("head") || idStr.includes("head_00020"))
+    if (
+      r.includes("face") ||
+      r.includes("head") ||
+      idStr.includes("head_00020")
+    )
       return "head";
     if (
       r.includes("jacket") ||
@@ -2233,10 +2324,7 @@ with zipfile.ZipFile(zp, 'r') as z:
       node.outputRevisionIds = headCandRevs;
     } else if (node.key === "body_candidates" && bodyCandRevs.length) {
       node.outputRevisionIds = bodyCandRevs;
-    } else if (
-      node.key === "vrm_export" &&
-      state.vrmDelivery.vrmRevisionId
-    ) {
+    } else if (node.key === "vrm_export" && state.vrmDelivery.vrmRevisionId) {
       node.outputRevisionIds = [
         state.vrmDelivery.vrmRevisionId,
         ...(state.vrmDelivery.blendRevisionId
@@ -2269,7 +2357,9 @@ export function dispatchCharacterWorkflowRoute(
   body: unknown,
 ): unknown {
   const payload = {
-    ...(body && typeof body === "object" ? (body as Record<string, unknown>) : {}),
+    ...(body && typeof body === "object"
+      ? (body as Record<string, unknown>)
+      : {}),
     projectId,
   };
   switch (action) {

@@ -9,6 +9,10 @@ import {
 } from "./character-workflow.js";
 import { pickDirectory, pickFiles } from "./directories.js";
 import { assetHttpUrl } from "./asset-http.js";
+import {
+  openCharacterSession,
+  projectChangeVersion,
+} from "./codex-collaboration.js";
 
 export const uiRequestSchema = {
   path: z.string().max(400),
@@ -30,6 +34,14 @@ export async function uiRequest(
     return pickDirectory(body);
   if (method === "POST" && route === "/api/files/pick") return pickFiles(body);
   if (method === "GET" && route === "/api/projects") return core.listProjects();
+  const version = route.match(/^\/api\/projects\/([\w-]+)\/change-version$/);
+  if (method === "GET" && version)
+    return projectChangeVersion(core, version[1]);
+  const session = route.match(
+    /^\/api\/projects\/([\w-]+)\/character-workflow\/open-codex-session$/,
+  );
+  if (method === "POST" && session)
+    return openCharacterSession(core, session[1], body);
   if (method === "GET" && route === "/api/charakuru/local-projects")
     return { projects: discoverLocalCharakuruProjects() };
   const charClaimable = route.match(

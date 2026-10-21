@@ -204,7 +204,7 @@ bake_report_out.write_text(json.dumps(bake_report, indent=2) + "\n", encoding="u
 
 
 def execute_tier3_full_blender(
-    benchmark_id: str = "fantasy_creature_2k_v1",
+    benchmark_id: str = "fantasy_creature_2k_v2",
     fixture_dir: Path | None = None,
     save_baseline: bool = False,
 ) -> dict[str, Any]:
