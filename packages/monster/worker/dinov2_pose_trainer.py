@@ -42,6 +42,7 @@ from bone_taxonomy import (
 )
 from pathlib import Path
 from typing import Any
+from task_progress import format_eta as _format_eta, write_progress_files as _write_progress_files
 
 import numpy as np
 
@@ -355,20 +356,6 @@ def enhanced_pose_losses(pred_uv, logits, aux, gt_uv, labels):
             "total": 10.0*uv_loss + hm_loss + 0.25*depth_loss + 0.25*vis_loss}
 
 
-def _format_eta(seconds: float) -> str:
-    if seconds <= 0:
-        return "即将完成"
-    sec = int(round(seconds))
-    if sec < 60:
-        return f"约 {sec} 秒"
-    mins = round(sec / 60)
-    if mins < 60:
-        return f"约 {mins} 分钟"
-    hours = mins // 60
-    rem_mins = mins % 60
-    return f"约 {hours} 小时 {rem_mins} 分钟"
-
-
 def _query_telemetry() -> dict[str, Any]:
     gpu_name = "unknown"
     vram_used = 0.0
@@ -407,17 +394,6 @@ def _query_telemetry() -> dict[str, Any]:
         "gpu_util_pct": util,
         "display": display_str,
     }
-
-
-def _write_progress_files(targets: list[Path], data: dict[str, Any]) -> None:
-    for target in targets:
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            tmp = target.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-            tmp.replace(target)
-        except Exception:
-            pass
 
 
 def train_monster_dinov2_probe(

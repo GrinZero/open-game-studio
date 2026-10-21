@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parents[1]
 WORKER_MODULES = (
     "pose_features", "pose_visibility", "dinov2_pose_trainer", "pipeline_runner",
-    "studio_bpy_worker", "runtime_metadata", "colab_g4_worker_server",
+    "studio_bpy_worker", "runtime_metadata", "task_progress", "colab_g4_worker_server",
 )
 
 

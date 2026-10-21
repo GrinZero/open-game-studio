@@ -249,7 +249,8 @@ class MigrationTests(unittest.TestCase):
             sys.path.insert(0, str(ROOT / "worker"))
             try:
                 server = load("monster_server", "worker/colab_g4_worker_server.py")
-                dino = load("monster_dino", "worker/dinov2_pose_trainer.py")
+                # Exercise the trainer's shared helpers without importing NumPy or torch.
+                progress = load("monster_task_progress", "worker/task_progress.py")
                 with patch.object(server, "DRIVE_ROOT", temp_path / "drive"), \
                      patch.object(server, "WORK_ROOT", temp_path / "work"):
                     server.write_task_progress(
@@ -266,12 +267,12 @@ class MigrationTests(unittest.TestCase):
                     self.assertEqual(saved["monster_id"], "swamp_troll")
                     self.assertEqual(saved["stage"], "training")
 
-                self.assertEqual(dino._format_eta(45), "约 45 秒")
-                self.assertEqual(dino._format_eta(360), "约 6 分钟")
-                self.assertEqual(dino._format_eta(0), "即将完成")
+                self.assertEqual(progress.format_eta(45), "约 45 秒")
+                self.assertEqual(progress.format_eta(360), "约 6 分钟")
+                self.assertEqual(progress.format_eta(0), "即将完成")
 
                 target_prog = temp_path / "custom_progress.json"
-                dino._write_progress_files([target_prog], {"epoch": 1, "test": True})
+                progress.write_progress_files([target_prog], {"epoch": 1, "test": True})
                 self.assertTrue(target_prog.is_file())
                 self.assertTrue(json.loads(target_prog.read_text())["test"])
             finally:
