@@ -16,12 +16,13 @@ SOURCE_DIRS = {
     "contracts": {".json"},
     "scripts": {".py", ".sh", ".mjs"},
     "notebooks": {".ipynb"},
-    "skills": {".md", ".yaml"},
+    "skills": {".md", ".yaml", ".txt"},
+    "licenses": {".txt"},
 }
 
 
 def source_files(root=ROOT):
-    files = [root / name for name in ("package.json", "README.md")]
+    files = [root / name for name in ("package.json", "README.md", "LICENSE", "LICENSING.md", "THIRD_PARTY.md")]
     for directory, suffixes in SOURCE_DIRS.items():
         files.extend(p for p in (root / directory).rglob("*")
                      if p.is_file() and p.suffix in suffixes and "__pycache__" not in p.parts)

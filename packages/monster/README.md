@@ -63,7 +63,7 @@ npm run monster:package
 
 这两个命令仅使用 Python 标准库，不安装模型、调用 GPU 或提交生成任务。产物位于 `packages/monster/dist/`：
 
-- `monster-<version>.tar.gz`：部署代码与依赖清单。
+- `monster-<version>.tar.gz`：部署代码、依赖清单、AGPL 许可、许可范围及第三方声明。
 - 同名 `.ipynb`：已填写该部署包路径的 Colab 入口。
 
 版本号来自 [package.json](package.json)。只打包明确允许的源文件，不包括模型权重、项目、运行凭据、缓存或训练结果。CI 会检查并上传部署产物，不会自动部署或启动 GPU。
@@ -76,12 +76,20 @@ npm run monster:package
 
 本轮完成代码归属、版本化部署、实际 Worker API 客户端和安装/热更新目录支持。工作台现有 `generation_start` 仍通过本机 Codex 执行；尚未增加 Monster 连接面板、任务调度或自动资源入库。CLI 下载后的产物可通过工作台现有导入功能登记。后续接入应复用已有项目、任务和资源版本，不能新建第二套项目数据库。
 
-协议版本独立于算法 `FEATURE_VERSION` 和工作台 `studioBuild`；本轮协议版本为 1，包版本为 0.1.0。单纯本地构建不会把云端 Worker 更新到同一版本。
+协议版本独立于算法 `FEATURE_VERSION` 和工作台 `studioBuild`；本轮协议版本为 1，包版本为 0.2.0。单纯本地构建不会把云端 Worker 更新到同一版本。
 
 ## 来源与验证边界
 
 来源是用户提供的 [MonsterStudio Notebook](https://drive.google.com/file/d/1Zs1rJSnQC9fa7G76Qdj6ALmArBuom179/view) 与优化版 [Colab Notebook](https://colab.research.google.com/drive/1hmk2iXWntDqXbujEE1i3_9hCcsPLvcuR)（实际构建标识为 `v2.3-20261020004015`，原文件名含 `v2_2_fixed`），已合入热图峰值加权、5×5 峰值概率集中度置信度、2D Hampel 尖峰剔除、5 点 Savitzky–Golay 坐标/四元数滤波及受限局部欧拉多子骨刚性杠杆臂 IK 求解器；不把原 Notebook 的重复 Base64 源码再纳入维护。
 
-六个 Python 算法脚本和 SkinTokens bootstrap 按原源码提取，给 Worker 心跳和登记文件加上包/协议/发布标识。ComfyUI 安装单元格拆成脚本，改用模块路径、环境参数与独立依赖清单。SkinTokens、FlashAttention、ComfyUI、VideoHelperSuite 和 H3 的原固定提交保留。依赖及模型仍适用各自许可，见 [第三方声明](../../licenses/THIRD_PARTY.md)。
+六个 Python 算法脚本和 SkinTokens bootstrap 按原源码提取，给 Worker 心跳和登记文件加上包/协议/发布标识。ComfyUI 安装单元格拆成脚本，改用模块路径、环境参数与独立依赖清单。SkinTokens、FlashAttention、ComfyUI、VideoHelperSuite 和 H3 的原固定提交保留。依赖及模型仍适用各自许可，见 [第三方声明](THIRD_PARTY.md)。
 
 CPU 检查覆盖可解析性、Notebook 入口、实际 API 与契约一致、归档打包、路径越界拦截、版本安装、忙碌重载阻止及客户端调用。它不证明 GPU 安装成功、候选绑定/训练/视频生成质量或 GLB/Blend 的真实工具验收；这些需要在实际 G4 上另行运行。原流程中定义但未注册的 `reexam_only` 不列为可调用 API；原动作 API 的 `bake_glb_on_cloud` 参数尚未控制流水线分支，客户端固定使用现有云端烘焙行为。
+
+## 开源许可
+
+Monster 的项目代码、文档和技能采用 **[GNU AGPL v3 only](LICENSE)**（`AGPL-3.0-only`），版权署名为 `Copyright (c) 2026 GrinZero`。许可范围、旧版 MIT 权利及发布要求见 [许可说明](LICENSING.md)。仓库其他部分的默认 MIT 许可不覆盖本模块或导出的 `monster-workflow` 技能。
+
+AGPL 允许商业使用、收费分发和收费服务。分发时须履行对应源码等义务；修改版通过网络供用户交互时，须按第 13 条向这些用户免费提供该版本的对应源码。这不意味着任何 SaaS、独立客户端或生成资产都自动适用 AGPL，也不要求把独立服务的全部源码公开。
+
+第三方代码、依赖和模型保留自己的许可。特别是 **MiniMax H3 使用带地域、商业门槛和可接受用途限制的社区许可**，不能因为 Monster 改为 AGPL 就视为已获所有商业部署授权。核心上游版本、证据及保留的许可文本见 [第三方声明](THIRD_PARTY.md)。部署归档附带这些说明与许可文本；它不包含模型权重或第三方仓库检出。

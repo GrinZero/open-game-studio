@@ -1,3 +1,11 @@
+Repository licensing scope
+
+The MIT License below applies to this repository except packages/monster/
+and its generated skills/monster-workflow/ copy. Those components use
+AGPL-3.0-only; see packages/monster/LICENSE and packages/monster/LICENSING.md.
+Third-party material retains its own applicable licenses and notices.
+This scope notice does not revoke permissions already granted for older MIT copies.
+
 MIT License
 
 Copyright (c) 2026 GrinZero

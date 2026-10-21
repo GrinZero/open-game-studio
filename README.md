@@ -168,6 +168,6 @@ For development commands, checks, build markers and runtime synchronization, see
 
 ## License and sources
 
-This project is licensed under the [MIT License](LICENSE). Dependency licenses and original sample provenance are recorded in [Third-party notices](licenses/THIRD_PARTY.md).
+The workbench uses the [MIT License](LICENSE); [Monster](packages/monster/LICENSING.md) and its exported workflow skill use [AGPL-3.0-only](packages/monster/LICENSE). Dependency licenses and original sample provenance are recorded in [Third-party notices](licenses/THIRD_PARTY.md).
 
 README presentation takes inspiration from [Tripo Studio for Codex](https://github.com/GrinZero/tripo-studio-plugin); the banner and demo screenshots here belong to this project.

@@ -1,6 +1,6 @@
 {
   "name": "@open-game-studio/monster",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Monster rigging, pose training and animation worker, Colab deployment and client integration",
   "scripts": {
@@ -8,5 +8,6 @@
     "package": "node scripts/run-python.mjs scripts/package-release.py",
     "call": "node scripts/run-python.mjs integration/monster_client.py",
     "eval": "node scripts/run-python.mjs evals/cli.py"
-  }
+  },
+  "license": "AGPL-3.0-only"
 }

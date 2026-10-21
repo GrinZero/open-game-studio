@@ -1,6 +1,6 @@
 # Contributing to Open Game Studio
 
-For installation and everyday use, start with the [English README](README.md) or [Setup](docs/SETUP.md). This guide covers development and maintenance. The project uses the [MIT License](LICENSE). Contributions are provided under the same license; preserve the applicable notices for third-party code or assets.
+For installation and everyday use, start with the [English README](README.md) or [Setup](docs/SETUP.md). This guide covers development and maintenance. The workbench uses the [MIT License](LICENSE); Monster and its exported workflow skill use [AGPL-3.0-only](packages/monster/LICENSE), with scope described in [Monster licensing](packages/monster/LICENSING.md). Contributions are provided under the license applicable to the component; preserve the applicable notices for third-party code or assets.
 
 ## Develop locally
 

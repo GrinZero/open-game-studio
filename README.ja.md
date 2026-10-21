@@ -168,6 +168,6 @@ npm run install:local
 
 ## ライセンスと出典
 
-このプロジェクトは [MIT ライセンス](LICENSE) の下で公開されています。依存ライブラリのライセンスとサンプルの出典は [第三者ライセンス情報](licenses/THIRD_PARTY.md) に記載しています。
+ワークベンチには [MIT ライセンス](LICENSE)、[Monster](packages/monster/LICENSING.md) とそのエクスポートされたワークフロースキルには [AGPL-3.0-only](packages/monster/LICENSE) が適用されます。依存ライブラリのライセンスとサンプルの出典は [第三者ライセンス情報](licenses/THIRD_PARTY.md) に記載しています。
 
 README の見せ方は [Tripo Studio for Codex](https://github.com/GrinZero/tripo-studio-plugin) を参考にしました。ここで使うバナーとデモ画面は本プロジェクトのものです。

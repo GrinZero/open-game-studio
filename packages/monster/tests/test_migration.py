@@ -105,6 +105,12 @@ class MigrationTests(unittest.TestCase):
             result = release.build_release(temporary)
             with tarfile.open(result["archive"]) as tar:
                 names = tar.getnames()
+                self.assertEqual(tar.extractfile("monster/LICENSE").read(), (ROOT / "LICENSE").read_bytes())
+                self.assertIn(b"SkinTokens", tar.extractfile("monster/THIRD_PARTY.md").read())
+                self.assertIn(b"AGPL-3.0-only", tar.extractfile("monster/LICENSING.md").read())
+                self.assertIn(b"VAST-AI-Research", tar.extractfile("monster/licenses/SkinTokens-MIT.txt").read())
+                self.assertEqual(tar.extractfile("monster/skills/monster-workflow/LICENSE.txt").read(), (ROOT / "LICENSE").read_bytes())
+                self.assertEqual(json.load(tar.extractfile("monster/package.json"))["license"], "AGPL-3.0-only")
             self.assertFalse(any("endpoint_registry" in name or "__pycache__" in name for name in names))
             self.assertIn("monster/contracts/protocol.json", names)
             self.assertIn("monster/scripts/bootstrap-skintokens.sh", names)

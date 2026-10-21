@@ -168,6 +168,6 @@ npm run install:local
 
 ## 라이선스와 출처
 
-이 프로젝트는 [MIT 라이선스](LICENSE)를 따릅니다. 의존성 라이선스와 오리지널 예제 출처는 [서드파티 고지](licenses/THIRD_PARTY.md)에 기록되어 있습니다.
+워크벤치는 [MIT 라이선스](LICENSE)를, [Monster](packages/monster/LICENSING.md)와 내보낸 워크플로 스킬은 [AGPL-3.0-only](packages/monster/LICENSE)를 따릅니다. 의존성 라이선스와 오리지널 예제 출처는 [서드파티 고지](licenses/THIRD_PARTY.md)에 기록되어 있습니다.
 
 README 구성은 [Tripo Studio for Codex](https://github.com/GrinZero/tripo-studio-plugin)를 참고했습니다. 이곳의 배너와 예제 화면은 본 프로젝트의 자료입니다.

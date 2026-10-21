@@ -168,6 +168,6 @@ npm run install:local
 
 ## 许可与来源
 
-本项目采用 [MIT 许可证](LICENSE)。依赖许可与原创示例来源见 [第三方声明](licenses/THIRD_PARTY.md)。
+工作台采用 [MIT 许可证](LICENSE)；[Monster](packages/monster/LICENSING.md) 及其导出的工作流技能采用 [AGPL-3.0-only](packages/monster/LICENSE)。依赖许可与原创示例来源见 [第三方声明](licenses/THIRD_PARTY.md)。
 
 README 展示方式参考 [Tripo Studio for Codex](https://github.com/GrinZero/tripo-studio-plugin)；这里的横幅与示例截图来自本项目。
