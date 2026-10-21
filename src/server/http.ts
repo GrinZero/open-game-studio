@@ -7,7 +7,12 @@ import path from "node:path";
 import { z } from "zod";
 import { StudioCore, StudioError } from "./core.js";
 import { dispatch } from "./operations.js";
-import { pickDirectory } from "./directories.js";
+import {
+  discoverLocalCharakuruProjects,
+  dispatchCharacterWorkflowRoute,
+  listClaimableDagNodes,
+} from "./character-workflow.js";
+import { pickDirectory, pickFiles } from "./directories.js";
 import { fileURLToPath } from "node:url";
 import { verifyAssetHttpUrl } from "./asset-http.js";
 const app = express();
@@ -82,12 +87,57 @@ app.get("/api/health", (_req, res) =>
   }),
 );
 app.get("/api/projects", (_req, res) => res.json(core.listProjects()));
+app.get("/api/charakuru/local-projects", (_req, res) =>
+  res.json({ projects: discoverLocalCharakuruProjects() }),
+);
+app.get("/api/projects/:id/character-workflow/claimable", (req, res) =>
+  res.json(
+    listClaimableDagNodes(core, {
+      projectId: req.params.id,
+      runId: typeof req.query.runId === "string" ? req.query.runId : undefined,
+    }),
+  ),
+);
+app.post("/api/projects/:id/character-workflow/:action", (req, res) =>
+  res.json(
+    dispatchCharacterWorkflowRoute(
+      core,
+      req.params.id,
+      req.params.action,
+      req.body,
+    ),
+  ),
+);
 app.post("/api/directories/pick", async (req, res) =>
   res.json(await pickDirectory(req.body)),
+);
+app.post("/api/files/pick", async (req, res) =>
+  res.json(await pickFiles(req.body)),
 );
 app.get("/api/projects/:id", (req, res) =>
   res.json(core.snapshot(req.params.id)),
 );
+app.get("/api/projects/:id/workspace-files", (req, res) =>
+  res.json({ files: core.listWorkspaceFiles(req.params.id) }),
+);
+app.post("/api/projects/:id/import-paths", (req, res) => {
+  const body = z
+    .object({
+      fileRefs: z.array(z.string().min(1).max(4000)).min(1).max(12),
+      name: z.string().optional(),
+      assetId: z.string().optional(),
+      sourceRef: z.string().optional(),
+    })
+    .parse(req.body);
+  res.json(
+    core.importPaths(req.params.id, body.fileRefs, {
+      name: body.name,
+      assetId: body.assetId,
+      sourceRef: body.sourceRef,
+      allowExternalCopy: true,
+    }),
+  );
+});
 app.post("/api/tools/:tool", (req, res) =>
   res.json(dispatch(core, req.params.tool, req.body)),
 );

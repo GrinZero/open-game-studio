@@ -1,9 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createDirectoryPicker } from "../src/server/directories.js";
+import {
+  createDirectoryPicker,
+  createFilePicker,
+} from "../src/server/directories.js";
 import {
   projectDirectoryName,
   projectPath,
@@ -76,4 +85,29 @@ test("其他系统明确提示手动输入，不调用本机脚本", async () =>
     assert.fail("should not launch");
   }, "linux");
   await assert.rejects(picker({ mode: "link" }), /手动填写/);
+});
+
+test("原生文件选择器返回真实文件路径列表，支持取消与校验", async () => {
+  const temp = mkdtempSync(path.join(os.tmpdir(), "studio-file-picker-"));
+  const f1 = path.join(temp, "hero.png");
+  const f2 = path.join(temp, "design.md");
+  writeFileSync(f1, "png");
+  writeFileSync(f2, "# doc");
+  try {
+    const picker = createFilePicker(async (args) => {
+      assert.equal(args[5], realpathSync(temp));
+      return `${f1}\n${f2}\n`;
+    }, "darwin");
+    const result = await picker({ initialPath: temp });
+    assert.equal(result.cancelled, false);
+    assert.deepEqual(result.paths, [realpathSync(f1), realpathSync(f2)]);
+
+    const cancelPicker = createFilePicker(async () => "", "darwin");
+    assert.deepEqual(await cancelPicker({ initialPath: temp }), {
+      cancelled: true,
+      paths: null,
+    });
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
 });

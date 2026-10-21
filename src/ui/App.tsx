@@ -17,6 +17,7 @@ import studioIcon from "../../assets/icon.svg";
 import { CodexHandoff } from "./CodexHandoff";
 import { CodexReferenceBar } from "./CodexReferences";
 import { VersionBadge } from "./VersionBadge";
+import { CharacterWorkflowPage } from "./CharacterWorkflowPage";
 import { launchProject, subscribeLaunch } from "./workbench-launch";
 import {
   useCallback,
@@ -915,7 +916,13 @@ function ProjectModal({
   );
 }
 
-type View = "overview" | "assets" | "canvas" | "runs" | "settings";
+type View =
+  | "overview"
+  | "assets"
+  | "canvas"
+  | "character"
+  | "runs"
+  | "settings";
 
 function Workspace({
   snapshot: s,
@@ -978,6 +985,14 @@ function Workspace({
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [pathModalOpen, setPathModalOpen] = useState(false);
+  const [pendingPaths, setPendingPaths] = useState<string[]>([]);
+  const [workspaceFiles, setWorkspaceFiles] = useState<
+    { relativePath: string; name: string; sizeBytes: number }[]
+  >([]);
+  const [pathQuery, setPathQuery] = useState("");
+  const [manualPath, setManualPath] = useState("");
+  const [pickingFiles, setPickingFiles] = useState(false);
   const [importName, setImportName] = useState("");
   const [importTarget, setImportTarget] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1096,6 +1111,24 @@ function Workspace({
     notify("已添加资源引用");
   };
 
+  const openPathImportModal = (
+    position?: { x: number; y: number },
+    targetAssetId = "",
+  ) => {
+    setImportPosition(position);
+    setImportTarget(targetAssetId);
+    setPendingPaths([]);
+    setImportName("");
+    setPathQuery("");
+    setManualPath("");
+    setPathModalOpen(true);
+    request<{
+      files: { relativePath: string; name: string; sizeBytes: number }[];
+    }>(`/api/projects/${s.project.id}/workspace-files`)
+      .then((res) => setWorkspaceFiles(res.files || []))
+      .catch(() => setWorkspaceFiles([]));
+  };
+
   const chooseResource = (
     kind: AddResourceKind,
     at = freePosition(c, {
@@ -1107,6 +1140,10 @@ function Workspace({
     if (kind === "text") {
       setNoteAction({ position: at });
       setModal("note");
+      return;
+    }
+    if (kind === "path") {
+      openPathImportModal(at, "");
       return;
     }
     if (kind === "upload" || kind === "source") {
@@ -1126,6 +1163,75 @@ function Workspace({
       ),
     });
   };
+
+  async function pickLocalFiles() {
+    setPickingFiles(true);
+    try {
+      const res = await request<{
+        cancelled: boolean;
+        paths: string[] | null;
+      }>("/api/files/pick", {
+        method: "POST",
+        body: JSON.stringify({ initialPath: s.project.root }),
+      });
+      if (!res.cancelled && res.paths?.length) {
+        const merged = Array.from(new Set([...pendingPaths, ...res.paths]));
+        setPendingPaths(merged);
+        if (!importName.trim() && merged.length >= 1) {
+          const base = merged[0].split(/[\\/]/).pop() || "";
+          setImportName(base.replace(/\.[^.]+$/, ""));
+        }
+      }
+    } catch {
+    } finally {
+      setPickingFiles(false);
+    }
+  }
+
+  async function submitPathImport() {
+    if (!pendingPaths.length) return;
+    setBusy(true);
+    try {
+      await perform(async () => {
+        const revision = await request<AssetRevision>(
+          `/api/projects/${s.project.id}/import-paths`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              fileRefs: pendingPaths,
+              name: importName || undefined,
+              assetId: importTarget || undefined,
+            }),
+          },
+        );
+        if (importPosition) {
+          const fallbackTitle = (pendingPaths[0].split(/[\\/]/).pop() || "")
+            .replace(/\.[^.]+$/, "");
+          const node: StudioNode = {
+            id: uuid(),
+            type: "asset",
+            position: importPosition,
+            data: {
+              title: importName || fallbackTitle || "资源",
+              assetId: revision.assetId,
+              revisionId: revision.id,
+            },
+          };
+          await patch("graph", [{ op: "add", node }]);
+          chooseNodes([node.id]);
+        }
+      });
+      setPathModalOpen(false);
+      setPendingPaths([]);
+      setImportName("");
+      setImportTarget("");
+      setImportPosition(undefined);
+      notify("已引用路径并登记版本");
+    } catch {
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function uploadFiles() {
     if (!pendingFiles.length) return;
@@ -1248,6 +1354,7 @@ function Workspace({
     ["overview", <LayoutGrid size={15} />, "概览"],
     ["assets", <ImageIcon size={15} />, "资源"],
     ["canvas", <Layers size={15} />, "画布"],
+    ["character", <Workflow size={15} />, "角色工作流"],
     ["runs", <Workflow size={15} />, "运行记录"],
     ["settings", <Settings size={15} />, "项目设置"],
   ];
@@ -1700,11 +1807,27 @@ function Workspace({
                     setImportTarget(id);
                     inputRef.current?.click();
                   }}
+                  onImportPathVersion={(id) =>
+                    openPathImportModal(undefined, id)
+                  }
+                  onOpenCharacterWorkflow={(targetRunId) => {
+                    if (targetRunId) setRunId(targetRunId);
+                    navigate("character");
+                  }}
                 />
               )}
             </div>
           </>
         ) : null}
+        {view === "character" && (
+          <CharacterWorkflowPage
+            s={s}
+            activeRunId={runId}
+            onSelectRun={(id) => setRunId(id)}
+            refresh={refresh}
+            notify={notify}
+          />
+        )}
         {view === "assets" && (
           <div className="content-page">
             <div className="page-title">
@@ -1712,16 +1835,25 @@ function Workspace({
                 <h1>项目资源</h1>
                 <p>集中查看与管理所有不可变素材及版本记录。</p>
               </div>
-              <button
-                className="button small primary"
-                onClick={() => {
-                  setImportPosition(undefined);
-                  inputRef.current?.click();
-                }}
-              >
-                <Upload size={14} />
-                导入资源
-              </button>
+              <div style={{ display: "flex", gap: "8px" }}>
+                <button
+                  className="button small"
+                  onClick={() => openPathImportModal(undefined, "")}
+                >
+                  <FolderOpen size={14} />
+                  引用本地路径
+                </button>
+                <button
+                  className="button small primary"
+                  onClick={() => {
+                    setImportPosition(undefined);
+                    inputRef.current?.click();
+                  }}
+                >
+                  <Upload size={14} />
+                  导入资源
+                </button>
+              </div>
             </div>
             <div className="resource-toolbar">
               <label className="resource-category-filter">
@@ -2087,6 +2219,18 @@ function Workspace({
               <button
                 className="button small"
                 onClick={() => {
+                  const pos = importPosition;
+                  const target = importTarget;
+                  setPendingFiles([]);
+                  openPathImportModal(pos, target);
+                }}
+              >
+                <FolderOpen size={14} />
+                切换为本地路径引用
+              </button>
+              <button
+                className="button small"
+                onClick={() => {
                   setPendingFiles([]);
                   setImportTarget("");
                   setImportPosition(undefined);
@@ -2105,6 +2249,266 @@ function Workspace({
                   <Upload size={14} />
                 )}
                 导入并登记版本
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+      {pathModalOpen && (
+        <Modal
+          title="引用本地文件路径"
+          onClose={() => {
+            setPathModalOpen(false);
+            setPendingPaths([]);
+            setImportTarget("");
+            setImportPosition(undefined);
+          }}
+        >
+          <div className="modal-body" style={{ padding: 0 }}>
+            <p className="modal-description">
+              直接引用项目目录内的文件路径（零复制）；若选择项目外文件则自动归档到{" "}
+              <code className="mono">.game-studio/assets</code>{" "}
+              并按哈希去重，随仓库上传后其他成员拉取即可正常显示。
+            </p>
+            <div
+              style={{
+                display: "flex",
+                gap: "8px",
+                marginBottom: "10px",
+                alignItems: "center",
+              }}
+            >
+              <button
+                type="button"
+                className="button small"
+                disabled={pickingFiles}
+                onClick={pickLocalFiles}
+              >
+                {pickingFiles ? (
+                  <Loader2 size={14} className="spin" />
+                ) : (
+                  <FolderOpen size={14} />
+                )}
+                浏览本机文件…
+              </button>
+              <input
+                value={manualPath}
+                onChange={(e) => setManualPath(e.target.value)}
+                placeholder="输入项目内相对路径（如 sprites/hero.png）或绝对路径"
+                aria-label="文件路径"
+                style={{ flex: 1 }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && manualPath.trim()) {
+                    e.preventDefault();
+                    const p = manualPath.trim();
+                    const next = Array.from(new Set([...pendingPaths, p]));
+                    setPendingPaths(next);
+                    setManualPath("");
+                    if (!importName.trim()) {
+                      const base = p.split(/[\\/]/).pop() || "";
+                      setImportName(base.replace(/\.[^.]+$/, ""));
+                    }
+                  }
+                }}
+              />
+              <button
+                type="button"
+                className="button small"
+                disabled={!manualPath.trim()}
+                onClick={() => {
+                  const p = manualPath.trim();
+                  if (!p) return;
+                  const next = Array.from(new Set([...pendingPaths, p]));
+                  setPendingPaths(next);
+                  setManualPath("");
+                  if (!importName.trim()) {
+                    const base = p.split(/[\\/]/).pop() || "";
+                    setImportName(base.replace(/\.[^.]+$/, ""));
+                  }
+                }}
+              >
+                添加路径
+              </button>
+            </div>
+            {workspaceFiles.length > 0 && (
+              <div style={{ marginBottom: "12px" }}>
+                <label className="field" style={{ marginBottom: "6px" }}>
+                  项目目录内已有文件（点击直接勾选引用）
+                  <input
+                    value={pathQuery}
+                    onChange={(e) => setPathQuery(e.target.value)}
+                    placeholder="筛选项目内文件…"
+                  />
+                </label>
+                <div
+                  style={{
+                    maxHeight: "150px",
+                    overflowY: "auto",
+                    border: "1px solid var(--border-subtle)",
+                    borderRadius: "6px",
+                    padding: "4px",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "4px",
+                  }}
+                >
+                  {workspaceFiles
+                    .filter((f) =>
+                      `${f.relativePath} ${f.name}`
+                        .toLowerCase()
+                        .includes(pathQuery.toLowerCase()),
+                    )
+                    .slice(0, 80)
+                    .map((f) => {
+                      const checked = pendingPaths.includes(f.relativePath);
+                      return (
+                        <button
+                          type="button"
+                          key={f.relativePath}
+                          onClick={() => {
+                            const next = checked
+                              ? pendingPaths.filter((p) => p !== f.relativePath)
+                              : [...pendingPaths, f.relativePath];
+                            setPendingPaths(next);
+                            if (!importName.trim() && next.length === 1) {
+                              const base = next[0].split(/[\\/]/).pop() || "";
+                              setImportName(base.replace(/\.[^.]+$/, ""));
+                            }
+                          }}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "8px",
+                            padding: "5px 8px",
+                            background: checked
+                              ? "var(--bg-elevated)"
+                              : "transparent",
+                            border: "none",
+                            borderRadius: "4px",
+                            textAlign: "left",
+                            cursor: "pointer",
+                            fontSize: "12px",
+                            color: "var(--text-primary)",
+                          }}
+                        >
+                          <Check
+                            size={13}
+                            style={{ opacity: checked ? 1 : 0.2 }}
+                          />
+                          <code
+                            className="mono"
+                            style={{
+                              flex: 1,
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                            }}
+                          >
+                            {f.relativePath}
+                          </code>
+                          <span className="mono muted">
+                            {Math.max(1, Math.round(f.sizeBytes / 1024))} KB
+                          </span>
+                        </button>
+                      );
+                    })}
+                </div>
+              </div>
+            )}
+            {pendingPaths.length > 0 && (
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "6px",
+                  marginBottom: "14px",
+                }}
+              >
+                {pendingPaths.map((p) => (
+                  <div
+                    key={p}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "8px",
+                      padding: "6px 10px",
+                      background: "var(--bg-surface)",
+                      borderRadius: "6px",
+                      fontSize: "12px",
+                    }}
+                  >
+                    <FileText size={14} />
+                    <code
+                      className="mono"
+                      style={{
+                        flex: 1,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      }}
+                    >
+                      {p}
+                    </code>
+                    <button
+                      type="button"
+                      className="icon-button"
+                      aria-label={`移除 ${p}`}
+                      onClick={() =>
+                        setPendingPaths(pendingPaths.filter((x) => x !== p))
+                      }
+                    >
+                      <X size={13} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <label className="field">
+              资源名称
+              <input
+                required
+                value={importName}
+                onChange={(e) => setImportName(e.target.value)}
+                placeholder="例如：巡林者 · 角色模型"
+              />
+            </label>
+            <label className="field">
+              版本归属
+              <select
+                value={importTarget}
+                onChange={(e) => setImportTarget(e.target.value)}
+              >
+                <option value="">新建独立资源</option>
+                {s.assets
+                  .filter((a) => !a.archived)
+                  .map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.name} · 添加新版本
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <div className="modal-footer">
+              <button
+                className="button small"
+                onClick={() => {
+                  setPathModalOpen(false);
+                  setPendingPaths([]);
+                  setImportTarget("");
+                  setImportPosition(undefined);
+                }}
+              >
+                取消
+              </button>
+              <button
+                className="button small primary"
+                disabled={busy || !importName.trim() || !pendingPaths.length}
+                onClick={submitPathImport}
+              >
+                {busy ? (
+                  <Loader2 size={14} className="spin" />
+                ) : (
+                  <FolderOpen size={14} />
+                )}
+                引用并登记版本
               </button>
             </div>
           </div>
@@ -3931,8 +4335,10 @@ function Inspector({
   selected,
   canvas,
   onImportVersion,
+  onImportPathVersion,
   onPreviewNote,
   onContext,
+  onOpenCharacterWorkflow,
 }: {
   snapshot: ProjectSnapshot;
   asset?: Asset;
@@ -3950,8 +4356,10 @@ function Inspector({
   selected: string[];
   canvas: Canvas;
   onImportVersion: (id: string) => void;
+  onImportPathVersion: (id: string) => void;
   onPreviewNote: () => void;
   onContext: () => void;
+  onOpenCharacterWorkflow?: (runId?: string) => void;
 }) {
   const [tab, setTab] = useState("preview");
   const [previewRevisionId, setPreviewRevisionId] = useState("");
@@ -3994,6 +4402,7 @@ function Inspector({
           canvas={canvas}
           mutate={mutate}
           notify={notify}
+          onOpenCharacterWorkflow={onOpenCharacterWorkflow}
         />
       ) : asset && r ? (
         <>
@@ -4097,6 +4506,13 @@ function Inspector({
                   <Upload size={13} />
                   导入新版本
                 </button>
+                <button
+                  className="button small"
+                  onClick={() => onImportPathVersion(asset.id)}
+                >
+                  <FolderOpen size={13} />
+                  引用路径更新版本
+                </button>
                 {selected.length > 0 && (
                   <button className="button small primary" onClick={onContext}>
                     <Link2 size={13} />
@@ -4114,6 +4530,9 @@ function Inspector({
                       index={i}
                       name={f.name}
                     />
+                    <code className="mono muted" title={f.relativePath}>
+                      路径 {f.relativePath}
+                    </code>
                     <code className="mono muted" title={f.sha256}>
                       SHA256 {f.sha256.slice(0, 16)}…
                     </code>
@@ -4535,6 +4954,7 @@ function WorkflowInspector({
   canvas,
   mutate,
   notify,
+  onOpenCharacterWorkflow,
 }: {
   snapshot: ProjectSnapshot;
   run?: WorkflowRun;
@@ -4542,6 +4962,7 @@ function WorkflowInspector({
   canvas: Canvas;
   mutate: (n: string, a: unknown) => Promise<any>;
   notify: (s: string) => void;
+  onOpenCharacterWorkflow?: (runId?: string) => void;
 }) {
   const [chosen, setChosen] = useState<string[]>([]);
   const [comment, setComment] = useState("");
@@ -4627,9 +5048,19 @@ function WorkflowInspector({
         <Workflow size={18} />
         <div>
           <h3>角色制作</h3>
-          <small>8 阶段流水线</small>
+          <small>8 阶段流水线 · 23 节点 DAG</small>
         </div>
       </div>
+      {onOpenCharacterWorkflow && (
+        <button
+          type="button"
+          className="button small full"
+          onClick={() => onOpenCharacterWorkflow(run?.id)}
+        >
+          <ArrowUpRight size={13} />
+          打开角色工作流 (DAG) 独立页面
+        </button>
+      )}
       {actionError && (
         <p className="input-error" role="alert">
           {actionError}

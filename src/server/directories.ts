@@ -26,8 +26,40 @@ function run(argv) {
   return panel.runModal === $.NSModalResponseOK ? ObjC.unwrap(panel.URL.path) : '';
 }`;
 
+const fileScript = `
+ObjC.import('AppKit');
+function run(argv) {
+  const app = $.NSApplication.sharedApplication;
+  app.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
+  app.activateIgnoringOtherApps(true);
+  const panel = $.NSOpenPanel.openPanel;
+  panel.canChooseFiles = true;
+  panel.canChooseDirectories = false;
+  panel.allowsMultipleSelection = true;
+  panel.canCreateDirectories = false;
+  panel.title = argv[0];
+  panel.prompt = '选择';
+  panel.directoryURL = $.NSURL.fileURLWithPath(argv[1]);
+  if (panel.runModal !== $.NSModalResponseOK) return '[]';
+  const urls = panel.URLs;
+  const count = Number(urls.count);
+  const paths = [];
+  for (let i = 0; i < count; i++) {
+    paths.push(ObjC.unwrap(urls.objectAtIndex(i).path));
+  }
+  return JSON.stringify(paths);
+}`;
+
 export const directoryPickerSchema = z.object({
   mode: z.enum(["create", "link"]),
+  initialPath: z
+    .string()
+    .max(4096)
+    .refine((p) => !p.includes("\0"))
+    .optional(),
+});
+
+export const filePickerSchema = z.object({
   initialPath: z
     .string()
     .max(4096)
@@ -101,3 +133,67 @@ export function createDirectoryPicker(
 }
 
 export const pickDirectory = createDirectoryPicker();
+
+export function createFilePicker(
+  run: (args: string[]) => Promise<string> = async (args) => {
+    const { stdout } = await execute("/usr/bin/osascript", args, {
+      timeout: 120000,
+      killSignal: "SIGKILL",
+      maxBuffer: 65536,
+    });
+    return stdout.replace(/\r?\n$/, "");
+  },
+  platform: NodeJS.Platform = process.platform,
+) {
+  let active = false;
+  return async (
+    input: unknown,
+  ): Promise<{ cancelled: boolean; paths: string[] | null }> => {
+    const { initialPath } = filePickerSchema.parse(input || {});
+    if (platform !== "darwin")
+      throw new StudioError(
+        400,
+        "当前系统暂不支持原生文件选择，请直接选择项目内文件或输入路径。",
+      );
+    if (active)
+      throw new StudioError(409, "文件选择窗口已打开，请先完成或取消选择。");
+    active = true;
+    try {
+      const selected = await run([
+        "-l",
+        "JavaScript",
+        "-e",
+        fileScript,
+        "选择资源文件",
+        startingDirectory(initialPath),
+      ]);
+      const trimmed = selected.trim();
+      if (!trimmed) return { cancelled: true, paths: null };
+      const rawItems = trimmed.startsWith("[")
+        ? JSON.parse(trimmed)
+        : trimmed.split(/\r?\n/).filter(Boolean);
+      const parsed = z.array(z.string()).max(12).parse(rawItems);
+      if (!parsed.length) return { cancelled: true, paths: null };
+      const paths = parsed.map((item) => {
+        if (
+          !path.isAbsolute(item) ||
+          !existsSync(item) ||
+          !statSync(item).isFile()
+        )
+          throw new StudioError(400, "所选文件不可用，请重新选择。");
+        return realpathSync(item);
+      });
+      return { cancelled: false, paths };
+    } catch (error) {
+      if (error instanceof StudioError) throw error;
+      throw new StudioError(
+        503,
+        "无法完成文件选择，请重试或直接选择项目内文件。",
+      );
+    } finally {
+      active = false;
+    }
+  };
+}
+
+export const pickFiles = createFilePicker();

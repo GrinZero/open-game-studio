@@ -3,13 +3,13 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   realpathSync,
   readFileSync,
   writeFileSync,
   renameSync,
   rmSync,
   statSync,
-  copyFileSync,
 } from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -35,6 +35,12 @@ import {
   canvasInputPrompt,
   resolveCanvasInputs,
 } from "../shared/canvas-inputs.js";
+import {
+  createInitialCharacterDag,
+  createInitialCharacterWorkflowState,
+  syncDagToMacroSteps,
+  syncMacroStepsToDag,
+} from "../shared/character-dag.js";
 
 export class StudioError extends Error {
   constructor(
@@ -142,6 +148,34 @@ const phases: Array<{
     note: "组织固定版本、校验 hash 并导出 manifest。引擎验收保持未验证。",
   },
 ];
+function ensureRunDag(r: WorkflowRun, fromLegacyMacro = false): WorkflowRun {
+  const hadDag = Boolean(r.dag && r.dag.length);
+  if (!r.dag || !r.dag.length) {
+    r.dag = createInitialCharacterDag(r.inputRevisionIds || []);
+  }
+  if (!r.dagState) {
+    const firstImgItem = r.inputSnapshot?.items.find((i) => i.kind === "image");
+    r.dagState = createInitialCharacterWorkflowState(
+      firstImgItem?.title || "角色制作",
+      r.inputSnapshot?.prompt || "",
+      firstImgItem?.revisionId,
+      firstImgItem?.files?.[0]?.relativePath,
+    );
+  }
+  if (r.dagState?.importedCharakit) {
+    for (const n of r.dag) {
+      n.status = "succeeded";
+      n.stale = false;
+      delete n.completedInputStamp;
+    }
+  }
+  if (!hadDag || fromLegacyMacro) {
+    syncMacroStepsToDag(r);
+  } else {
+    syncDagToMacroSteps(r);
+  }
+  return r;
+}
 function openDb(file: string) {
   const d = new DatabaseSync(file);
   d.exec(
@@ -214,9 +248,148 @@ function within(root: string, file: string) {
     fail("文件位于登记的项目目录之外", 403);
   return resolved;
 }
+function toRelativePath(root: string, file: string) {
+  return path
+    .relative(realpathSync(root), realpathSync(file))
+    .replaceAll("\\", "/");
+}
+function isWithinRoot(root: string, file: string): string | undefined {
+  try {
+    const resolved = realpathSync(file);
+    const rel = path.relative(realpathSync(root), resolved);
+    if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel))
+      return undefined;
+    return resolved;
+  } catch {
+    return undefined;
+  }
+}
 function safeDir(root: string, dir: string) {
   mkdirSync(dir, { recursive: true });
   return within(root, dir);
+}
+const supportedExtensions = new Set([
+  ".glb",
+  ".vrm",
+  ".vrma",
+  ".fbx",
+  ".blend",
+  ".charakit",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".webp",
+  ".gif",
+  ".md",
+  ".txt",
+  ".json",
+  ".mp4",
+  ".wav",
+  ".mp3",
+  ".webm",
+  ".ogg",
+  ".m4a",
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".css",
+  ".html",
+  ".gd",
+  ".py",
+  ".shader",
+  ".glsl",
+  ".cs",
+  ".toml",
+  ".yaml",
+  ".yml",
+]);
+function extKind(ext: string): AssetKind {
+  if ([".glb", ".vrm", ".vrma", ".fbx"].includes(ext)) return "model";
+  if ([".png", ".jpg", ".jpeg", ".webp", ".gif"].includes(ext)) return "image";
+  if ([".md", ".txt", ".json"].includes(ext)) return "document";
+  if ([".mp4", ".webm"].includes(ext)) return "video";
+  if ([".wav", ".mp3", ".ogg", ".m4a"].includes(ext)) return "audio";
+  return "source";
+}
+function findExistingProjectFile(
+  root: string,
+  name: string,
+  sizeBytes: number,
+  sha256: string,
+): string | undefined {
+  let projectMatch: string | undefined;
+  let studioMatch: string | undefined;
+  let scanned = 0;
+  const targetName = name.toLowerCase();
+  const targetExt = path.extname(name).toLowerCase();
+  const walk = (dir: string, insideStudio: boolean): string | undefined => {
+    if (scanned >= 2000) return undefined;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return undefined;
+    }
+    for (const entry of entries) {
+      if (scanned >= 2000) break;
+      if (entry.name === ".git" || entry.name === "node_modules") continue;
+      if (!insideStudio && entry.name.startsWith(".") && entry.name !== ".game-studio")
+        continue;
+      if (insideStudio && (entry.name === "work" || entry.name === "exports"))
+        continue;
+      const full = path.join(dir, entry.name);
+      const resolved = isWithinRoot(root, full);
+      if (!resolved) continue;
+      let st;
+      try {
+        st = statSync(resolved);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) {
+        const exact = walk(
+          resolved,
+          insideStudio || entry.name === ".game-studio",
+        );
+        if (exact) return exact;
+      } else if (st.isFile() && st.size === sizeBytes) {
+        scanned++;
+        try {
+          const hash = createHash("sha256")
+            .update(readFileSync(resolved))
+            .digest("hex");
+          if (hash !== sha256) continue;
+          const rel = toRelativePath(root, resolved);
+          const sameName = entry.name.toLowerCase() === targetName;
+          if (!insideStudio) {
+            if (sameName) return rel;
+            if (!projectMatch && path.extname(entry.name).toLowerCase() === targetExt)
+              projectMatch = rel;
+          } else if (sameName && !studioMatch) {
+            studioMatch = rel;
+          }
+        } catch {
+          continue;
+        }
+      }
+    }
+    return undefined;
+  };
+  const exact = walk(root, false);
+  return exact || projectMatch || studioMatch;
+}
+function hasProjectStore(root: string) {
+  return (
+    existsSync(path.join(root, ".game-studio", "studio.db")) ||
+    existsSync(path.join(root, ".game-studio", "state.json"))
+  );
+}
+function ensureStudioGitignore(dir: string) {
+  const ignoreFile = path.join(dir, ".gitignore");
+  if (!existsSync(ignoreFile)) {
+    writeFileSync(ignoreFile, "studio.db-wal\nstudio.db-shm\nwork/\n");
+  }
 }
 function identify(
   name: string,
@@ -260,6 +433,23 @@ function identify(
       offset += 8 + len;
     }
     return { kind: "model", mime: "model/gltf-binary", role: "runtime" };
+  }
+  if (ext === ".vrm" || ext === ".vrma") {
+    if (bytes.length < 20 || bytes.toString("ascii", 0, 4) !== "glTF")
+      fail("VRM/VRMA 文件头无效");
+    return { kind: "model", mime: "model/gltf-binary", role: "runtime" };
+  }
+  if (ext === ".fbx") {
+    if (bytes.length < 16) fail("FBX 文件长度无效");
+    return { kind: "model", mime: "application/octet-stream", role: "runtime" };
+  }
+  if (ext === ".charakit") {
+    if (
+      bytes.length < 4 ||
+      !bytes.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]))
+    )
+      fail("Charakit 归档文件头无效");
+    return { kind: "source", mime: "application/zip", role: "source" };
   }
   if (ext === ".blend") {
     if (bytes.length < 12 || bytes.toString("ascii", 0, 7) !== "BLENDER")
@@ -373,17 +563,208 @@ export class StudioCore {
     return rows<Project>(this.registry, "projects")
       .map((p) => ({
         ...p,
-        available: existsSync(path.join(p.root, ".game-studio", "studio.db")),
+        available: hasProjectStore(p.root),
       }))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+  private hydrateDbFromStateFile(db: DatabaseSync, root: string) {
+    const stateFile = path.join(root, ".game-studio", "state.json");
+    if (!existsSync(stateFile)) return;
+    try {
+      const raw = readFileSync(within(root, stateFile), "utf8");
+      const sha256 = createHash("sha256").update(raw).digest("hex");
+      const recorded = db
+        .prepare("SELECT value FROM meta WHERE key='stateSha256'")
+        .get() as { value: string } | undefined;
+      const storedId = db
+        .prepare("SELECT value FROM meta WHERE key='projectId'")
+        .get() as { value: string } | undefined;
+      if (storedId && recorded?.value === sha256) return;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") return;
+      createProjectTables(db);
+      transaction(db, () => {
+        if (parsed.project?.id) {
+          db.prepare(
+            "INSERT INTO meta(key,value) VALUES ('projectId',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+          ).run(String(parsed.project.id));
+          db.prepare(
+            "INSERT INTO meta(key,value) VALUES ('projectMeta',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+          ).run(json(parsed.project));
+        }
+        for (const table of [
+          "assets",
+          "revisions",
+          "canvases",
+          "tasks",
+          "runs",
+          "reviews",
+          "exports",
+        ] as const) {
+          if (Array.isArray(parsed[table])) {
+            db.exec(`DELETE FROM ${table}`);
+            for (const item of parsed[table]) {
+              if (item && typeof item.id === "string") put(db, table, item);
+            }
+          }
+        }
+        db.prepare(
+          "INSERT INTO meta(key,value) VALUES ('stateSha256',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        ).run(sha256);
+      });
+    } catch {
+      /* Keep existing SQLite state if state.json cannot be parsed. */
+    }
+  }
+  private syncProjectState(db: DatabaseSync, p: Project) {
+    try {
+      const hasTasks = db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'",
+        )
+        .get();
+      if (!hasTasks) return;
+      const projectMeta = {
+        id: p.id,
+        name: p.name,
+        engine: p.engine,
+        collection: p.collection,
+        archived: p.archived,
+        createdAt: p.createdAt,
+        updatedAt: p.updatedAt,
+        ...(p.cover ? { cover: p.cover } : {}),
+      };
+      db.prepare(
+        "INSERT INTO meta(key,value) VALUES ('projectId',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+      ).run(p.id);
+      db.prepare(
+        "INSERT INTO meta(key,value) VALUES ('projectMeta',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+      ).run(json(projectMeta));
+      const state = {
+        schemaVersion: 1,
+        project: projectMeta,
+        assets: rows<Asset>(db, "assets"),
+        revisions: rows<AssetRevision>(db, "revisions"),
+        canvases: rows<Canvas>(db, "canvases"),
+        tasks: rows<GenerationTask>(db, "tasks"),
+        runs: rows<WorkflowRun>(db, "runs"),
+        reviews: rows<ReviewDecision>(db, "reviews"),
+        exports: rows<ExportBundle>(db, "exports").map((b) => ({
+          ...b,
+          path: path.isAbsolute(b.path)
+            ? path.relative(p.root, b.path).replaceAll("\\", "/")
+            : b.path,
+        })),
+      };
+      const serialized = `${JSON.stringify(state, null, 2)}\n`;
+      const stateSha256 = createHash("sha256").update(serialized).digest("hex");
+      db.prepare(
+        "INSERT INTO meta(key,value) VALUES ('stateSha256',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+      ).run(stateSha256);
+      const dir = path.join(p.root, ".game-studio");
+      if (existsSync(dir)) {
+        ensureStudioGitignore(dir);
+        writeFileSync(path.join(dir, "state.json"), serialized);
+      }
+    } catch {
+      /* Ignore sync failure if a test dropped tables or removed directory. */
+    }
+  }
+  private readStoredProjectMeta(
+    db: DatabaseSync,
+    root: string,
+  ): Partial<Project> | undefined {
+    try {
+      const row = db
+        .prepare("SELECT value FROM meta WHERE key='projectMeta'")
+        .get() as { value: string } | undefined;
+      if (row?.value) return JSON.parse(row.value);
+    } catch {}
+    const stateFile = path.join(root, ".game-studio", "state.json");
+    if (existsSync(stateFile)) {
+      try {
+        const parsed = JSON.parse(readFileSync(within(root, stateFile), "utf8"));
+        if (parsed?.project) return parsed.project;
+      } catch {}
+    }
+    return undefined;
+  }
+  discoverWorkspaces(roots: string[]) {
+    for (const raw of roots) {
+      let current: string;
+      try {
+        const candidate = raw.startsWith("file:")
+          ? new URL(raw).pathname
+          : raw;
+        if (!path.isAbsolute(candidate) || !existsSync(candidate)) continue;
+        current = realpathSync(candidate);
+      } catch {
+        continue;
+      }
+      while (true) {
+        if (hasProjectStore(current)) {
+          const all = rows<Project>(this.registry, "projects");
+          if (all.some((p) => p.root === current)) break;
+          try {
+            const dir = safeDir(current, path.join(current, ".game-studio"));
+            const file = path.join(dir, "studio.db");
+            const d = openDb(file);
+            createProjectTables(d);
+            try {
+              this.hydrateDbFromStateFile(d, current);
+              const storedId = (
+                d
+                  .prepare("SELECT value FROM meta WHERE key='projectId'")
+                  .get() as { value: string } | undefined
+              )?.value;
+              const meta = this.readStoredProjectMeta(d, current);
+              const id = storedId || meta?.id;
+              if (id) {
+                const existingById = all.find((p) => p.id === id);
+                if (existingById && !hasProjectStore(existingById.root)) {
+                  existingById.root = current;
+                  existingById.available = true;
+                  existingById.updatedAt = now();
+                  put(this.registry, "projects", existingById);
+                } else if (!existingById) {
+                  const project: Project = {
+                    id,
+                    name: meta?.name || path.basename(current) || "未命名项目",
+                    root: current,
+                    engine: meta?.engine || "godot",
+                    collection: meta?.collection || "",
+                    archived: false,
+                    createdAt: meta?.createdAt || now(),
+                    updatedAt: meta?.updatedAt || now(),
+                    available: true,
+                    ...(meta?.cover ? { cover: meta.cover } : {}),
+                  };
+                  put(this.registry, "projects", project);
+                }
+              }
+            } finally {
+              d.close();
+            }
+          } catch {}
+          break;
+        }
+        const parent = path.dirname(current);
+        if (parent === current) break;
+        current = parent;
+      }
+    }
   }
   db(projectId: string): { db: DatabaseSync; project: Project } {
     const p = get<Project>(this.registry, "projects", projectId);
     if (!existsSync(p.root)) fail("项目目录丢失，请重新定位目录", 409);
-    const file = path.join(p.root, ".game-studio", "studio.db");
-    if (!existsSync(file)) fail("项目数据库丢失，请重新定位原项目", 409);
-    within(p.root, file);
+    if (!hasProjectStore(p.root))
+      fail("项目数据库丢失，请重新定位原项目", 409);
+    const dir = safeDir(p.root, path.join(p.root, ".game-studio"));
+    const file = path.join(dir, "studio.db");
+    const hadDb = existsSync(file);
+    if (hadDb) within(p.root, file);
     const d = openDb(file);
+    if (!hadDb) createProjectTables(d);
     if (
       !d
         .prepare(
@@ -394,6 +775,7 @@ export class StudioCore {
       d.exec(
         "CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY,data TEXT NOT NULL)",
       );
+    this.hydrateDbFromStateFile(d, p.root);
     return { db: d, project: p };
   }
   inProject<T>(id: string, fn: (db: DatabaseSync, p: Project) => T): T {
@@ -401,6 +783,10 @@ export class StudioCore {
     try {
       return fn(db, project);
     } finally {
+      this.syncProjectState(db, project);
+      try {
+        db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+      } catch {}
       db.close();
     }
   }
@@ -438,24 +824,29 @@ export class StudioCore {
       if (registered) return registered;
       const dir = path.join(root, ".game-studio");
       safeDir(root, dir);
+      ensureStudioGitignore(dir);
       const file = path.join(dir, "studio.db");
       if (existsSync(file)) within(root, file);
       const db = openDb(file);
       createProjectTables(db);
       try {
+        this.hydrateDbFromStateFile(db, root);
         const stored = db
           .prepare("SELECT value FROM meta WHERE key='projectId'")
           .get() as { value: string } | undefined;
+        const meta = this.readStoredProjectMeta(db, root);
         const project: Project = {
-          id: stored?.value || uid("p"),
-          name,
+          id: stored?.value || meta?.id || uid("p"),
+          name: name || meta?.name || path.basename(root),
           root,
-          engine: a.engine || "godot",
-          collection: a.collection || "",
+          engine: a.engine || meta?.engine || "godot",
+          collection:
+            a.collection !== undefined ? a.collection : meta?.collection || "",
           archived: false,
-          createdAt: now(),
+          createdAt: meta?.createdAt || now(),
           updatedAt: now(),
           available: true,
+          ...(meta?.cover ? { cover: meta.cover } : {}),
         };
         db.prepare(
           "INSERT OR IGNORE INTO meta(key,value) VALUES ('projectId',?)",
@@ -463,6 +854,10 @@ export class StudioCore {
         if (rows<Canvas>(db, "canvases").length === 0)
           this.createCanvas(db, "角色探索");
         put(this.registry, "projects", project);
+        this.syncProjectState(db, project);
+        try {
+          db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+        } catch {}
         return project;
       } finally {
         db.close();
@@ -476,9 +871,13 @@ export class StudioCore {
     if (a.action === "relocate") {
       if (!a.root || !path.isAbsolute(a.root)) fail("请提供绝对目录");
       const root = realpathSync(a.root);
-      const file = within(root, path.join(root, ".game-studio", "studio.db"));
+      if (!hasProjectStore(root)) fail("项目数据库丢失，请重新定位原项目", 409);
+      const dir = safeDir(root, path.join(root, ".game-studio"));
+      const file = path.join(dir, "studio.db");
       const d = openDb(file);
+      createProjectTables(d);
       try {
+        this.hydrateDbFromStateFile(d, root);
         const stored = d
           .prepare("SELECT value FROM meta WHERE key='projectId'")
           .get() as { value: string } | undefined;
@@ -491,18 +890,13 @@ export class StudioCore {
       if (a.cover !== undefined) {
         if (a.cover === null) delete p.cover;
         else {
-          const { file, metadata } = this.assetFile(
+          const { metadata } = this.assetFile(
             p.id,
             a.cover.revisionId,
             a.cover.fileIndex,
           );
           if (!metadata.mime.startsWith("image/"))
             fail("项目封面必须是图片资源");
-          if (
-            createHash("sha256").update(readFileSync(file)).digest("hex") !==
-            metadata.sha256
-          )
-            fail("图片文件已被修改，请重新导入后设置封面", 409);
           p.cover = a.cover;
         }
       }
@@ -513,6 +907,9 @@ export class StudioCore {
     }
     p.updatedAt = now();
     put(this.registry, "projects", p);
+    if (hasProjectStore(p.root)) {
+      this.inProject(p.id, () => {});
+    }
     return p;
   }
   private createCanvas(db: DatabaseSync, name: string): Canvas {
@@ -530,6 +927,31 @@ export class StudioCore {
     };
     put(db, "canvases", c);
     return c;
+  }
+  private refreshFileMetadata(
+    db: DatabaseSync,
+    p: Project,
+    r: AssetRevision,
+    index: number,
+  ) {
+    const f = r.files[index];
+    if (!f) fail("文件不存在", 404);
+    const file = path.join(p.root, f.relativePath);
+    if (!existsSync(file)) fail("资源文件丢失，请重新导入", 404);
+    const resolved = within(p.root, file);
+    if (!statSync(resolved).isFile()) fail("资源文件无效", 404);
+    const bytes = readFileSync(resolved);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    if (sha256 !== f.sha256 || bytes.length !== f.sizeBytes) {
+      if (bytes.length === 0) fail("不能导入空文件");
+      const identified = identify(f.name, bytes);
+      f.sha256 = sha256;
+      f.sizeBytes = bytes.length;
+      f.mime = identified.mime;
+      f.role = identified.role;
+      put(db, "revisions", r);
+    }
+    return { file: resolved, metadata: f, bytes };
   }
   snapshot(projectId: string): ProjectSnapshot {
     return this.inProject(projectId, (db, project) => {
@@ -552,9 +974,14 @@ export class StudioCore {
           })),
           canvases: rows<Canvas>(db, "canvases"),
           tasks: rows<GenerationTask>(db, "tasks"),
-          runs: rows<WorkflowRun>(db, "runs"),
+          runs: rows<WorkflowRun>(db, "runs").map((r) => ensureRunDag(r)),
           reviews: rows<ReviewDecision>(db, "reviews"),
-          exports: rows<ExportBundle>(db, "exports"),
+          exports: rows<ExportBundle>(db, "exports").map((b) => ({
+            ...b,
+            path: path.isAbsolute(b.path)
+              ? b.path
+              : path.join(project.root, b.path),
+          })),
         };
         db.exec("COMMIT");
         return snapshot;
@@ -562,6 +989,112 @@ export class StudioCore {
         db.exec("ROLLBACK");
         throw e;
       }
+    });
+  }
+  private commitRevision(
+    db: DatabaseSync,
+    projectId: string,
+    assetId: string,
+    revId: string,
+    old: Asset | undefined,
+    classified: Array<{
+      name: string;
+      kind: AssetKind;
+    }>,
+    recordFiles: AssetFile[],
+    options: {
+      name?: string;
+      assetId?: string;
+      parentRevisionIds?: string[];
+      runId?: string;
+      sourceRef?: string;
+      generationBinding?: {
+        taskId: string;
+        expectedRevision: number;
+        summary: string;
+      };
+      expectedLatestRevisionId?: string;
+      canvasBinding?: {
+        canvasId: string;
+        nodeId: string;
+        expectedRevision: number;
+        position: { x: number; y: number };
+      };
+    },
+  ): AssetRevision {
+    return transaction(db, () => {
+      if (
+        options.expectedLatestRevisionId &&
+        old?.latestRevisionId !== options.expectedLatestRevisionId
+      )
+        fail("文档已有新版本，请重新打开后保存", 409);
+      for (const parent of options.parentRevisionIds || [])
+        get<AssetRevision>(db, "revisions", parent);
+      if (old) {
+        cas(get<Asset>(db, "assets", old.id).revision, old.revision);
+      }
+      const r: AssetRevision = {
+        id: revId,
+        assetId,
+        projectId,
+        number:
+          (old
+            ? get<AssetRevision>(db, "revisions", old.latestRevisionId).number
+            : 0) + 1,
+        files: recordFiles,
+        parentRevisionIds: options.parentRevisionIds || [],
+        createdByRunId: options.runId,
+        provenance: { sourceRef: options.sourceRef || "用户导入" },
+        createdAt: now(),
+      };
+      const a: Asset = {
+        id: assetId,
+        name: nameSchema.parse(
+          options.name || old?.name || path.parse(classified[0].name).name,
+        ),
+        kind: classified.some((f) => f.kind === "model")
+          ? "model"
+          : classified[0].kind,
+        tags: old?.tags || [],
+        archived: false,
+        revision: (old?.revision || 0) + 1,
+        latestRevisionId: revId,
+        createdAt: old?.createdAt || now(),
+        revisions: [],
+      };
+      if (options.canvasBinding) {
+        const b = options.canvasBinding;
+        const c = get<Canvas>(db, "canvases", b.canvasId);
+        cas(c.graphRevision, b.expectedRevision);
+        const n = c.nodes.find((n) => n.id === b.nodeId);
+        if (
+          n &&
+          (n.type !== "asset" ||
+            n.data.assetId !== assetId ||
+            n.data.revisionId !== options.expectedLatestRevisionId)
+        )
+          fail("文档节点已变化，请重新打开", 409);
+        if (!n && old) fail("文档节点已移除", 409);
+        if (n) n.data = { title: a.name, assetId, revisionId: revId };
+        else
+          c.nodes.push({
+            id: b.nodeId,
+            type: "asset",
+            position: b.position,
+            data: { title: a.name, assetId, revisionId: revId },
+          });
+        c.graphRevision++;
+        c.updatedAt = now();
+        put(db, "canvases", c);
+      }
+      if (options.generationBinding) {
+        const b = options.generationBinding;
+        this.bindGeneration(db, b.taskId, b.expectedRevision, r, b.summary);
+      }
+      put(db, "revisions", r);
+      put(db, "assets", a);
+      event(db, "asset.imported", { assetId, revisionId: revId });
+      return r;
     });
   }
   importFiles(
@@ -600,7 +1133,12 @@ export class StudioCore {
         /[\x00-\x1f]/.test(name)
       )
         fail("文件名无效");
-      return { ...f, name, ...identify(name, f.bytes) };
+      return {
+        ...f,
+        name,
+        sha256: createHash("sha256").update(f.bytes).digest("hex"),
+        ...identify(name, f.bytes),
+      };
     });
     if (
       new Set(classified.map((f) => f.name.toLowerCase())).size !== files.length
@@ -612,105 +1150,58 @@ export class StudioCore {
         : undefined;
       const assetId = old?.id || uid("a");
       const revId = uid("rev");
-      const store = safeDir(
-        p.root,
-        path.join(p.root, ".game-studio", "assets", assetId),
+      const canReuseExisting = options.sourceRef !== "画布文档编辑";
+      const matchedPaths = classified.map((f) =>
+        canReuseExisting
+          ? findExistingProjectFile(p.root, f.name, f.bytes.length, f.sha256)
+          : undefined,
       );
-      const stage = safeDir(
-        p.root,
-        path.join(p.root, ".game-studio", "work", revId),
-      );
-      const target = path.join(store, revId);
+      const needsWrite = matchedPaths.some((m) => !m);
+      const store = needsWrite
+        ? safeDir(p.root, path.join(p.root, ".game-studio", "assets", assetId))
+        : "";
+      const stage = needsWrite
+        ? safeDir(p.root, path.join(p.root, ".game-studio", "work", revId))
+        : "";
+      const target = needsWrite ? path.join(store, revId) : "";
       try {
-        const recordFiles: AssetFile[] = classified.map((f) => {
+        const recordFiles: AssetFile[] = classified.map((f, index) => {
+          const existingRel = matchedPaths[index];
+          if (existingRel) {
+            return {
+              name: f.name,
+              relativePath: existingRel,
+              sizeBytes: f.bytes.length,
+              sha256: f.sha256,
+              mime: f.mime,
+              role: f.role,
+            };
+          }
           writeFileSync(path.join(stage, f.name), f.bytes, { flag: "wx" });
           return {
             name: f.name,
-            relativePath: path.relative(p.root, path.join(target, f.name)),
+            relativePath: path
+              .relative(p.root, path.join(target, f.name))
+              .replaceAll("\\", "/"),
             sizeBytes: f.bytes.length,
-            sha256: createHash("sha256").update(f.bytes).digest("hex"),
+            sha256: f.sha256,
             mime: f.mime,
             role: f.role,
           };
         });
-        renameSync(stage, target);
-        return transaction(db, () => {
-          if (
-            options.expectedLatestRevisionId &&
-            old?.latestRevisionId !== options.expectedLatestRevisionId
-          )
-            fail("文档已有新版本，请重新打开后保存", 409);
-          for (const parent of options.parentRevisionIds || [])
-            get<AssetRevision>(db, "revisions", parent);
-          if (old) {
-            cas(get<Asset>(db, "assets", old.id).revision, old.revision);
-          }
-          const r: AssetRevision = {
-            id: revId,
-            assetId,
-            projectId,
-            number:
-              (old
-                ? get<AssetRevision>(db, "revisions", old.latestRevisionId)
-                    .number
-                : 0) + 1,
-            files: recordFiles,
-            parentRevisionIds: options.parentRevisionIds || [],
-            createdByRunId: options.runId,
-            provenance: { sourceRef: options.sourceRef || "用户导入" },
-            createdAt: now(),
-          };
-          const a: Asset = {
-            id: assetId,
-            name: nameSchema.parse(
-              options.name || old?.name || path.parse(classified[0].name).name,
-            ),
-            kind: classified.some((f) => f.kind === "model")
-              ? "model"
-              : classified[0].kind,
-            tags: old?.tags || [],
-            archived: false,
-            revision: (old?.revision || 0) + 1,
-            latestRevisionId: revId,
-            createdAt: old?.createdAt || now(),
-            revisions: [],
-          };
-          if (options.canvasBinding) {
-            const b = options.canvasBinding;
-            const c = get<Canvas>(db, "canvases", b.canvasId);
-            cas(c.graphRevision, b.expectedRevision);
-            const n = c.nodes.find((n) => n.id === b.nodeId);
-            if (
-              n &&
-              (n.type !== "asset" ||
-                n.data.assetId !== assetId ||
-                n.data.revisionId !== options.expectedLatestRevisionId)
-            )
-              fail("文档节点已变化，请重新打开", 409);
-            if (!n && old) fail("文档节点已移除", 409);
-            if (n) n.data = { title: a.name, assetId, revisionId: revId };
-            else
-              c.nodes.push({
-                id: b.nodeId,
-                type: "asset",
-                position: b.position,
-                data: { title: a.name, assetId, revisionId: revId },
-              });
-            c.graphRevision++;
-            c.updatedAt = now();
-            put(db, "canvases", c);
-          }
-          if (options.generationBinding) {
-            const b = options.generationBinding;
-            this.bindGeneration(db, b.taskId, b.expectedRevision, r, b.summary);
-          }
-          put(db, "revisions", r);
-          put(db, "assets", a);
-          event(db, "asset.imported", { assetId, revisionId: revId });
-          return r;
-        });
+        if (needsWrite) renameSync(stage, target);
+        return this.commitRevision(
+          db,
+          projectId,
+          assetId,
+          revId,
+          old,
+          classified,
+          recordFiles,
+          options,
+        );
       } catch (e) {
-        rmSync(stage, { recursive: true, force: true });
+        if (stage) rmSync(stage, { recursive: true, force: true });
         /* Published but unregistered directories are retained for recovery. */ throw e;
       }
     });
@@ -718,22 +1209,179 @@ export class StudioCore {
   importPaths(
     projectId: string,
     fileRefs: string[],
-    options: Parameters<StudioCore["importFiles"]>[2] = {},
+    options: Parameters<StudioCore["importFiles"]>[2] & {
+      allowExternalCopy?: boolean;
+    } = {},
   ) {
-    return this.inProject(projectId, (_db, p) => {
-      const files = fileRefs.map((file) => {
-        const source = within(p.root, path.resolve(p.root, file));
+    if (!fileRefs.length || fileRefs.length > 12)
+      fail("每次提交 1 至 12 个文件");
+    return this.inProject(projectId, (db, p) => {
+      const resolvedItems = fileRefs.map((file) => {
+        const candidate = path.resolve(p.root, file);
+        let source: string;
+        let isExternal = false;
+        if (options.allowExternalCopy && path.isAbsolute(file)) {
+          if (!existsSync(candidate)) fail("文件不存在", 404);
+          const inside = isWithinRoot(p.root, candidate);
+          if (inside) {
+            source = inside;
+          } else {
+            source = realpathSync(candidate);
+            isExternal = true;
+          }
+        } else {
+          source = within(p.root, candidate);
+        }
         if (
           !statSync(source).isFile() ||
           statSync(source).size > 200 * 1024 * 1024
         )
           fail("文件太大或不是普通文件");
-        return { name: path.basename(source), bytes: readFileSync(source) };
+        const bytes = readFileSync(source);
+        if (bytes.length === 0) fail("不能导入空文件");
+        const name = path.basename(source).normalize("NFC");
+        if (
+          !name ||
+          name.length > 220 ||
+          name.startsWith(".") ||
+          /[\x00-\x1f]/.test(name)
+        )
+          fail("文件名无效");
+        return {
+          source,
+          isExternal,
+          name,
+          bytes,
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          ...identify(name, bytes),
+        };
       });
-      return this.importFiles(projectId, files, {
-        ...options,
-        sourceRef: options.sourceRef || fileRefs.join(", "),
-      });
+      if (
+        resolvedItems.reduce((n, f) => n + f.bytes.length, 0) >
+        200 * 1024 * 1024
+      )
+        fail("文件集超过 200 MB");
+      if (
+        new Set(resolvedItems.map((f) => f.name.toLowerCase())).size !==
+        resolvedItems.length
+      )
+        fail("文件集中有重复文件名");
+      const old = options.assetId
+        ? get<Asset>(db, "assets", options.assetId)
+        : undefined;
+      const assetId = old?.id || uid("a");
+      const revId = uid("rev");
+      const externalStore = resolvedItems.map((f) =>
+        f.isExternal
+          ? findExistingProjectFile(p.root, f.name, f.bytes.length, f.sha256)
+          : toRelativePath(p.root, f.source),
+      );
+      const needsWrite = externalStore.some((rel) => !rel);
+      const store = needsWrite
+        ? safeDir(p.root, path.join(p.root, ".game-studio", "assets", assetId))
+        : "";
+      const stage = needsWrite
+        ? safeDir(p.root, path.join(p.root, ".game-studio", "work", revId))
+        : "";
+      const target = needsWrite ? path.join(store, revId) : "";
+      try {
+        const recordFiles: AssetFile[] = resolvedItems.map((f, index) => {
+          const existingRel = externalStore[index];
+          if (existingRel) {
+            return {
+              name: f.name,
+              relativePath: existingRel,
+              sizeBytes: f.bytes.length,
+              sha256: f.sha256,
+              mime: f.mime,
+              role: f.role,
+            };
+          }
+          writeFileSync(path.join(stage, f.name), f.bytes, { flag: "wx" });
+          return {
+            name: f.name,
+            relativePath: path
+              .relative(p.root, path.join(target, f.name))
+              .replaceAll("\\", "/"),
+            sizeBytes: f.bytes.length,
+            sha256: f.sha256,
+            mime: f.mime,
+            role: f.role,
+          };
+        });
+        if (needsWrite) renameSync(stage, target);
+        return this.commitRevision(
+          db,
+          projectId,
+          assetId,
+          revId,
+          old,
+          resolvedItems,
+          recordFiles,
+          {
+            ...options,
+            sourceRef:
+              options.sourceRef ||
+              recordFiles.map((f) => f.relativePath).join(", "),
+          },
+        );
+      } catch (e) {
+        if (stage) rmSync(stage, { recursive: true, force: true });
+        throw e;
+      }
+    });
+  }
+  listWorkspaceFiles(projectId: string) {
+    return this.inProject(projectId, (_db, p) => {
+      const results: {
+        relativePath: string;
+        name: string;
+        sizeBytes: number;
+        kind: AssetKind;
+      }[] = [];
+      const walk = (dir: string) => {
+        if (results.length >= 400) return;
+        let entries;
+        try {
+          entries = readdirSync(dir, { withFileTypes: true });
+        } catch {
+          return;
+        }
+        for (const entry of entries) {
+          if (results.length >= 400) break;
+          if (entry.name.startsWith(".") || entry.name === "node_modules")
+            continue;
+          const full = path.join(dir, entry.name);
+          const resolved = isWithinRoot(p.root, full);
+          if (!resolved) continue;
+          let st;
+          try {
+            st = statSync(resolved);
+          } catch {
+            continue;
+          }
+          if (st.isDirectory()) {
+            walk(resolved);
+          } else if (
+            st.isFile() &&
+            st.size > 0 &&
+            st.size <= 200 * 1024 * 1024
+          ) {
+            const ext = path.extname(entry.name).toLowerCase();
+            if (!supportedExtensions.has(ext)) continue;
+            results.push({
+              relativePath: toRelativePath(p.root, resolved),
+              name: entry.name,
+              sizeBytes: st.size,
+              kind: extKind(ext),
+            });
+          }
+        }
+      };
+      walk(p.root);
+      return results.sort((a, b) =>
+        a.relativePath.localeCompare(b.relativePath),
+      );
     });
   }
   documentSave(input: unknown) {
@@ -823,6 +1471,7 @@ export class StudioCore {
         const inputSnapshot = this.freezeInputs(
           this.resolveInputs(c, a.inputNodeIds, inputAssets(db)),
           p,
+          db,
         );
         if (
           a.kind === "animation" &&
@@ -932,7 +1581,7 @@ export class StudioCore {
       if (!data.animations?.length || !data.skins?.length)
         fail("动画产物必须包含骨架和动画片段");
     }
-    this.importFiles(projectId, files, {
+    this.importPaths(projectId, fileRefs, {
       name: task.name,
       parentRevisionIds: task.inputSnapshot.revisionIds,
       sourceRef: `Codex 生成任务 ${task.id}`,
@@ -990,17 +1639,13 @@ export class StudioCore {
       asset.kind !== (task.kind === "animation" ? "model" : task.kind)
     )
       fail("产物类型与任务不匹配");
-    const revision = asset.revisions.find((r) => r.id === input.revisionId)!;
+    let revision = asset.revisions.find((r) => r.id === input.revisionId)!;
     for (let i = 0; i < revision.files.length; i++) {
-      const { file, metadata } = this.assetFile(
-        input.projectId,
-        revision.id,
-        i,
-      );
-      const bytes = readFileSync(file);
-      if (createHash("sha256").update(bytes).digest("hex") !== metadata.sha256)
-        fail("产物文件已被修改", 409);
+      this.assetFile(input.projectId, revision.id, i);
     }
+    revision = this.snapshot(input.projectId)
+      .assets.find((a) => a.id === asset.id)!
+      .revisions.find((r) => r.id === input.revisionId)!;
     if (task.kind === "animation") {
       const i = revision.files.findIndex((f) => f.mime === "model/gltf-binary");
       if (i < 0) fail("动画产物需要 GLB");
@@ -1268,21 +1913,57 @@ export class StudioCore {
       fail(error instanceof Error ? error.message : String(error));
     }
   }
-  private freezeInputs(snapshot: CanvasInputSnapshot, p: Project) {
+  private freezeInputs(
+    snapshot: CanvasInputSnapshot,
+    p: Project,
+    db?: DatabaseSync,
+  ) {
     const frozen = structuredClone(snapshot);
     for (const item of frozen.items) {
       const texts: string[] = [];
+      const revRow =
+        db && item.revisionId
+          ? (db
+              .prepare("SELECT data FROM revisions WHERE id=?")
+              .get(item.revisionId) as { data: string } | undefined)
+          : undefined;
+      const revObj = revRow
+        ? (JSON.parse(revRow.data) as AssetRevision)
+        : undefined;
+      let revChanged = false;
       for (const f of item.files || []) {
         const filename = path.join(p.root, f.relativePath);
         if (!existsSync(filename)) fail(`输入文件丢失：${f.name}`, 404);
         const bytes = readFileSync(within(p.root, filename));
-        if (createHash("sha256").update(bytes).digest("hex") !== f.sha256)
-          fail(`输入文件已被修改，请重新导入：${f.name}`, 409);
+        const sha256 = createHash("sha256").update(bytes).digest("hex");
+        if (sha256 !== f.sha256 || bytes.length !== f.sizeBytes) {
+          if (bytes.length === 0) fail("不能导入空文件");
+          const identified = identify(f.name, bytes);
+          f.sha256 = sha256;
+          f.sizeBytes = bytes.length;
+          f.mime = identified.mime;
+          f.role = identified.role;
+          if (revObj) {
+            const target = revObj.files.find(
+              (rf) => rf.relativePath === f.relativePath || rf.name === f.name,
+            );
+            if (target) {
+              target.sha256 = sha256;
+              target.sizeBytes = bytes.length;
+              target.mime = identified.mime;
+              target.role = identified.role;
+              revChanged = true;
+            }
+          }
+        }
         if (item.role === "prompt" && f.mime === "text/plain") {
           const text = bytes.toString("utf8");
           texts.push(`### ${f.name}\n${text.slice(0, 30000)}`);
           if (text.length > 30000) item.textTruncated = true;
         }
+      }
+      if (db && revObj && revChanged) {
+        put(db, "revisions", revObj);
       }
       if (item.type === "asset" && texts.length) item.text = texts.join("\n\n");
     }
@@ -1305,6 +1986,7 @@ export class StudioCore {
         const inputSnapshot = this.freezeInputs(
           this.resolveInputs(c, [node.id], inputAssets(db)),
           p,
+          db,
         );
         if (!inputSnapshot.items.length)
           fail("制作分组没有输入，请先连接素材或便签");
@@ -1366,6 +2048,7 @@ export class StudioCore {
           plan.inputSnapshot ||
             this.resolveInputs(c, [node.id], inputAssets(db)),
           p,
+          db,
         );
         if (
           rows<WorkflowRun>(db, "runs").some(
@@ -1373,7 +2056,8 @@ export class StudioCore {
           )
         )
           fail("该制作分组已有活动运行，请继续已有运行", 409);
-        const run: WorkflowRun = {
+        const firstImgItem = inputSnapshot.items.find((i) => i.kind === "image");
+        const run: WorkflowRun = ensureRunDag({
           id: uid("run"),
           projectId: a.projectId,
           canvasId: c.id,
@@ -1389,6 +2073,13 @@ export class StudioCore {
             outputRevisionIds: [],
             stale: false,
           })),
+          dag: createInitialCharacterDag(inputSnapshot.revisionIds),
+          dagState: createInitialCharacterWorkflowState(
+            node.data.title || firstImgItem?.title || "角色制作",
+            inputSnapshot.prompt || "",
+            firstImgItem?.revisionId,
+            firstImgItem?.files?.[0]?.relativePath,
+          ),
           status: "active",
           revision: 0,
           createdAt: now(),
@@ -1398,7 +2089,7 @@ export class StudioCore {
             estimate: null,
             reason: "人工导入路线；没有向模型服务发送请求",
           },
-        };
+        });
         put(db, "runs", run);
         put(db, "operations", {
           id: operationId,
@@ -1476,6 +2167,7 @@ export class StudioCore {
         step.status = "succeeded";
         step.stale = false;
         this.advance(r, index);
+        ensureRunDag(r, true);
         put(db, "runs", r);
         event(db, "workflow.artifact_submitted", {
           runId: r.id,
@@ -1540,6 +2232,7 @@ export class StudioCore {
           run.revision++;
           run.updatedAt = now();
         }
+        ensureRunDag(run, true);
         put(db, "runs", run);
         event(db, "workflow.reviewed", { reviewId: d.id, runId: run.id });
         return run;
@@ -1641,7 +2334,7 @@ export class StudioCore {
               ...(old.inputSnapshot?.items.filter((i) => i.type === "note") ||
                 []),
             );
-            r.inputSnapshot = this.freezeInputs(replaced, p);
+            r.inputSnapshot = this.freezeInputs(replaced, p, db);
           }
         }
         if (old.status === "active") {
@@ -1650,6 +2343,7 @@ export class StudioCore {
           old.updatedAt = now();
           put(db, "runs", old);
         }
+        ensureRunDag(r, true);
         put(db, "runs", r);
         put(db, "operations", {
           id: key,
@@ -1687,12 +2381,8 @@ export class StudioCore {
   assetFile(projectId: string, revisionId: string, index: number) {
     return this.inProject(projectId, (db, p) => {
       const r = get<AssetRevision>(db, "revisions", revisionId);
-      const f = r.files[index];
-      if (!f) fail("文件不存在", 404);
-      const file = path.join(p.root, f.relativePath);
-      if (!existsSync(file)) fail("资源文件丢失，请重新导入", 404);
-      const resolved = within(p.root, file);
-      return { file: resolved, metadata: f };
+      const { file, metadata } = this.refreshFileMetadata(db, p, r, index);
+      return { file, metadata };
     });
   }
   exportBundle(input: unknown) {
@@ -1718,7 +2408,13 @@ export class StudioCore {
             op.runId !== a.runId
           )
             fail("幂等键已用于不同导出", 409);
-          return get<ExportBundle>(db, "exports", op.bundleId);
+          const existing = get<ExportBundle>(db, "exports", op.bundleId);
+          return {
+            ...existing,
+            path: path.isAbsolute(existing.path)
+              ? existing.path
+              : path.join(p.root, existing.path),
+          };
         }
         const run = a.runId ? get<WorkflowRun>(db, "runs", a.runId) : undefined;
         if (run) {
@@ -1745,31 +2441,29 @@ export class StudioCore {
         const dest = path.join(base, id);
         const records = revisions.map((r) => ({
           ...r,
-          files: r.files.map((f, index) => {
-            const { file } = this.assetFile(a.projectId, r.id, index);
-            const bytes = readFileSync(file);
-            if (createHash("sha256").update(bytes).digest("hex") !== f.sha256)
-              fail(`资源文件已改变：${f.name}`, 409);
-            const rel = path.join(r.assetId, r.id, f.name);
-            mkdirSync(path.dirname(path.join(stage, rel)), { recursive: true });
-            copyFileSync(file, path.join(stage, rel));
-            return { ...f, bundlePath: rel };
+          files: r.files.map((_f, index) => {
+            const { metadata } = this.refreshFileMetadata(db, p, r, index);
+            return { ...metadata, bundlePath: metadata.relativePath };
           }),
         }));
         const visual = run ? ("passed" as const) : ("not_verified" as const);
-        const bundle: ExportBundle = {
+        const portableBundle: ExportBundle = {
           id,
           runId: run?.id,
           revisionIds: a.revisionIds,
-          path: dest,
+          path: path.relative(p.root, dest).replaceAll("\\", "/"),
           createdAt: now(),
           validation: { technical: "passed", engine: "not_verified", visual },
+        };
+        const bundle: ExportBundle = {
+          ...portableBundle,
+          path: dest,
         };
         writeFileSync(
           path.join(stage, "manifest.json"),
           json({
             schemaVersion: 1,
-            bundle,
+            bundle: portableBundle,
             projectId: p.id,
             engine: p.engine,
             technicalScope:
@@ -1785,7 +2479,7 @@ export class StudioCore {
           }),
         );
         renameSync(stage, dest);
-        put(db, "exports", bundle);
+        put(db, "exports", portableBundle);
         put(db, "operations", {
           id: key,
           bundleId: id,
@@ -1797,6 +2491,7 @@ export class StudioCore {
           run.steps[7].outputRevisionIds = a.revisionIds;
           run.steps[7].stale = false;
           this.advance(run, 7);
+          ensureRunDag(run);
           put(db, "runs", run);
         }
         event(db, "bundle.exported", { bundleId: id });
@@ -1805,14 +2500,15 @@ export class StudioCore {
     );
   }
   context(projectId: string, canvasId: string, nodeIds: string[]) {
-    const s = this.snapshot(projectId);
+    let s = this.snapshot(projectId);
     const c = s.canvases.find((c) => c.id === canvasId);
     if (!c) fail("画布不存在", 404);
     const nodes = c!.nodes.filter((n) => nodeIds.includes(n.id));
     if (nodes.length !== new Set(nodeIds).size) fail("选择集中有不存在的节点");
-    const inputSnapshot = this.inProject(projectId, (_db, p) =>
-      this.freezeInputs(this.resolveInputs(c!, nodeIds, s.assets), p),
+    const inputSnapshot = this.inProject(projectId, (db, p) =>
+      this.freezeInputs(this.resolveInputs(c!, nodeIds, s.assets), p, db),
     );
+    s = this.snapshot(projectId);
     return {
       schemaVersion: 1,
       project: {

@@ -287,15 +287,19 @@ test("拦截循环、重复端点与未指定产出的工作流连接，事务�
   }
 });
 
-test("启动前重新校验实际文件，篡改输入不创建运行", () => {
+test("启动前自动跟随合法外部修改，损坏文件拒绝创建运行", () => {
   const x = setup();
   try {
     const plan = x.prepare();
     const filename = x.core.assetFile(x.p.id, x.doc.id, 0).file;
-    writeFileSync(filename, "tampered");
-    assert.throws(() => x.start(plan), /输入文件已被修改/);
-    assert.throws(() => x.prepare(), /输入文件已被修改/);
+    writeFileSync(filename, "corrupted\0binary");
+    assert.throws(() => x.start(plan), /文档包含二进制内容/);
+    assert.throws(() => x.prepare(), /文档包含二进制内容/);
     assert.equal(x.core.snapshot(x.p.id).runs.length, 0);
+
+    writeFileSync(filename, "# 设定更新\n自动同步最新文本内容");
+    const run = x.start(plan);
+    assert.match(run.inputSnapshot!.prompt, /自动同步最新文本内容/);
   } finally {
     x.clean();
   }

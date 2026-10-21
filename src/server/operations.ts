@@ -7,6 +7,20 @@ import {
   startGeneration,
   controlGeneration,
 } from "./generation.js";
+import {
+  CHARACTER_DAG_TEMPLATE,
+  type CharacterDagNode,
+} from "../shared/character-dag.js";
+import {
+  claimDagNode,
+  reportDagNodeProgress,
+  submitDagNodeOutput,
+  advanceDagNode,
+  autoAdvanceToNextGate,
+  selectDagCandidate,
+  importCharakitArchive,
+  listClaimableDagNodes,
+} from "./character-workflow.js";
 const id = z.string().min(1).max(100);
 export const tools = {
   studio_open: {
@@ -236,15 +250,32 @@ export const tools = {
   },
   job_control: {
     description:
-      "取消本地运行或从明确阶段建立新的局部重跑；历史产物保持。当前无付费 Provider Job。",
+      "取消本地运行、从明确阶段建立局部重跑，或执行角色工作流 DAG 的认领(claim)/进度(progress)/推进(advance)/候选切换(select_candidate)/导入(import_charakit)。",
     schema: z.object({
       projectId: id,
       runId: id,
-      action: z.enum(["cancel", "rerun"]),
-      expectedRevision: z.number().int(),
+      action: z.enum([
+        "cancel",
+        "rerun",
+        "claim_dag_node",
+        "progress_dag_node",
+        "advance_dag_node",
+        "auto_advance_dag",
+        "select_candidate",
+        "import_charakit",
+      ]),
+      expectedRevision: z.number().int().optional(),
       fromStep: id.optional(),
       inputRevisionIds: z.array(id).optional(),
       idempotencyKey: z.string().optional(),
+      nodeKey: z.string().optional(),
+      agentId: z.string().optional(),
+      agentName: z.string().optional(),
+      progress: z.number().optional(),
+      message: z.string().optional(),
+      source: z.enum(["head", "body"]).optional(),
+      candidateId: z.string().optional(),
+      archivePath: z.string().optional(),
     }),
   },
   export_bundle: {
@@ -274,13 +305,14 @@ export function dispatch(
   const a = tools[name as ToolName].schema.parse(args) as Record<string, any>;
   switch (name) {
     case "studio_open": {
+      const roots = a.workspaceRoot
+        ? [a.workspaceRoot]
+        : a.workspaceRoots || [];
+      if (roots.length && !a.projectId) {
+        core.discoverWorkspaces(roots);
+      }
       const projects = core.listProjects();
-      const projectId =
-        a.projectId ||
-        workspaceProject(
-          projects,
-          a.workspaceRoot ? [a.workspaceRoot] : a.workspaceRoots || [],
-        );
+      const projectId = a.projectId || workspaceProject(projects, roots);
       return {
         schemaVersion: 1,
         build: studioBuild,
@@ -392,16 +424,45 @@ export function dispatch(
         executionInputs: core.runInputs(a.projectId, r),
         reviews: s.reviews.filter((d) => d.runId === r.id),
         nextAction: r.steps.find((s) => s.status.startsWith("awaiting_")),
+        claimableDagNodes: listClaimableDagNodes(core, {
+          projectId: a.projectId,
+          runId: r.id,
+        }).nodes.map((x: { node: CharacterDagNode }) => x.node),
       };
     }
     case "workflow_decide":
       return core.decide(a);
-    case "workflow_submit_artifact":
+    case "workflow_submit_artifact": {
+      const isDagNodeKey = CHARACTER_DAG_TEMPLATE.some(
+        (n) => n.key === a.stepKey,
+      );
+      if (isDagNodeKey) {
+        return submitDagNodeOutput(core, {
+          projectId: a.projectId,
+          runId: a.runId,
+          nodeKey: a.stepKey,
+          revisionIds: a.revisionIds,
+          expectedRevision: a.expectedRevision,
+        });
+      }
       return core.submit(a);
-    case "job_control":
-      return a.action === "cancel"
-        ? core.cancel(a.projectId, a.runId, a.expectedRevision)
-        : core.rerun(a);
+    }
+    case "job_control": {
+      if (a.action === "cancel")
+        return core.cancel(
+          a.projectId,
+          a.runId,
+          z.number().int().parse(a.expectedRevision),
+        );
+      if (a.action === "rerun") return core.rerun(a);
+      if (a.action === "claim_dag_node") return claimDagNode(core, a);
+      if (a.action === "progress_dag_node") return reportDagNodeProgress(core, a);
+      if (a.action === "advance_dag_node") return advanceDagNode(core, a);
+      if (a.action === "auto_advance_dag") return autoAdvanceToNextGate(core, a);
+      if (a.action === "select_candidate") return selectDagCandidate(core, a);
+      if (a.action === "import_charakit") return importCharakitArchive(core, a);
+      return core.rerun(a);
+    }
     case "export_bundle":
       return core.exportBundle(a);
     case "selection_context":

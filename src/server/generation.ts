@@ -57,18 +57,15 @@ export function startGeneration(
   // A claimed task is never automatically re-dispatched, including after a restart.
   const input = core.generationGet(a.projectId, a.taskId);
   for (const f of input.referenceFiles) {
-    const { metadata } = core.assetFile(
-      a.projectId,
-      input.task.inputSnapshot.items.find((i) =>
-        i.files?.some((x) => x.relativePath === f.relativePath),
-      )!.revisionId!,
-      input.task.inputSnapshot.items
-        .find((i) => i.files?.some((x) => x.relativePath === f.relativePath))!
-        .files!.findIndex((x) => x.relativePath === f.relativePath),
+    const item = input.task.inputSnapshot.items.find((i) =>
+      i.files?.some((x) => x.relativePath === f.relativePath),
     );
-    const bytes = readFileSync(f.fileRef);
-    if (createHash("sha256").update(bytes).digest("hex") !== metadata.sha256)
-      throw new StudioError(409, "参考文件已被修改，请重新导入并建立新任务");
+    if (item?.revisionId && item.files) {
+      const idx = item.files.findIndex(
+        (x) => x.relativePath === f.relativePath,
+      );
+      if (idx >= 0) core.assetFile(a.projectId, item.revisionId, idx);
+    }
   }
   const prompt = generationPrompt(core, a.projectId, a.taskId);
   const dir = path.join(projectRoot, ".game-studio", "generated", task.id);

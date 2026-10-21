@@ -579,11 +579,12 @@ test("无效 GLB、路径穿越与符号链接逃逸被拒绝", () => {
     x.clean();
   }
 });
-test("检测已发布版本文件被篡改，拒绝导出为完整性通过", () => {
+test("外部合法修改自动刷新哈希并允许导出，损坏文件拒绝导出", () => {
   const x = setup();
   try {
     const r = x.core.importFiles(x.p.id, [doc()]);
-    writeFileSync(x.core.assetFile(x.p.id, r.id, 0).file, "changed");
+    const file = x.core.assetFile(x.p.id, r.id, 0).file;
+    writeFileSync(file, "corrupted\0binary");
     assert.throws(
       () =>
         x.core.exportBundle({
@@ -591,9 +592,21 @@ test("检测已发布版本文件被篡改，拒绝导出为完整性通过", ()
           revisionIds: [r.id],
           idempotencyKey: "export-tamper-key",
         }),
-      (e) => e instanceof StudioError && e.status === 409,
+      /文档包含二进制内容/,
     );
     assert.equal(x.core.snapshot(x.p.id).exports.length, 0);
+
+    writeFileSync(file, "# 外部编辑器更新后的文档\n保持零复制同步");
+    const bundle = x.core.exportBundle({
+      projectId: x.p.id,
+      revisionIds: [r.id],
+      idempotencyKey: "export-updated-key",
+    });
+    assert.equal(bundle.validation.technical, "passed");
+    assert.equal(
+      x.core.snapshot(x.p.id).assets[0].revisions[0].files[0].sizeBytes,
+      Buffer.byteLength("# 外部编辑器更新后的文档\n保持零复制同步"),
+    );
   } finally {
     x.clean();
   }
@@ -612,6 +625,68 @@ test("移动目录重新登记时身份和资源版本不变", () => {
     });
     assert.equal(p.id, x.p.id);
     assert.equal(x.core.snapshot(p.id).assets[0].revisions[0].id, r.id);
+  } finally {
+    x.clean();
+  }
+});
+test("项目内文件直接路径引用零复制，上传相同文件自动去重，随仓库克隆自动恢复", () => {
+  const x = setup();
+  try {
+    const spritesDir = path.join(x.p.root, "sprites");
+    mkdirSync(spritesDir, { recursive: true });
+    const heroPath = path.join(spritesDir, "hero.png");
+    writeFileSync(heroPath, png().bytes);
+
+    const rev1 = x.core.importPaths(x.p.id, ["sprites/hero.png"], {
+      name: "主角立绘",
+    });
+    assert.equal(rev1.files[0].relativePath, "sprites/hero.png");
+    assert.equal(existsSync(path.join(x.p.root, ".game-studio", "assets")), false);
+
+    const rev2 = x.core.importFiles(
+      x.p.id,
+      [{ name: "hero.png", bytes: png().bytes }],
+      { name: "重复上传立绘" },
+    );
+    assert.equal(rev2.files[0].relativePath, "sprites/hero.png");
+    assert.equal(existsSync(path.join(x.p.root, ".game-studio", "assets")), false);
+
+    x.core.projectManage({
+      action: "update",
+      projectId: x.p.id,
+      name: "可移植仓库项目",
+      cover: { revisionId: rev1.id, fileIndex: 0 },
+    });
+
+    const clonedRoot = path.join(x.dir, "cloned-repo");
+    mkdirSync(path.join(clonedRoot, "sprites"), { recursive: true });
+    mkdirSync(path.join(clonedRoot, ".game-studio"), { recursive: true });
+    writeFileSync(
+      path.join(clonedRoot, "sprites", "hero.png"),
+      png().bytes,
+    );
+    writeFileSync(
+      path.join(clonedRoot, ".game-studio", "state.json"),
+      readFileSync(path.join(x.p.root, ".game-studio", "state.json")),
+    );
+
+    const peerCore = new StudioCore(path.join(x.dir, "peer-config"));
+    try {
+      peerCore.discoverWorkspaces([clonedRoot]);
+      const projects = peerCore.listProjects();
+      assert.equal(projects.length, 1);
+      assert.equal(projects[0].id, x.p.id);
+      assert.equal(projects[0].name, "可移植仓库项目");
+      assert.deepEqual(projects[0].cover, { revisionId: rev1.id, fileIndex: 0 });
+      const snap = peerCore.snapshot(x.p.id);
+      assert.equal(snap.assets.length, 2);
+      assert.equal(
+        peerCore.assetFile(x.p.id, rev1.id, 0).file,
+        path.join(realpathSync(clonedRoot), "sprites", "hero.png"),
+      );
+    } finally {
+      peerCore.close();
+    }
   } finally {
     x.clean();
   }

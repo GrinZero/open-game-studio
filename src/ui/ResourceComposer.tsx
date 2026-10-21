@@ -37,6 +37,7 @@ export type AddResourceKind =
   | "text"
   | GenerationKind
   | "upload"
+  | "path"
   | "library"
   | "source";
 export const resourceChoices: {
@@ -108,6 +109,13 @@ export const resourceChoices: {
     detail: "导入代码或可编辑制作文件",
     icon: Code2,
     section: "资源",
+  },
+  {
+    kind: "path",
+    label: "引用本地路径",
+    detail: "直接选择项目或本地文件路径，项目内零复制",
+    icon: FolderOpen,
+    section: "导入与引用",
   },
   {
     kind: "upload",

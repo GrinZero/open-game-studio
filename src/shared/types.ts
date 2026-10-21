@@ -1,3 +1,7 @@
+import type {
+  CharacterDagNode,
+  CharacterWorkflowState,
+} from "./character-dag.js";
 export type Engine = "godot" | "unity" | "unreal" | "other";
 export interface ProjectCover {
   revisionId: string;
@@ -145,6 +149,14 @@ export interface WorkflowRun {
   inputRevisionIds: string[];
   inputSnapshot?: CanvasInputSnapshot;
   steps: WorkflowStep[];
+  dag?: CharacterDagNode[];
+  dagState?: CharacterWorkflowState;
+  branchFrom?: {
+    runId: string;
+    source: "head" | "body";
+    candidateId: string;
+    createdAt: string;
+  };
   status: "active" | "succeeded" | "cancelled";
   revision: number;
   createdAt: string;

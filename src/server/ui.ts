@@ -2,7 +2,12 @@ import { openSync, readSync, closeSync, statSync } from "node:fs";
 import { z } from "zod";
 import { StudioCore, StudioError } from "./core.js";
 import { dispatch } from "./operations.js";
-import { pickDirectory } from "./directories.js";
+import {
+  discoverLocalCharakuruProjects,
+  dispatchCharacterWorkflowRoute,
+  listClaimableDagNodes,
+} from "./character-workflow.js";
+import { pickDirectory, pickFiles } from "./directories.js";
 import { assetHttpUrl } from "./asset-http.js";
 
 export const uiRequestSchema = {
@@ -23,9 +28,51 @@ export async function uiRequest(
   const { path: route, method, body } = args;
   if (method === "POST" && route === "/api/directories/pick")
     return pickDirectory(body);
+  if (method === "POST" && route === "/api/files/pick") return pickFiles(body);
   if (method === "GET" && route === "/api/projects") return core.listProjects();
+  if (method === "GET" && route === "/api/charakuru/local-projects")
+    return { projects: discoverLocalCharakuruProjects() };
+  const charClaimable = route.match(
+    /^\/api\/projects\/([\w-]+)\/character-workflow\/claimable$/,
+  );
+  if (method === "GET" && charClaimable)
+    return listClaimableDagNodes(core, { projectId: charClaimable[1] });
+  const charAction = route.match(
+    /^\/api\/projects\/([\w-]+)\/character-workflow\/([\w-]+)$/,
+  );
+  if (method === "POST" && charAction)
+    return dispatchCharacterWorkflowRoute(
+      core,
+      charAction[1],
+      charAction[2],
+      body,
+    );
   const project = route.match(/^\/api\/projects\/([\w-]+)$/);
   if (method === "GET" && project) return core.snapshot(project[1]);
+  const workspaceFiles = route.match(
+    /^\/api\/projects\/([\w-]+)\/workspace-files$/,
+  );
+  if (method === "GET" && workspaceFiles)
+    return { files: core.listWorkspaceFiles(workspaceFiles[1]) };
+  const importPathsRoute = route.match(
+    /^\/api\/projects\/([\w-]+)\/import-paths$/,
+  );
+  if (method === "POST" && importPathsRoute) {
+    const data = z
+      .object({
+        fileRefs: z.array(z.string().min(1).max(4000)).min(1).max(12),
+        name: z.string().optional(),
+        assetId: z.string().optional(),
+        sourceRef: z.string().optional(),
+      })
+      .parse(body);
+    return core.importPaths(importPathsRoute[1], data.fileRefs, {
+      name: data.name,
+      assetId: data.assetId,
+      sourceRef: data.sourceRef,
+      allowExternalCopy: true,
+    });
+  }
   const operation = route.match(/^\/api\/tools\/([\w_]+)$/);
   if (method === "POST" && operation) return dispatch(core, operation[1], body);
   const upload = route.match(/^\/api\/projects\/([\w-]+)\/import$/);
