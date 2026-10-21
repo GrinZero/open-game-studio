@@ -6,6 +6,7 @@
   "scripts": {
     "check": "node scripts/run-python.mjs scripts/check.py",
     "package": "node scripts/run-python.mjs scripts/package-release.py",
-    "call": "node scripts/run-python.mjs integration/monster_client.py"
+    "call": "node scripts/run-python.mjs integration/monster_client.py",
+    "eval": "node scripts/run-python.mjs evals/cli.py"
   }
 }

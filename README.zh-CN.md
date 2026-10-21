@@ -18,7 +18,7 @@
 
 > **Alpha · macOS 安装器 · MIT 许可证。** 本地整理可独立使用；AI 制作需要自行配置工具与账号。README 提供多语言版本，工作台界面目前仍使用中文。
 
-[试用](#try-it) · [安装](#install) · [功能](#features) · [预览](#gallery) · [文档](#documentation) · [边界](#limits)
+[试用](#try-it) · [Monster](#monster) · [安装](#install) · [功能](#features) · [预览](#gallery) · [文档](#documentation) · [边界](#limits)
 
 ---
 
@@ -39,6 +39,34 @@
 工作台负责整理与查看，对话负责表达制作意图。连线提供输入，启动制作是单独的操作。
 
 还没有自己的文件组织习惯？可以阅读可选的[项目文件指南](skills/studio-project/references/project-file-guide.md)，然后说：`在我的游戏项目中采用 Open Game Studio 文件规范的标准方案。` 可以只选部分规则；已有项目保留原布局，迁移需另行明确提出。
+
+<a id="monster"></a>
+
+## Monster 模块：云端 GPU 角色绑定、姿态训练与动作生成
+
+[![Open in Colab](docs/images/open-in-colab.svg)](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb)
+
+[Monster 指南](packages/monster/README.md) · [工作流与 G1/G2/G3 审计技能](packages/monster/skills/monster-workflow/SKILL.md) · [Colab Notebook](packages/monster/notebooks/colab.ipynb)
+
+在 Colab G4 GPU 上将静态 3D 怪物或角色网格推进到候选骨架绑定、专属姿态探针训练与动作烘焙，本机无需安装 CUDA、PyTorch 或 Blender。全流程围绕明确的 **G1 / G2 / G3** 用户审计关卡展开，确保候选骨架选择、姿态采样与动作质量始终由人工把关。
+
+| 阶段 | 流水线与核心能力 |
+| --- | --- |
+| **1. 候选绑定（`rig` · G1）** | **SkinTokens + Blender Cycles GPU**（`OPTIX`/`CUDA`、GPU `OpenImageDenoise`、BVH 常驻显存）生成 4 套候选骨架，保留独立装饰拓扑，并渲染多视角同步对照审阅包供 **G1** 选型。 |
+| **2. 姿态探针（`train` · G2/G3）** | 通过 **G2** 50 姿态抽样审核后合成正/侧正交双视图（默认拼合 `1344×768`，或可选开启 `2560×1440` 2K 模式），训练角色专属 **DINOv2** 热图＋深度/可见性头（融合 SDPA 注意力、TF32、5×5 峰值概率集中度置信度），并经 **G3** 视频还原考试验证。 |
+| **3. 动作烘焙（`animate`）** | **MiniMax H3** 满血权重（`bf16`/`fp16`，2K 模式自动启用两阶段 3D 潜空间超分＋滑窗精修）生成同步双视图动作；经 2D Hampel 尖峰剔除、5 点 Savitzky–Golay 四元数平滑与受限局部欧拉多子骨 Swing-Twist IK 解算烘焙 `<action>_animated.glb`。 |
+| **4. 零 CUDA 本机客户端** | 点击上方 **Open in Colab** 徽章一键启动 G4 Worker（默认拉取 GitHub 最新代码并复用 Google Drive 缓存）。macOS 首次运行 `npm run monster:call` 自动创建 `packages/monster/.venv`，自动发现桌面端 Google Drive 的 `endpoint_registry.json`（或一行 `connect` 配对），校验 `protocol_version` 后下载产物。 |
+
+Colab Worker 启动后，在仓库根目录即可直接调用：
+
+```sh
+npm run monster:call -- status
+npm run monster:call -- rig creature_01 /absolute/path/input.glb
+npm run monster:call -- train creature_01 --samples 3000 --epochs 15
+npm run monster:call -- animate creature_01 'idle:loop walk:loop'
+```
+
+下载后的产物可通过工作台导入为不可变资源版本；离线部署归档可通过 `npm run monster:package` 生成。
 
 <a id="install"></a>
 
@@ -114,7 +142,7 @@ npm run install:local
 | [工具契约](docs/TOOL_CONTRACT.md) | 完整工具索引、输入 schema 与状态规则。 |
 | [验证记录](docs/VERIFICATION.md) | 已执行检查与仍需实测的能力。 |
 | [实现状态](docs/IMPLEMENTATION.md) | 架构、未完成阶段与后续计划。 |
-| [Monster 模块](packages/monster/README.md) | [Open in Colab](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb) 一键启动、Worker 源码与自动配对本机客户端。 |
+| [Monster 模块](packages/monster/README.md) | [![Open in Colab](docs/images/open-in-colab.svg)](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb) 一键启动、Worker 源码与自动配对本机客户端。 |
 
 <a id="limits"></a>
 

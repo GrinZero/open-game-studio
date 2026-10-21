@@ -240,7 +240,7 @@ def run_stage1_skintokens_candidates(input_glb: Path, cand_dir: Path, num_candid
     return candidates
 
 
-def register_new_monster(monster_id: str, input_glb: Path, num_synth: int = 3000, epochs: int = 15) -> None:
+def register_new_monster(monster_id: str, input_glb: Path, num_synth: int = 5000, epochs: int = 15) -> None:
     """Executes Phase A (Stages 1-4) for a new 3D monster asset and archives outputs to Google Drive."""
     free_comfyui_vram()
 
@@ -935,7 +935,7 @@ def main() -> None:
     p_reg = sub.add_parser("register", help="Phase A: Register a new 3D monster (Stages 1-4)")
     p_reg.add_argument("--monster_id", required=True)
     p_reg.add_argument("--input_glb", required=True, type=Path)
-    p_reg.add_argument("--num_synth", type=int, default=3000)
+    p_reg.add_argument("--num_synth", type=int, default=5000)
     p_reg.add_argument("--epochs", type=int, default=15)
 
     p_re = sub.add_parser("reexam", help="Fast Stage 4 Re-Exam & Swing+Twist GLB Round-Trip (0 retraining)")

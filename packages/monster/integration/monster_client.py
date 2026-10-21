@@ -134,7 +134,7 @@ class MonsterClient:
         )
 
     def train_monster_probe(self, identity, *, custom_blend=None, custom_meta_json=None,
-                            num_samples=3000, epochs=15, auto_shutdown_after=False):
+                            num_samples=5000, epochs=15, auto_shutdown_after=False):
         identity = monster_id(identity)
         if type(num_samples) is not int or num_samples <= 0 or type(epochs) is not int or epochs <= 0:
             raise ValueError("num_samples and epochs must be positive integers")
@@ -169,7 +169,7 @@ def main():
     rig.add_argument("input_glb")
     train = sub.add_parser("train")
     train.add_argument("monster_id")
-    train.add_argument("--samples", type=int, default=3000)
+    train.add_argument("--samples", type=int, default=5000)
     train.add_argument("--epochs", type=int, default=15)
     animate = sub.add_parser("animate")
     animate.add_argument("monster_id")

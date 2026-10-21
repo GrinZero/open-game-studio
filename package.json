@@ -15,6 +15,7 @@
     "monster:check": "npm run check --workspace=@open-game-studio/monster",
     "monster:package": "npm run package --workspace=@open-game-studio/monster",
     "monster:call": "npm run call --workspace=@open-game-studio/monster --",
+    "monster:eval": "npm run eval --workspace=@open-game-studio/monster --",
     "build": "node scripts/export-package-skills.mjs && node scripts/write-build-version.mjs && tsc --noEmit && vite build && node scripts/build-mcp-ui.mjs && node scripts/check-distribution.mjs",
     "check:distribution": "node scripts/check-distribution.mjs",
     "start": "tsx src/server/http.ts --production",

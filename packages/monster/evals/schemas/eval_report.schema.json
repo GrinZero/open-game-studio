@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MonsterEvalReport",
+  "description": "Structured 5-stage evaluation report for Monster Studio 2K video-to-animation reconstruction.",
+  "type": "object",
+  "required": [
+    "schema",
+    "benchmark_id",
+    "tier",
+    "solver_id",
+    "solver_version",
+    "stages",
+    "stratified_kinematics",
+    "temporal_quality",
+    "golden_frames",
+    "gates"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "monster-eval-report-v1"
+    },
+    "benchmark_id": { "type": "string" },
+    "tier": { "type": "string", "enum": ["fast", "infer", "full"] },
+    "solver_id": { "type": "string" },
+    "solver_version": { "type": "string" },
+    "created_at": { "type": "string" },
+    "stages": {
+      "type": "object",
+      "required": [
+        "stage1_perception_2d",
+        "stage2_epipolar_clean",
+        "stage3_triangulation_3d",
+        "stage4_kinematics_so3",
+        "stage5_glb_roundtrip"
+      ]
+    },
+    "stratified_kinematics": { "type": "object" },
+    "temporal_quality": { "type": "object" },
+    "golden_frames": { "type": "object" },
+    "gates": { "type": "object" }
+  }
+}

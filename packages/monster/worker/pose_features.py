@@ -21,6 +21,7 @@ FEATURE_ENV = "MONSTER_ENABLE_DEPTH_VISIBILITY"
 RESOLUTION_2K_ENV = "MONSTER_ENABLE_2K"
 DATASET_SCHEMA = "monster-pose-depth-visibility-v1"
 FEATURE_VERSION = "v2.3-depth-visibility-1"
+DEFAULT_SYNTH_SAMPLES = 5000
 DEFAULT_STUDIO_RESOLUTION = (672, 768, 1344, 768)
 STUDIO_2K_RESOLUTION = (1280, 1440, 2560, 1440)
 
@@ -106,6 +107,9 @@ def validate_enhanced_dataset(data, bone_names):
         raise ValueError("Empty synthetic dataset")
     if float(data["calibration"].get("depth_scale", 0)) <= 0:
         raise ValueError("Missing depth scale")
+    cov_audit = data.get("coverage_audit")
+    if isinstance(cov_audit, dict) and not cov_audit.get("passed", True):
+        raise ValueError(f"Synthetic pose dataset failed coverage/decoupling audit: {cov_audit.get('failures')}")
     known_visibility = 0
     for sample in data["samples"]:
         for bone in bone_names:

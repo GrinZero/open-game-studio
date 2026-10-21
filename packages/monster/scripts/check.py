@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if sys.version_info < (3, 11, 8):
     raise SystemExit("Monster deployment tooling requires Python 3.11.8 or later")
 
-for directory in ("worker", "scripts", "integration", "tests"):
+for directory in ("worker", "scripts", "integration", "tests", "evals"):
     for file in (ROOT / directory).rglob("*.py"):
         if "__pycache__" not in file.parts:
             compile(file.read_text(), str(file), "exec")

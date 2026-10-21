@@ -263,11 +263,11 @@ def api_train_monster_probe(
     monster_id: str,
     custom_blend_file: str | None = None,
     custom_meta_json: str | None = None,
-    num_samples: int = 3000,
+    num_samples: int = 5000,
     epochs: int = 15,
     auto_shutdown_after: bool = False,
 ) -> str:
-    """Endpoint 2: Renders 3,000 poses, trains the DINOv2 probe, and runs the 96-frame Studio Exam."""
+    """Endpoint 2: Renders 5,000 stratified poses, trains the DINOv2 probe, and runs the 96-frame Studio Exam."""
     with GUARD.lock:
         GUARD.busy = True
         GUARD.touch(f"Stage2_3_4_TrainExam:{monster_id}")
@@ -499,7 +499,7 @@ def launch_headless_worker(port: int = 7865) -> None:
                 api_name="rig_candidates",
             )
 
-        with gr.Tab("2. 3000 姿态渲染 + DINOv2 训练 + 模拟考"):
+        with gr.Tab("2. 5000 姿态渲染 + DINOv2 训练 + 模拟考"):
             _, _, comp_w, comp_h = studio_resolution()
             gr.Markdown(
                 f"**{FEATURE_VERSION}** · 深度/可见性监督：**{'开启' if features_enabled() else '关闭'}** · "
@@ -510,7 +510,7 @@ def launch_headless_worker(port: int = 7865) -> None:
             m_id2 = gr.Textbox(label="Monster ID", value="swamp_troll_01")
             c_blend = gr.File(label="Optional Locally Adjusted .blend", type="filepath")
             c_meta = gr.Textbox(label="Optional Locally Adjusted studio_rig_meta.json", lines=4)
-            n_samp = gr.Number(label="Num Synthetic Poses", value=3000)
+            n_samp = gr.Number(label="Num Synthetic Poses", value=5000)
             n_ep = gr.Number(label="DINOv2 Epochs", value=15)
             auto_kill_train = gr.Checkbox(label="训练与模拟考完成后立即自动释放 G4 GPU", value=False)
             tr_btn = gr.Button("Run Synthetic Studio + DINOv2 + Exam")

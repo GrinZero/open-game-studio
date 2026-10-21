@@ -18,7 +18,7 @@
 
 > **Alpha · macOS 설치 프로그램 · MIT 라이선스.** 로컬 정리는 독립적으로 사용할 수 있습니다. AI 제작에는 직접 설정한 도구와 계정이 필요합니다. README는 다국어로 제공되지만 워크벤치 UI는 현재 중국어입니다.
 
-[시작](#try-it) · [설치](#install) · [기능](#features) · [화면](#gallery) · [문서](#documentation) · [제한](#limits)
+[시작](#try-it) · [Monster](#monster) · [설치](#install) · [기능](#features) · [화면](#gallery) · [문서](#documentation) · [제한](#limits)
 
 ---
 
@@ -39,6 +39,34 @@ Open Game Studio 워크벤치를 열어 주세요.
 워크벤치에서는 정리와 확인을, 대화에서는 제작 지시를 합니다. 연결은 입력을 지정하며, 제작 시작은 별도 작업입니다.
 
 파일 정리를 시작할 기준이 필요하다면 선택 사항인 [프로젝트 파일 가이드(중국어)](skills/studio-project/references/project-file-guide.md)를 읽고 `내 게임 프로젝트에 Open Game Studio 파일 가이드의 표준 구성을 적용해 주세요.`라고 요청하세요. 일부 규칙만 선택할 수 있으며, 이전을 명시적으로 요청하기 전까지 기존 배치를 유지합니다.
+
+<a id="monster"></a>
+
+## Monster 모듈: 클라우드 GPU 리깅, 포즈 학습 및 애니메이션 생성
+
+[![Open in Colab](docs/images/open-in-colab.svg)](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb)
+
+[Monster 가이드](packages/monster/README.md) · [워크플로 및 G1/G2/G3 감사 스킬](packages/monster/skills/monster-workflow/SKILL.md) · [Colab 노트북](packages/monster/notebooks/colab.ipynb)
+
+Colab G4 GPU에서 정적 3D 크리처 또는 캐릭터 메시를 후보 리깅, 전용 포즈 프로브 학습, 애니메이션 베이킹까지 진행하며 Mac에는 CUDA, PyTorch, Blender를 설치할 필요가 없습니다. 명시적인 **G1 / G2 / G3** 사용자 감사 게이트를 통해 골격 선택, 포즈 샘플링, 모션 품질을 사람이 직접 검토하며 진행합니다.
+
+| 단계 | 파이프라인 및 핵심 기능 |
+| --- | --- |
+| **1. 후보 리깅 (`rig` · G1)** | **SkinTokens + Blender Cycles GPU**(`OPTIX`/`CUDA`, GPU `OpenImageDenoise`, 영구 BVH)로 4종 후보 골격을 생성하고 독립 장식 토폴로지를 보존하며 **G1** 선택용 다각도 동기화 검토 시트를 렌더링합니다. |
+| **2. 포즈 프로브 (`train` · G2/G3)** | **G2** 50포즈 검토 후 정면·측면 직교 듀얼뷰(기본 `1344×768` 병합 또는 선택형 `2560×1440` 2K 모드)를 합성하고, 전용 **DINOv2** 히트맵 + 깊이/가시성 헤드(SDPA 어텐션, TF32, 5×5 피크 질량 신뢰도)를 학습해 **G3** 영상 복원 시험으로 검증합니다. |
+| **3. 액션 베이킹 (`animate`)** | 풀 정밀도 **MiniMax H3**(`bf16`/`fp16`, 2K 시 2단계 3D 잠재 공간 업스케일러 + 타일 정밀 보정)로 동기화된 듀얼뷰 모션을 생성하고, 2D Hampel 스파이크 제거·5점 Savitzky–Golay 쿼터니언 스무딩·제한 로컬 오일러 다중 자식 본 Swing-Twist IK로 `<action>_animated.glb`를 베이킹합니다. |
+| **4. 제로 CUDA 로컬 클라이언트** | 위 **Open in Colab** 배지를 눌러 G4 Worker를 실행합니다(기본으로 최신 GitHub 코드를 가져오고 Google Drive 캐시를 재사용). macOS에서는 `npm run monster:call` 첫 실행 시 `packages/monster/.venv`를 자동 구성하고 데스크톱용 Google Drive의 `endpoint_registry.json` 자동 탐색(또는 한 줄 `connect`)과 `protocol_version` 확인 후 결과 ZIP을 내려받습니다. |
+
+Colab Worker가 실행되면 저장소 루트에서 바로 호출할 수 있습니다:
+
+```sh
+npm run monster:call -- status
+npm run monster:call -- rig creature_01 /absolute/path/input.glb
+npm run monster:call -- train creature_01 --samples 3000 --epochs 15
+npm run monster:call -- animate creature_01 'idle:loop walk:loop'
+```
+
+내려받은 결과물은 워크벤치에서 변경 불가 에셋 버전으로 가져올 수 있으며, 오프라인 배포 번들은 `npm run monster:package`로 생성합니다.
 
 <a id="install"></a>
 
@@ -114,7 +142,7 @@ npm run install:local
 | [도구 계약](docs/TOOL_CONTRACT.md) | 전체 도구 목록, 입력 schema와 상태 규칙. |
 | [검증 기록](docs/VERIFICATION.md) | 수행한 검증과 실제 환경에서 확인해야 할 항목. |
 | [구현 현황](docs/IMPLEMENTATION.md) | 구조, 미완료 단계와 향후 작업. |
-| [Monster 모듈](packages/monster/README.md) | [Open in Colab](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb) 실행, Worker 소스 및 자동 탐색 로컬 클라이언트. |
+| [Monster 모듈](packages/monster/README.md) | [![Open in Colab](docs/images/open-in-colab.svg)](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb) 실행, Worker 소스 및 자동 탐색 로컬 클라이언트. |
 
 <a id="limits"></a>
 

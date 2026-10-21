@@ -18,7 +18,7 @@ Bring references, documents, media and 3D assets onto one visual canvas. Keep th
 
 > **Alpha · macOS installer · MIT License.** Local organization works on its own; AI production requires your own configured tools and accounts. README translations do not change the workbench UI, which currently uses Chinese labels.
 
-[Try it](#try-it) · [Install](#install) · [Features](#features) · [Gallery](#gallery) · [Docs](#documentation) · [Limits](#limits)
+[Try it](#try-it) · [Monster](#monster) · [Install](#install) · [Features](#features) · [Gallery](#gallery) · [Docs](#documentation) · [Limits](#limits)
 
 ---
 
@@ -39,6 +39,34 @@ Show me the frozen input list before starting production.
 Use the workbench to organize and inspect; use the conversation to tell Codex what to do. Connections supply inputs. Starting production is a separate action.
 
 Want a starting point for file organization? Read the optional [project file guide (Chinese)](skills/studio-project/references/project-file-guide.md), then ask: `Adopt the standard Open Game Studio file guide in my game project.` You can choose individual rules; existing projects keep their layout unless you request a migration.
+
+<a id="monster"></a>
+
+## Monster module: cloud GPU rigging, pose training and animation
+
+[![Open in Colab](docs/images/open-in-colab.svg)](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb)
+
+[Monster guide](packages/monster/README.md) · [Workflow & G1/G2/G3 audit skill](packages/monster/skills/monster-workflow/SKILL.md) · [Colab notebook](packages/monster/notebooks/colab.ipynb)
+
+Turn a static 3D creature or character mesh into rigged candidates, a creature-specific pose probe and baked animations on a Colab G4 GPU—while keeping your Mac free of CUDA, PyTorch or Blender dependencies. Monster follows explicit **G1 / G2 / G3** user audit gates so candidate selection, pose sampling and motion quality stay under human review.
+
+| Stage | Pipeline & capabilities |
+| --- | --- |
+| **1. Candidate rigging (`rig` · G1)** | **SkinTokens + Blender Cycles GPU** (`OPTIX`/`CUDA`, GPU `OpenImageDenoise`, persistent BVH) generates 4 candidate skeletons, preserves independent accessory topology, and renders synchronized multi-view review sheets for **G1** selection. |
+| **2. Pose probe (`train` · G2/G3)** | Synthesizes dual-view orthographic poses (`1344×768` split by default, or optional `2560×1440` 2K mode) after **G2** 50-pose review, trains a creature-specific **DINOv2** heatmap + depth/visibility head (SDPA attention, TF32, 5×5 peak-mass confidence), and validates reconstruction at **G3**. |
+| **3. Action baking (`animate`)** | Full-precision **MiniMax H3** (`bf16`/`fp16`, plus optional 2-stage 3D latent upscaler + tiled hires-fix for 2K) generates synchronized dual-view motion; 2D Hampel spike rejection, 5-point Savitzky–Golay quaternion filtering and bounded local-Euler multi-child Swing-Twist IK bake `<action>_animated.glb`. |
+| **4. Zero-CUDA local client** | Click the **Open in Colab** badge to launch the G4 Worker (pulls latest GitHub code and reuses Google Drive caches). On macOS, `npm run monster:call` auto-bootstraps `packages/monster/.venv`, auto-discovers `endpoint_registry.json` from Google Drive for Desktop (or pairs via one-line `connect`), verifies `protocol_version`, and downloads ZIP outputs. |
+
+Once the Colab Worker is running, call it directly from the repository root:
+
+```sh
+npm run monster:call -- status
+npm run monster:call -- rig creature_01 /absolute/path/input.glb
+npm run monster:call -- train creature_01 --samples 3000 --epochs 15
+npm run monster:call -- animate creature_01 'idle:loop walk:loop'
+```
+
+Downloaded artifacts import into the workbench as immutable asset revisions; offline release bundles can be built with `npm run monster:package`.
 
 <a id="install"></a>
 
@@ -114,7 +142,7 @@ Real screenshots from an isolated local demo, using the repository’s original 
 | [Tool contract](docs/TOOL_CONTRACT.md) | Complete tool index, input schemas and state rules. |
 | [Verification record](docs/VERIFICATION.md) | What was tested and what still needs real-world validation. |
 | [Implementation status](docs/IMPLEMENTATION.md) | Architecture, incomplete milestones and planned work. |
-| [Monster module](packages/monster/README.md) | [Open in Colab](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb), Worker source and auto-discovered local client. |
+| [Monster module](packages/monster/README.md) | [![Open in Colab](docs/images/open-in-colab.svg)](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb) Worker source and auto-discovered local client. |
 
 <a id="limits"></a>
 

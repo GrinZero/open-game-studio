@@ -66,13 +66,17 @@ flowchart LR
 
 ## 3. 阶段二：四候选骨架生成、装饰恢复与 G1 审计
 
-### 3.1 四候选生成与装饰恢复
+### 3.1 四候选生成、装饰恢复与骨骼命名规范
 
 1. **生成四候选**：Colab 运行 SkinTokens 生成 4 套候选骨架，保存各自 `.blend` 与元数据至 Drive。取回本地后，**默认释放本任务独占的 Colab 实例**（见 7.2 节）。
 2. **恢复完整装饰**：在本地将预检阶段临时隐藏/拆离的装饰恢复至 4 套候选模型上：
    - 刚性挂件绑定至对应骨骼父级，柔性分件配置蒙皮权重并保持独立分件（不焊接合并至主体）。
    - 检查静止姿态与测试动作下的漂移、脱离、穿插及异常拉伸。
    - **后续 G1、G2 与正式训练均使用恢复装饰后的完整模型。**
+3. **统一骨骼命名规范（Schema v2）**：在本地恢复完整装饰、导出 `studio_rig_meta.json` 与进入 G1 审计前，调用 `canonicalize_rig_bone_names_in_blender` 将全部变形骨骼统一命名为 `<KIND>_<SIDE>_<GROUP>_<INDEX>` 格式（同步重命名网格 `vertex_groups` 与父子引用，并在 `studio_rig_meta.json` 记录 `schema_version=2`、`kind`、`subkind`、`side`、`chain_group`、`chain_index` 与 `legacy_name`）：
+   - **`KIND` 枚举**：`ROOT`（根骨）、`RIGID`（刚性胸腔/装甲/挂件锚点，0 局部旋转自由度）、`SPINE`（中轴躯干/颈部链）、`HEAD`（头颅主骨）、`JAW`（口器/下颌铰链）、`LIMB`（主承重肢体：含 `clavicle_socket` 锁骨/肩胯基座、`upper_limb` 上臂/大腿、`forearm_hinge` 前臂/小腿铰链、`hand_hub` 掌/腕多指扇形枢纽）、`WING`（翼骨主链）、`FLEX`（柔性飘带/裙摆/发辫/触须链）、`TAIL`（尾骨链）、`DIGIT`（指/趾/爪链）。
+   - **`SIDE` 枚举**：`C`（中轴 `|x| <= 0.04 * width`）、`L`（左侧 `x > +0.04 * width`）、`R`（右侧 `x < -0.04 * width`）。
+   - **历史匿名骨架无损兼容**：对已训练或未重命名的历史骨架（如 `bone_0..51`、`Core_Rigid`、`Flex_*`），导出与重建阶段通过 `classify_rig_bones` 混合分类器（名字规范解析 + 关节旋转自由度约束 + 3D 拓扑分支/几何骨长比例与掌指扇形不变量 `_is_digit_chain_subtree`）自动推断每根骨骼的 `kind` 与 `subkind`，无需重训已有 `dinov2_head.pt` 即可直接启用分层运动学求解器。
 
 ### 3.2 G1 审阅包制作标准
 
@@ -124,20 +128,32 @@ G1 用户明确选定 1 套 `selected_candidate_id` 后，仅对该套完整绑�
 ### 5.1 完整训练集合成与 DINOv2 训练
 
 1. **前置门禁与分辨率对齐**：校验当前模型与采样器具备有效的 G1、G2 通过记录，模型更新已完成 U2 上传。**训练图与静止首帧基准图（`idle_split_1344x768.png` 或 2K 模式下的 `idle_split_2560x1440.png`）必须采用与目标视频生成完全一致的原生渲染分辨率**（`composite_width = panel_width * 2`、`composite_height = panel_height`，默认为 `1344×768` 即单面板 `672×768`，开启 `MONSTER_ENABLE_2K=1` 时为 `2560×1440` 即单面板 `1280×1440`；严禁低清渲染后插值放大，或让训练图与视频生成使用不同分辨率）。
-2. **批量合成与 GPU 渲染加速规范**：在固定正/侧正交双视图摄影棚下按上述锁定分辨率生成完整训练集（基线默认 3,000 姿态，或按资产专门约定如 10,000 姿态），输出双视图渲染图、2D 骨骼端点、相机标定（含锁定的 `panel_width`、`panel_height`、`composite_width`、`composite_height`）及 v2.3 深度/表面可见性代理标签。
+2. **批量合成、四模态解耦采样与 GPU 渲染加速规范**：在固定正/侧正交双视图摄影棚下按上述锁定分辨率生成完整训练集（基线默认 **5,000 姿态**，或按资产专门约定如 10,000 姿态），采用四模态分层解耦采样（`40% synergistic` 单指独立目标＋链内协同、`30% decoupled` 全关节零耦合独立随机、`15% antiphase_extreme` 父子反相 S 形与边界极值双峰采样、`15% workspace_cross_occlusion` 胸前交汇自遮挡与前臂翻转），并在 Stage 2 结束时通过 `audit_pose_dataset_coverage` 自动门禁校验 `digit_pc1_variance_ratio <= 0.55`、`max_inter_finger_abs_corr <= 0.65`、`antiphase_sign_flip_ratio >= 0.12` 与最小解剖包络下限，防止“五指固定比例同步卷曲”等低秩耦合捷径学习；输出双视图渲染图、2D 骨骼端点、相机标定（含锁定的 `panel_width`、`panel_height`、`composite_width`、`composite_height`）、`pose_coverage_audit.json` 及 v2.3 深度/表面可见性代理标签。
    - **Cycles 光追与 OpenImageDenoise GPU 开关（必开）**：使用 `CYCLES` 渲染时，按 `OPTIX -> CUDA -> METAL` 顺序启用硬件 GPU 后端，并将 `prefs.devices` 中的 CPU 设备设为 `device.use = False`（禁止 CPU 混合抢占分块）；启用 `OPENIMAGEDENOISE` 时**必须显式设置 `scene.cycles.denoising_use_gpu = True`**（Blender 默认 `False`，若遗漏会导致每帧将緩衝区拷回 CPU 用 40+ 核慢速降噪、GPU 利用率仅 ~6%；开启 GPU OIDN 后 2K 16 samples 双视图渲染从 ~1.66s 降至 ~0.20s，提速约 8.5 倍）。
    - **常驻显存与相机/灯光标定**：必须开启 `scene.render.use_persistent_data = True` 避免跨帧与正/侧相机切换重复上传网格与重建 BVH；双正交相机锁定 `sensor_fit = "VERTICAL"` 并调用 `view_layer.update()` 后再读取 `matrix_world`；三盏 Area Light（`KeyLight`、`FillLight`、`RimLight`）朝向始终对准模型中心 `center`；表面可见性采样器缓存静态蒙皮权重归属与三角面拓扑，每帧仅更新变形顶点坐标。
 3. **专属头训练与 GPU 算力满载规范**：冻结 DINOv2 主干，在同分辨率面板裁切输入上训练怪物专属关键点热图头与辅助头（14px patch 自动边缘填充：768P 下 `672×770 -> 192×220` 热图；2K 下 `1288×1442 -> 368×412` 热图，高斯核半径与面板高度同比例自适应；基线默认 15 epochs），备份旧权重后保存 `dinov2_head.pt`，并验证权重可在目标推理链正常加载求值。
    - **DINOv2 原生融合 SDPA 注意力**：必须将 `backbone.blocks[*].attn.forward` 绑定为 PyTorch `F.scaled_dot_product_attention`（FlashAttention / cuDNN SDPA），严禁在缺少 `xformers` 时退化为显式 $N \times N$ 注意力矩阵（2K 下 `N=9481` 会暴涨至 ~68 GiB 显存，SDPA 下 `batch_size=32` 仅占 ~29.6 GiB）。
    - **TF32、异步 DataLoader 与批量推理**：启用 `torch.backends.cuda.matmul.allow_tf32 = True`、`cudnn.allow_tf32 = True` 与 `cudnn.benchmark = True`；`DataLoader` 开启多进程 `persistent_workers=True`、`pin_memory=True` 与 `.to(device, non_blocking=True)` 异步 H2D 传输，并在 epoch 末统一同步标量 Loss 避免逐 batch `cudaStreamSynchronize` 阻塞流水线；推理阶段使用 `torch.inference_mode()` 多帧批量前向与多线程图片解码。
 
-### 5.2 已有视频还原与 G3 考试审计
+### 5.2 已有视频还原、三层运动学重建与 G3 考试审计
 
 1. **独立考试素材**：使用独立于训练集的**已有视频**（核对正/侧正交相机标定、帧率、视图顺序，且**视频分辨率须与训练图锁定分辨率严格一致**；原 96 帧合成序列仅作附加技术回归，不替代已有视频还原）。
-2. **还原与 GLB 回读重渲染**：
-   `视频抽帧 → DINOv2 姿态推理 → 双视图同步检查与深度/可见性融合 → 三维轨迹重建 → Swing+Twist IK 解算与动画烘焙 → 导出实际 GLB → 重新导入 Blender 按原相机与相同最高分辨率重渲染对比视频`。
-3. **代码测量与报告边界**：
-   - **具 3D 骨骼真值**：报告骨端点位置误差、骨方向误差、非叶骨 SO(3) 旋转误差（基线参考阈值：逐骨平均方向误差均值 `< 3.5°`、最大值 `< 8.0°`、完整旋转平均误差 `< 3.5°`）。
+2. **三层通用＋Kind 专属运动学重建与 GLB 回读重渲染**：
+   `视频抽帧 → DINOv2 姿态推理 → 双视图同步检查与三层运动学重建（通用核心 + Kind 专属求解器） → 逐帧重置 Rest Pose 动画烘焙 → 导出实际 GLB → 重新导入 Blender 按原相机与相同最高分辨率重渲染对比视频`。
+   - **第一层（骨骼分类与规范对齐）**：基于 `bone_taxonomy.py` 的混合分类器（`classify_rig_bones`）获取每根骨骼的 `kind`、`subkind`、`side` 与链节深度。
+   - **第二层（全骨架通用运动学核心）**：
+     - **短遮挡 2D 插值**：`clean_2d_trajectories_hampel` 仅对 `<= 3` 帧的短暂低置信度缺口作线性插值；`> 3` 帧的长遮挡保持原始低置信度，交由 3D 骨长与父子拓扑先验约束，**严禁将长遮挡插值点伪造为 0.35 高置信度覆盖 3D 融合**。
+     - **保峰时序滤波**：对 3D 关键点与旋转矩阵采用 5 点二阶 Savitzky-Golay 滤波（`savgol_smooth_array`，系数 `[-3, 12, 17, 12, -3] / 35`），保留动作极值幅度，避免多轮均值平滑吞噬挥臂/踢腿峰值。
+     - **多锚点 IRLS Kabsch 根姿态拟合**：汇集 `root`、`rigid` 及高置信度 `spine`/`clavicle_socket` 锚点，经 3 轮 Huber 加权 Kabsch SVD 求解全局刚体旋转 $R_{\text{root}}(t)$ 与平移 $T_{\text{root}}(t)$。
+     - **精确静止骨间距 FK 传递与正交双分支欧拉限位**：所有子骨旋转在父骨实时局部坐标系 $M_{\text{parent}}(t) \cdot M_{\text{rest\_local}}$ 下求解，并严格通过 `rest_offset` 前向传递位置；欧拉角限位采用正交双分支提取并对比距参考角测地距离，**严禁在限位裁剪后用无界 `minimum_swing` 覆盖导致超限扭转**。
+   - **第三层（按 `kind` 分发的专门运动学求解器）**：
+     - `root` / `rigid`：直接复用多锚点 IRLS Kabsch 全局刚体变换，刚性附件锁定零局部形变（$R_{\text{local}} = I_3$）。
+     - `spine` / `head` / `jaw`：轴向串联阻尼（`0.92`），`head` 结合自身骨向量与唯一子骨向量联合稳定朝向。
+     - `limb`（四肢主链）：`forearm_hinge`（前臂/小腿）利用观测空间腕部子骨锚点差分（`hand_hub.head - forearm.head`）加权校正肘部屈伸，并将腕指平面法向投影至静止局部 XZ 平面解算有界轴向 Twist；`hand_hub`（短掌骨枢纽）利用多指基部尾端在观测空间的差分向量（`digit_01.tail - hand.head`）加权扇形求解掌面朝向与翻转，消除 ~2.3 cm 短骨端差噪声放大及 FK/观测坐标系混用偏差。
+     - `flex` / `tail` / `wing`：按链节深度递减置信度阻尼（$\alpha = \text{clip}((c - 0.12)/0.55, 0.18, 0.92) \cdot 0.94^{\min(d, 4)}$），防止飘带/长尾末端发散翻转。
+     - `digit`（指/趾/爪）：采用指链耦合屈曲阻尼（`0.65 -> 0.52 -> 0.39`）与自适应平滑，抑制多指交叉遮挡下的高频乱跳。
+3. **代码测量与分层报告边界**：
+   - **具 3D 骨骼真值**：通过 `compute_stratified_motion_metrics` 同时报告 **`all_bones`（全骨架）**、**`primary_bones`（除 `digit` 外的主干/四肢/飘带主骨骼）** 以及 **`by_kind`（按 `root`/`rigid`/`spine`/`head`/`limb`/`flex`/`digit` 分类）** 的骨端点位置误差、骨方向误差与非叶骨 SO(3) 旋转误差。
    - **仅具 2D 标注**：报告 2D 重投影误差、双视图竖直同步（基线阈值：768P 下平均竖直差 `< 18 px`、2K 1440P 下按比例 `< 33.75 px`，相关系数 `> 0.82`）及骨长一致性。
    - **无标注原视频**：报告双视图同步、置信度自一致性与逐帧视觉对照，明确标注无真值项，不编造 MPJPE / SO(3) 数值。
 4. **G3 审阅包**：提供原视频与最终 GLB 重渲染视频的并排同步播放器（含 3/4 视图、骨骼叠加、误差曲线与失败帧定位），由用户做出 G3 最终判定。

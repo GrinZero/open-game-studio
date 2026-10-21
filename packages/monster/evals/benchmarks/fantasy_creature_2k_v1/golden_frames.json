@@ -1,0 +1,48 @@
+{
+  "schema": "monster-golden-frames-v1",
+  "benchmark_id": "fantasy_creature_2k_v1",
+  "probes": [
+    {
+      "frame": 0,
+      "name": "bind_start",
+      "description": "Initial idle/stance entry frame; verifies zero root offset and stable bind alignment.",
+      "max_root_rot_deg": 5.0,
+      "max_primary_dir_deg": 8.0
+    },
+    {
+      "frame": 17,
+      "name": "root_flip_regression_guard",
+      "description": "Historical failure frame where collinear 2-point root fitting caused a 180-deg root flip; verifies multi-anchor IRLS Kabsch stability.",
+      "max_root_rot_deg": 5.0,
+      "max_primary_dir_deg": 8.0
+    },
+    {
+      "frame": 60,
+      "name": "stance_transition",
+      "description": "Mid-phase torso & upper limb transition; checks spine and upper-limb coordination.",
+      "max_root_rot_deg": 8.0,
+      "max_primary_dir_deg": 9.0
+    },
+    {
+      "frame": 131,
+      "name": "prayer_convergence",
+      "description": "Bilateral forearm/hand convergence in front of chest; exercises self-occlusion & forearm child-head pivot fusion.",
+      "max_root_rot_deg": 6.0,
+      "max_primary_dir_deg": 9.0
+    },
+    {
+      "frame": 211,
+      "name": "extension_release",
+      "description": "Wide lateral limb extension and flex-chain wave propagation.",
+      "max_root_rot_deg": 6.0,
+      "max_primary_dir_deg": 9.0
+    },
+    {
+      "frame": 287,
+      "name": "cycle_closure",
+      "description": "Final frame of the 12s (288-frame) 24fps exam clip; verifies zero cumulative drift.",
+      "max_root_rot_deg": 5.0,
+      "max_primary_dir_deg": 8.0
+    }
+  ]
+}

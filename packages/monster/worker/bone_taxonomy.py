@@ -1,0 +1,1881 @@
+#!/usr/bin/env python3
+"""bone_taxonomy.py — Three-Layer General + Kind-Specific Bone Taxonomy & Kinematic Solver.
+
+Architecture:
+  - Layer 1 (Canonical Bone Naming & Hybrid Classifier, Schema v2):
+      Defines the canonical bone naming convention `<KIND>_<SIDE>_<GROUP>_<INDEX>` across 10
+      anatomical kinds (`ROOT`, `RIGID`, `SPINE`, `HEAD`, `JAW`, `LIMB`, `WING`, `FLEX`, `TAIL`, `DIGIT`).
+      Combines deterministic name/prefix parsing with 3D topological and geometric graph analysis
+      so both newly generated canonical rigs and legacy anonymous rigs (`bone_0..N`, `Core_Rigid`,
+      `Flex_*`) are classified without retraining checkpoints.
+  - Layer 2 (Universal Kinematic Core):
+      Rig-agnostic bounded short-gap 2D interpolation (`<= 3` frames, zero long-gap time substitution),
+      5-tap quadratic Savitzky-Golay smoothing, multi-anchor IRLS Kabsch root fitting, exact rest-offset
+      forward kinematics (FK), and strict two-branch local Euler limit clamping without post-clamp
+      `minimum_swing` overrides.
+  - Layer 3 (Kind-Specific Kinematic Solvers):
+      Dispatches specialized solvers per anatomical `kind`:
+        * `root`: Multi-anchor IRLS Kabsch rigid body fit + bounded slerp;
+        * `rigid`: Exact local identity (`R_delta = I_3`, zero drift);
+        * `spine` / `head` / `jaw`: Sagittal-prior bounded Euler with child lever-arm observability;
+        * `limb`: Gimbal-free Swing-Twist (`R_swing(d_loc) @ Ry(tau)`) + disconnected child-pivot
+          fusion on forearms (`forearm_hinge`) + multi-child palm-fan fusion on hands/feet (`hand_hub`);
+        * `flex` / `tail` / `wing`: Symmetric-bound travelling-wave chain solver;
+        * `digit`: Coupled phalange curl damping with axial twist locked to `tau = 0`.
+"""
+
+from __future__ import annotations
+
+import copy
+import math
+import re
+from typing import Any
+
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore
+
+BONE_TAXONOMY_SCHEMA = "monster-bone-taxonomy-v2"
+DEFAULT_SYNTH_SAMPLES = 5000
+
+POSE_SAMPLING_REGIMES: tuple[str, ...] = (
+    "synergistic",
+    "decoupled",
+    "antiphase_extreme",
+    "workspace_cross_occlusion",
+)
+
+CANONICAL_KINDS: tuple[str, ...] = (
+    "root",
+    "rigid",
+    "spine",
+    "head",
+    "jaw",
+    "limb",
+    "wing",
+    "flex",
+    "tail",
+    "digit",
+)
+
+CANONICAL_SIDES: tuple[str, ...] = ("C", "L", "R")
+
+_CANONICAL_NAME_RE = re.compile(
+    r"^(ROOT|RIGID|SPINE|HEAD|JAW|LIMB|WING|FLEX|TAIL|DIGIT)_([CLR])_([0-9]{2})_([0-9]{2})$",
+    re.IGNORECASE,
+)
+
+
+# ==============================================================================
+# Layer 1: Canonical Bone Naming & Hybrid (Name + 3D Topology) Classifier
+# ==============================================================================
+
+def parse_canonical_bone_name(name: str) -> dict[str, Any] | None:
+    """Parses a canonical `<KIND>_<SIDE>_<GROUP>_<INDEX>` bone name if it matches the v2 contract."""
+    m = _CANONICAL_NAME_RE.match(name.strip())
+    if not m:
+        return None
+    return {
+        "kind": m.group(1).lower(),
+        "side": m.group(2).upper(),
+        "group_id": m.group(3),
+        "chain_index": int(m.group(4)),
+    }
+
+
+def format_canonical_bone_name(kind: str, side: str, group: int | str, index: int) -> str:
+    """Formats a canonical `<KIND>_<SIDE>_<GROUP>_<INDEX>` bone name."""
+    k_up = kind.strip().upper()
+    if k_up.lower() not in CANONICAL_KINDS:
+        raise ValueError(f"Unsupported canonical bone kind: {kind!r}")
+    s_up = side.strip().upper()
+    if s_up not in CANONICAL_SIDES:
+        s_up = "C"
+    grp_str = f"{int(group):02d}" if isinstance(group, int) or str(group).isdigit() else str(group)[:2].zfill(2)
+    idx_str = f"{max(0, int(index)):02d}"
+    return f"{k_up}_{s_up}_{grp_str}_{idx_str}"
+
+
+def infer_kind_and_side_from_name(name: str) -> tuple[str | None, str | None]:
+    """Infers `(kind, side)` from canonical names, procedural generator prefixes, or common rig aliases."""
+    parsed = parse_canonical_bone_name(name)
+    if parsed is not None:
+        return parsed["kind"], parsed["side"]
+
+    low = name.strip().lower()
+    side: str | None = None
+    if re.search(r"(^|[._\-])(l|left)([._\-]|$)", low):
+        side = "L"
+    elif re.search(r"(^|[._\-])(r|right)([._\-]|$)", low):
+        side = "R"
+
+    if low in ("root", "hips", "pelvis", "cog", "master") or low.startswith("root_"):
+        return "root", side or "C"
+    if "rigid" in low or "shell" in low or "carapace" in low or "armor" in low:
+        return "rigid", side
+    if low.startswith("flex_") or any(
+        tok in low for tok in ("flex", "tentacle", "tendril", "vine", "ribbon", "hair", "cape", "whisker", "feeler")
+    ):
+        return "flex", side
+    if any(tok in low for tok in ("digit", "finger", "thumb", "index", "middle", "ring", "pinky", "toe", "phalange")):
+        return "digit", side
+    if "jaw" in low or "mandible" in low or "beak" in low:
+        return "jaw", side or "C"
+    if "head" in low or "neck" in low or "skull" in low or "cranium" in low:
+        return "head", side or "C"
+    if "spine" in low or "chest" in low or "torso" in low or "abdomen" in low or "thorax" in low:
+        return "spine", side or "C"
+    if "tail" in low:
+        return "tail", side or "C"
+    if "wing" in low or "patagium" in low or "feather" in low:
+        return "wing", side
+    if any(
+        tok in low
+        for tok in (
+            "limb",
+            "clavicle",
+            "shoulder",
+            "upper_arm",
+            "upperarm",
+            "forearm",
+            "lower_arm",
+            "lowerarm",
+            "hand",
+            "wrist",
+            "palm",
+            "thigh",
+            "upper_leg",
+            "upperleg",
+            "shin",
+            "calf",
+            "lower_leg",
+            "lowerleg",
+            "foot",
+            "ankle",
+            "paw",
+            "claw",
+        )
+    ):
+        return "limb", side
+
+    return None, side
+
+
+def default_limits_and_corr_for_kind(
+    kind: str, sub_role: str = "", is_leaf: bool = False
+) -> tuple[list[list[float]], float, bool]:
+    """Returns default `(limits_rad, chain_corr, fixed_local)` for a classified bone kind & sub_role."""
+    deg = math.radians
+    if kind == "root":
+        return [[-deg(12), deg(12)], [-deg(18), deg(18)], [-deg(15), deg(15)]], 0.0, False
+    if kind == "rigid":
+        return [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]], 0.0, True
+    if kind == "spine":
+        return [[-deg(15), deg(15)], [-deg(3), deg(3)], [-deg(15), deg(15)]], 0.65, False
+    if kind == "head":
+        return [[-deg(22), deg(22)], [-deg(20), deg(20)], [-deg(20), deg(20)]], 0.55, False
+    if kind == "jaw":
+        return [[0.0, deg(35)], [-deg(2), deg(2)], [-deg(3), deg(3)]], 0.0, False
+    if kind == "tail":
+        return [[-deg(18), deg(18)], [-deg(3), deg(3)], [-deg(14), deg(14)]], 0.75, False
+    if kind == "flex":
+        return [[-deg(25), deg(25)], [-deg(10), deg(10)], [-deg(18), deg(18)]], 0.65, False
+    if kind == "wing":
+        return [[-deg(40), deg(45)], [-deg(8), deg(8)], [-deg(35), deg(35)]], 0.55, False
+    if kind == "digit":
+        ry = 0.0 if is_leaf else deg(2)
+        return [[-deg(15), deg(35)], [-ry, ry], [-deg(12), deg(12)]], 0.70, False
+    # Default "limb" sub-roles
+    if sub_role == "clavicle_socket":
+        return [[-deg(20), deg(20)], [-deg(8), deg(8)], [-deg(20), deg(20)]], 0.0, False
+    if sub_role in ("upper_limb", "ball_socket"):
+        return [[-deg(55), deg(65)], [-deg(25), deg(25)], [-deg(40), deg(40)]], 0.0, False
+    if sub_role == "forearm_hinge":
+        return [[-deg(45), deg(95)], [-deg(35), deg(35)], [-deg(45), deg(45)]], 0.0, False
+    if sub_role == "hand_hub":
+        return [[-deg(35), deg(35)], [-deg(3), deg(3)], [-deg(25), deg(25)]], 0.0, False
+    return [[-deg(25), deg(30)], [-deg(2), deg(2)], [-deg(10), deg(10)]], 0.50, False
+
+
+def classify_rig_bones(
+    bones_meta: dict[str, dict[str, Any]],
+    bbox_min: list[float] | None = None,
+    bbox_max: list[float] | None = None,
+    constraints_meta: dict[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Hybrid (Name + Constraints + 3D Topology/Geometry) classifier.
+    Assigns `kind`, `sub_role`, `side`, `group_id`, `chain_index`, `canonical_name`, `legacy_name`,
+    `fixed_local`, `is_primary`, `limits_rad`, and `chain_corr` for every bone in `bones_meta`.
+    """
+    meta = copy.deepcopy(bones_meta)
+    c_bones = (constraints_meta or {}).get("bones", constraints_meta or {})
+    for b_name, info in meta.items():
+        if b_name in c_bones and isinstance(c_bones[b_name], dict):
+            info.update(copy.deepcopy(c_bones[b_name]))
+
+    bone_names = sorted(meta.keys())
+    if not bone_names:
+        return meta
+
+    # Reconstruct parent -> children and depths
+    children_map: dict[str, list[str]] = {b: [] for b in bone_names}
+    for b in bone_names:
+        p = meta[b].get("parent")
+        if p and p in children_map:
+            children_map[p].append(b)
+    for b in bone_names:
+        children_map[b].sort()
+        meta[b]["children"] = list(children_map[b])
+
+    def _compute_depth(b: str) -> int:
+        d = 0
+        curr = meta[b].get("parent")
+        visited: set[str] = {b}
+        while curr and curr in meta and curr not in visited:
+            visited.add(curr)
+            d += 1
+            curr = meta[curr].get("parent")
+        return d
+
+    for b in bone_names:
+        meta[b]["depth"] = int(meta[b].get("depth", _compute_depth(b)))
+
+    # Subtree helper
+    def _subtree_descendants(b: str) -> list[str]:
+        out: list[str] = []
+        stack = list(children_map[b])
+        while stack:
+            cur = stack.pop(0)
+            out.append(cur)
+            stack.extend(children_map[cur])
+        return out
+
+    # Bounding box from rest endpoints if not supplied
+    all_pts = []
+    for b in bone_names:
+        if "rest_head_world" in meta[b]:
+            all_pts.append(meta[b]["rest_head_world"])
+        if "rest_tail_world" in meta[b]:
+            all_pts.append(meta[b]["rest_tail_world"])
+    if bbox_min is not None and bbox_max is not None:
+        bmin = [float(x) for x in bbox_min]
+        bmax = [float(x) for x in bbox_max]
+    elif all_pts:
+        xs = [p[0] for p in all_pts]
+        ys = [p[1] for p in all_pts]
+        zs = [p[2] for p in all_pts]
+        bmin = [min(xs), min(ys), min(zs)]
+        bmax = [max(xs), max(ys), max(zs)]
+    else:
+        bmin = [-0.5, -0.5, 0.0]
+        bmax = [0.5, 0.5, 1.0]
+
+    width = max(1e-4, bmax[0] - bmin[0])
+    height = max(1e-4, bmax[2] - bmin[2])
+
+    roots = [b for b in bone_names if not meta[b].get("parent") or meta[b].get("parent") not in meta]
+    roots.sort(key=lambda b: meta[b]["depth"])
+    primary_root = roots[0] if roots else bone_names[0]
+    root_x = float(meta[primary_root].get("rest_head_world", [0.0, 0.0, 0.0])[0])
+    midline_tol_x = 0.085 * width
+
+    assigned_kind: dict[str, str] = {}
+    assigned_sub_role: dict[str, str] = {}
+    assigned_side: dict[str, str] = {}
+
+    def _geom_side(b: str) -> str:
+        h = meta[b].get("rest_head_world", [root_x, 0.0, 0.0])
+        t = meta[b].get("rest_tail_world", h)
+        mx = 0.5 * (float(h[0]) + float(t[0])) - root_x
+        if abs(mx) < midline_tol_x and abs(float(h[0]) - root_x) < midline_tol_x and abs(float(t[0]) - root_x) < midline_tol_x:
+            return "C"
+        return "L" if mx >= 0.0 else "R"
+
+    # Step 1: Root & Explicitly Fixed / Rigid Bones
+    for b in bone_names:
+        info = meta[b]
+        n_kind, n_side = infer_kind_and_side_from_name(b)
+        if b == primary_root or info.get("parent") is None or n_kind == "root":
+            assigned_kind[b] = "root"
+            assigned_sub_role[b] = "root"
+            assigned_side[b] = "C"
+            continue
+
+        lims = info.get("limits_rad")
+        zero_lims = False
+        if isinstance(lims, list) and len(lims) == 3:
+            try:
+                max_span = max( abs(float(pair[1]) - float(pair[0])) for pair in lims )
+                zero_lims = max_span <= 1e-4
+            except (TypeError, ValueError, IndexError):
+                zero_lims = False
+
+        if bool(info.get("fixed_local", False)) or n_kind == "rigid" or zero_lims:
+            assigned_kind[b] = "rigid"
+            assigned_sub_role[b] = "rigid_support"
+            assigned_side[b] = n_side or _geom_side(b)
+
+    # Step 2: Detect Multi-Branch Hand/Foot Hubs (>= 3 digit-chain children) and Downstream DIGIT Clusters
+    def _is_digit_chain_subtree(root_child: str) -> bool:
+        c_kind_name, _ = infer_kind_and_side_from_name(root_child)
+        if c_kind_name in ("flex", "rigid", "wing", "spine", "head", "tail"):
+            return False
+        chain_nodes = [root_child] + _subtree_descendants(root_child)
+        if len(chain_nodes) > 4:
+            return False
+        for node in chain_nodes:
+            if len(children_map[node]) > 1:
+                return False
+            if float(meta[node].get("rest_length", 0.0)) >= 0.065 * height:
+                return False
+        return True
+
+    hand_hubs: list[str] = []
+    for b in bone_names:
+        if b in assigned_kind:
+            continue
+        ch = children_map[b]
+        if len(ch) >= 3:
+            short_ch = [c for c in ch if _is_digit_chain_subtree(c)]
+            if len(short_ch) >= 3:
+                hand_hubs.append(b)
+                side_h = infer_kind_and_side_from_name(b)[1] or _geom_side(b)
+                assigned_kind[b] = "limb"
+                assigned_sub_role[b] = "hand_hub"
+                assigned_side[b] = side_h
+                for sc in short_ch:
+                    assigned_kind[sc] = "digit"
+                    assigned_sub_role[sc] = "digit_proximal" if children_map[sc] else "digit_distal"
+                    assigned_side[sc] = side_h
+                    for desc in _subtree_descendants(sc):
+                        assigned_kind[desc] = "digit"
+                        assigned_sub_role[desc] = "digit_distal" if not children_map[desc] else "digit_medial"
+                        assigned_side[desc] = side_h
+
+    # Step 3: Trace Upstream Limb Chains from each Hand/Foot Hub up to the branching torso/pelvis hub
+    for hub in hand_hubs:
+        side_h = assigned_side[hub]
+        curr_p = meta[hub].get("parent")
+        step_up = 0
+        while curr_p and curr_p in meta and curr_p not in assigned_kind:
+            if len(children_map[curr_p]) >= 2:
+                break
+            step_up += 1
+            assigned_kind[curr_p] = "limb"
+            if step_up == 1:
+                assigned_sub_role[curr_p] = "forearm_hinge"
+            elif step_up == 2:
+                assigned_sub_role[curr_p] = "upper_limb"
+            else:
+                assigned_sub_role[curr_p] = "clavicle_socket"
+            assigned_side[curr_p] = side_h
+            curr_p = meta[curr_p].get("parent")
+
+    # Step 4: Apply Explicit Name / Prefix Classifications (e.g. Flex_*, Wing_*, Digit_*, etc.)
+    topo_sorted = sorted(bone_names, key=lambda x: meta[x]["depth"])
+    for b in topo_sorted:
+        if b in assigned_kind:
+            continue
+        n_kind, n_side = infer_kind_and_side_from_name(b)
+        if n_kind is not None:
+            assigned_kind[b] = n_kind
+            assigned_side[b] = n_side or _geom_side(b)
+            if n_kind == "flex":
+                assigned_sub_role[b] = "flex_chain"
+                for desc in _subtree_descendants(b):
+                    if desc not in assigned_kind:
+                        assigned_kind[desc] = "flex"
+                        assigned_sub_role[desc] = "flex_chain"
+                        assigned_side[desc] = assigned_side[b]
+            elif n_kind == "digit":
+                p = meta[b].get("parent")
+                if p and assigned_kind.get(p) != "digit":
+                    assigned_sub_role[b] = "digit_proximal"
+                elif not children_map[b]:
+                    assigned_sub_role[b] = "digit_distal"
+                else:
+                    assigned_sub_role[b] = "digit_medial"
+            elif n_kind == "head":
+                assigned_sub_role[b] = "head_leaf" if not children_map[b] else "neck_chain"
+            elif n_kind == "spine":
+                assigned_sub_role[b] = "spine_hub" if len(children_map[b]) >= 2 else "spine_chain"
+            elif n_kind == "jaw":
+                assigned_sub_role[b] = "jaw_hinge"
+            elif n_kind == "tail":
+                assigned_sub_role[b] = "tail_chain"
+            elif n_kind == "wing":
+                assigned_sub_role[b] = "wing_chain"
+            elif n_kind == "limb":
+                if not children_map[b]:
+                    assigned_sub_role[b] = "distal_limb"
+                elif len(children_map[b]) == 1 and not children_map[children_map[b][0]]:
+                    assigned_sub_role[b] = "forearm_hinge"
+                else:
+                    assigned_sub_role[b] = "upper_limb"
+
+    # Step 5: Classify Remaining Midline & Lateral Bones via 3D Geometry + Topology
+    # Find highest spine branching hub depth (if any) to separate spine from neck/head
+    branch_midline_depths = [
+        meta[b]["depth"]
+        for b in bone_names
+        if len(children_map[b]) >= 2
+        and abs(float(meta[b].get("rest_head_world", [root_x, 0.0, 0.0])[0]) - root_x) < midline_tol_x
+    ]
+    chest_hub_depth = max(branch_midline_depths) if branch_midline_depths else 3
+
+    for b in topo_sorted:
+        if b in assigned_kind:
+            continue
+        info = meta[b]
+        h = info.get("rest_head_world", [root_x, 0.0, 0.0])
+        t = info.get("rest_tail_world", h)
+        dx, dy, dz = float(t[0]) - float(h[0]), float(t[1]) - float(h[1]), float(t[2]) - float(h[2])
+        is_midline = abs(float(h[0]) - root_x) < midline_tol_x and abs(float(t[0]) - root_x) < midline_tol_x
+
+        if is_midline:
+            assigned_side[b] = "C"
+            if float(h[1]) > 0.10 * height and dy > 0.02 * height and len(children_map[b]) <= 1:
+                assigned_kind[b] = "tail"
+                assigned_sub_role[b] = "tail_chain"
+            elif info["depth"] > chest_hub_depth and dz >= -0.02 * height:
+                if dy < -0.02 * height and dz < 0.0:
+                    assigned_kind[b] = "jaw"
+                    assigned_sub_role[b] = "jaw_hinge"
+                else:
+                    assigned_kind[b] = "head"
+                    assigned_sub_role[b] = "head_leaf" if not children_map[b] else "neck_chain"
+            else:
+                assigned_kind[b] = "spine"
+                assigned_sub_role[b] = "spine_hub" if len(children_map[b]) >= 2 else "spine_chain"
+        else:
+            side_b = _geom_side(b)
+            assigned_side[b] = side_b
+            p = info.get("parent")
+            if p and assigned_kind.get(p) == "rigid" and p == "Core_Rigid":
+                assigned_kind[b] = "flex"
+                assigned_sub_role[b] = "flex_chain"
+            else:
+                assigned_kind[b] = "limb"
+                if p and assigned_kind.get(p) in ("root", "spine", "rigid"):
+                    assigned_sub_role[b] = "ball_socket"
+                elif not children_map[b]:
+                    assigned_sub_role[b] = "distal_limb"
+                elif len(children_map[b]) == 1 and not children_map[children_map[b][0]]:
+                    assigned_sub_role[b] = "forearm_hinge"
+                else:
+                    assigned_sub_role[b] = "upper_limb"
+
+    # Step 6: Assign Canonical `<KIND>_<SIDE>_<GROUP>_<INDEX>` Names Deterministically
+    # Group chains by (kind, side) and chain root
+    group_counters: dict[tuple[str, str], int] = {}
+    bone_group_id: dict[str, int] = {}
+    bone_chain_idx: dict[str, int] = {}
+
+    # Pre-number hand_hub limb groups so digit groups can use `<limb_group><finger_idx>`
+    limb_hub_group: dict[str, int] = {}
+    for b in topo_sorted:
+        k = assigned_kind[b]
+        s = assigned_side[b]
+        p = meta[b].get("parent")
+        if k == "root":
+            bone_group_id[b] = 0
+            bone_chain_idx[b] = 0
+            continue
+        if k == "digit":
+            continue
+        if p and assigned_kind.get(p) == k and assigned_side.get(p) == s and len(children_map[p]) == 1:
+            bone_group_id[b] = bone_group_id[p]
+            bone_chain_idx[b] = bone_chain_idx[p] + 1
+        elif k in ("spine", "head", "tail") and s == "C":
+            bone_group_id[b] = 0
+            if p and assigned_kind.get(p) == k:
+                bone_chain_idx[b] = bone_chain_idx[p] + 1
+            else:
+                bone_chain_idx[b] = group_counters.get((k, s), 0) + 1
+                group_counters[(k, s)] = bone_chain_idx[b]
+        else:
+            grp = group_counters.get((k, s), 0) + 1
+            group_counters[(k, s)] = grp
+            bone_group_id[b] = grp
+            bone_chain_idx[b] = 1
+        if assigned_sub_role.get(b) == "hand_hub":
+            limb_hub_group[b] = bone_group_id[b]
+
+    # Number digit chains per parent hand_hub sorted by X/Y rest coordinates
+    for b in topo_sorted:
+        if assigned_kind[b] != "digit":
+            continue
+        p = meta[b].get("parent")
+        s = assigned_side[b]
+        if p and assigned_kind.get(p) == "digit":
+            bone_group_id[b] = bone_group_id[p]
+            bone_chain_idx[b] = bone_chain_idx[p] + 1
+        else:
+            hub_grp = limb_hub_group.get(p or "", 1)
+            siblings = [c for c in children_map.get(p or "", []) if assigned_kind.get(c) == "digit"]
+            siblings.sort(key=lambda c: tuple(meta[c].get("rest_head_world", [0.0, 0.0, 0.0])))
+            finger_idx = (siblings.index(b) + 1) if b in siblings else (group_counters.get(("digit", s), 0) + 1)
+            group_counters[("digit", s)] = max(group_counters.get(("digit", s), 0), finger_idx)
+            bone_group_id[b] = min(99, hub_grp * 10 + finger_idx)
+            bone_chain_idx[b] = 1
+
+    # Populate enriched metadata on every bone
+    for b in bone_names:
+        info = meta[b]
+        k = assigned_kind[b]
+        sub = assigned_sub_role[b]
+        s = assigned_side[b]
+        grp = bone_group_id.get(b, 0)
+        c_idx = bone_chain_idx.get(b, 1)
+        is_leaf = len(children_map[b]) == 0
+        has_custom_limits = bool(info.get("limits_rad"))
+        def_lims, def_corr, def_fixed = default_limits_and_corr_for_kind(k, sub, is_leaf=is_leaf)
+
+        info["kind"] = k
+        info["sub_role"] = sub
+        info["side"] = s
+        info["group_id"] = f"{grp:02d}"
+        info["chain_index"] = c_idx
+        info["legacy_name"] = info.get("legacy_name", b)
+        info["canonical_name"] = (
+            b if parse_canonical_bone_name(b) is not None else format_canonical_bone_name(k, s, grp, c_idx)
+        )
+        info["fixed_local"] = bool(info.get("fixed_local", def_fixed))
+        info["is_primary"] = k != "digit"
+        if not has_custom_limits:
+            info["limits_rad"] = [[round(lo, 4), round(hi, 4)] for (lo, hi) in def_lims]
+        if "chain_corr" not in info or info["chain_corr"] is None:
+            info["chain_corr"] = 0.0 if has_custom_limits else def_corr
+
+    return meta
+
+
+def canonicalize_rig_bone_names_in_blender(
+    arm_obj: Any,
+    mesh_objs: list[Any],
+    classified_bones: dict[str, dict[str, Any]],
+) -> dict[str, str]:
+    """Renames bones in a Blender Armature (`arm_obj`), corresponding `mesh_obj.vertex_groups`,
+    and animation fCurve data paths to their canonical `<KIND>_<SIDE>_<GROUP>_<INDEX>` names.
+    Returns `{old_name: canonical_name}` mapping.
+    """
+    rename_map: dict[str, str] = {}
+    used_names: set[str] = set()
+    for old_name, info in sorted(classified_bones.items()):
+        cand = str(info.get("canonical_name", old_name))
+        if cand in used_names:
+            idx = int(info.get("chain_index", 1))
+            while cand in used_names:
+                idx += 1
+                cand = format_canonical_bone_name(info["kind"], info["side"], info["group_id"], idx)
+        used_names.add(cand)
+        rename_map[old_name] = cand
+
+    # Two-pass rename via temporary prefix to avoid collisions
+    for old_name, new_name in rename_map.items():
+        if old_name == new_name:
+            continue
+        tmp_name = f"__tmp_canon_{old_name}"
+        b = arm_obj.data.bones.get(old_name)
+        if b is not None:
+            b.name = tmp_name
+        for m in mesh_objs:
+            if hasattr(m, "vertex_groups") and old_name in m.vertex_groups:
+                m.vertex_groups[old_name].name = tmp_name
+
+    for old_name, new_name in rename_map.items():
+        if old_name == new_name:
+            continue
+        tmp_name = f"__tmp_canon_{old_name}"
+        b = arm_obj.data.bones.get(tmp_name)
+        if b is not None:
+            b.name = new_name
+        for m in mesh_objs:
+            if hasattr(m, "vertex_groups") and tmp_name in m.vertex_groups:
+                m.vertex_groups[tmp_name].name = new_name
+
+    # Update animation fCurves if present
+    anim = getattr(arm_obj, "animation_data", None)
+    if anim and getattr(anim, "action", None):
+        for fc in anim.action.fcurves:
+            dp = getattr(fc, "data_path", "")
+            for old_name, new_name in rename_map.items():
+                if old_name != new_name and f'pose.bones["{old_name}"]' in dp:
+                    fc.data_path = dp.replace(f'pose.bones["{old_name}"]', f'pose.bones["{new_name}"]')
+                    break
+
+    return rename_map
+
+
+# ==============================================================================
+# Layer 2: Universal Kinematic Core (Short-Gap Cleaning, IRLS Kabsch, Bounded FK)
+# ==============================================================================
+
+def short_gap_fill_1d_or_nd(values: np.ndarray, bad_mask: np.ndarray, max_gap: int = 3) -> np.ndarray:
+    """Linearly interpolates ONLY short contiguous outlier gaps (`<= max_gap` frames) bounded
+    by valid observations on BOTH sides. Never replaces long low-confidence intervals with stale frames.
+    """
+    result = values.copy()
+    T = len(bad_mask)
+    t = 0
+    while t < T:
+        if not bad_mask[t]:
+            t += 1
+            continue
+        end = t
+        while end < T and bad_mask[end]:
+            end += 1
+        if t > 0 and end < T and (end - t) <= max_gap:
+            for j in range(t, end):
+                u = float(j - t + 1) / float(end - t + 1)
+                result[j] = (1.0 - u) * values[t - 1] + u * values[end]
+        t = end
+    return result
+
+
+def clean_uv_short_gaps_hampel(uv: np.ndarray, scale: float = 1.0, max_gap: int = 3) -> np.ndarray:
+    """Applies a 5-frame rolling median Hampel spike detector and interpolates only bounded gaps `<= max_gap`."""
+    out = uv.copy()
+    T, K, _ = uv.shape
+    if T < 5:
+        return out
+    for k in range(K):
+        seq = uv[:, k].astype(np.float64)
+        pad = np.pad(seq, ((2, 2), (0, 0)), mode="edge")
+        med = np.median(np.stack([pad[j : j + T] for j in range(5)], axis=0), axis=0)
+        dev = np.linalg.norm(seq - med, axis=1)
+        threshold = max(22.0 * scale, 3.5 * (float(np.median(dev)) + scale))
+        out[:, k] = short_gap_fill_1d_or_nd(seq, dev > threshold, max_gap=max_gap)
+    return out
+
+
+def savgol_smooth_array(x: np.ndarray) -> np.ndarray:
+    """Zero-phase 5-tap quadratic Savitzky-Golay filter `[-3, 12, 17, 12, -3] / 35` along axis 0."""
+    if len(x) < 5:
+        return x.copy()
+    pad_spec = [(2, 2)] + [(0, 0)] * (x.ndim - 1)
+    p = np.pad(x.astype(np.float64), pad_spec, mode="edge")
+    return (-3.0 * p[:-4] + 12.0 * p[1:-3] + 17.0 * p[2:-2] + 12.0 * p[3:-1] - 3.0 * p[4:]) / 35.0
+
+
+def euler_xyz_to_matrix_numpy(rx: float, ry: float, rz: float) -> np.ndarray:
+    """Computes Blender's extrinsic `'XYZ'` PoseBone local rotation matrix `Rz(rz) @ Ry(ry) @ Rx(rx)`."""
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+    return np.array(
+        [
+            [cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx],
+            [sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx],
+            [-sy, cy * sx, cy * cx],
+        ],
+        dtype=np.float64,
+    )
+
+
+def matrix_to_euler_xyz_numpy(R: np.ndarray) -> np.ndarray:
+    """Extracts extrinsic `'XYZ'` Euler angles `(rx, ry, rz)` in radians from a 3x3 rotation matrix."""
+    ry = math.asin(float(np.clip(-R[2, 0], -1.0, 1.0)))
+    return np.array(
+        [
+            math.atan2(float(R[2, 1]), float(R[2, 2])),
+            ry,
+            math.atan2(float(R[1, 0]), float(R[0, 0])),
+        ],
+        dtype=np.float64,
+    )
+
+
+def minimum_swing_matrix_numpy(curr_dir: np.ndarray, target_dir: np.ndarray) -> np.ndarray:
+    """Computes the minimum-angle rotation matrix in SO(3) mapping `curr_dir -> target_dir`."""
+    u = curr_dir / max(1e-8, float(np.linalg.norm(curr_dir)))
+    v = target_dir / max(1e-8, float(np.linalg.norm(target_dir)))
+    cross = np.cross(u, v)
+    sin_a = float(np.linalg.norm(cross))
+    cos_a = float(np.clip(np.dot(u, v), -1.0, 1.0))
+    if sin_a < 1e-6:
+        if cos_a >= 0.0:
+            return np.eye(3, dtype=np.float64)
+        # 180-degree flip around an orthogonal axis (stay in SO(3) with det = +1)
+        ortho = np.array([1.0, 0.0, 0.0], dtype=np.float64) if abs(float(u[0])) < 0.9 else np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        ax = np.cross(u, ortho)
+        ax /= max(1e-8, float(np.linalg.norm(ax)))
+        return 2.0 * np.outer(ax, ax) - np.eye(3, dtype=np.float64)
+    axis = cross / sin_a
+    K = np.array(
+        [[0.0, -axis[2], axis[1]], [axis[2], 0.0, -axis[0]], [-axis[1], axis[0], 0.0]],
+        dtype=np.float64,
+    )
+    return np.eye(3, dtype=np.float64) + sin_a * K + (1.0 - cos_a) * (K @ K)
+
+
+def build_bounded_local_euler_rotation(
+    d_loc: np.ndarray,
+    ry: float,
+    rx_lims: tuple[float, float] | list[float],
+    rz_lims: tuple[float, float] | list[float],
+) -> np.ndarray:
+    """Two-branch inverse-sine local Euler rotation `Rz(rz) @ Ry(ry) @ Rx(rx)` strictly obeying
+    `(rx_lims, rz_lims)` WITHOUT any post-clamp `minimum_swing` override.
+    """
+    d_unit = d_loc / max(1e-12, float(np.linalg.norm(d_loc)))
+    cy, sy = math.cos(ry), math.sin(ry)
+    sx = float(np.clip(d_unit[2] / max(1e-6, cy), -1.0, 1.0))
+    rx1 = math.asin(sx)
+    rx2 = (math.pi - rx1) if rx1 >= 0.0 else (-math.pi - rx1)
+    best_R = None
+    best_align = -2.0
+    for rx_cand in (rx1, rx2):
+        rx_c = float(np.clip(rx_cand, float(rx_lims[0]), float(rx_lims[1])))
+        a = sy * math.sin(rx_c)
+        b = math.cos(rx_c)
+        rz_raw = math.atan2(
+            a * float(d_unit[1]) - b * float(d_unit[0]),
+            a * float(d_unit[0]) + b * float(d_unit[1]),
+        )
+        rz_c = float(np.clip(rz_raw, float(rz_lims[0]), float(rz_lims[1])))
+        R_cand = euler_xyz_to_matrix_numpy(rx_c, ry, rz_c)
+        align = float(np.dot(R_cand[:, 1], d_unit))
+        if align > best_align:
+            best_align = align
+            best_R = R_cand
+    assert best_R is not None
+    return best_R
+
+
+def build_swing_twist_local_rotation(d_loc: np.ndarray, ry: float) -> np.ndarray:
+    """Gimbal-free Swing-Twist local rotation matrix:
+    `R_loc(ry) = minimum_swing([0, 1, 0]^T, d_loc) @ Ry(ry)`.
+    Maps `[0, 1, 0]^T` to `d_loc` on the entire sphere S^2 without middle-axis `Ry` gimbal lock.
+    """
+    d_unit = d_loc / max(1e-12, float(np.linalg.norm(d_loc)))
+    R_swing = minimum_swing_matrix_numpy(np.array([0.0, 1.0, 0.0], dtype=np.float64), d_unit)
+    cy, sy = math.cos(ry), math.sin(ry)
+    R_twist = np.array(
+        [[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]],
+        dtype=np.float64,
+    )
+    return R_swing @ R_twist
+
+
+def clamp_swing_twist_delta(
+    R_delta: np.ndarray, limits_rad: list[list[float]], margin_rad: float = math.radians(15.0)
+) -> np.ndarray:
+    """Clamps a local rotation matrix `R_delta` in Gimbal-Free Swing-Twist space:
+    caps the swing cone angle `arccos(d_loc[1])` to the anatomical `(rx, rz)` envelope and
+    clamps axial Y-twist `tau` to `limits_rad[1]` without gimbal-locked Euler coupling distortion.
+    """
+    d_loc = R_delta[:, 1].copy()
+    d_loc /= max(1e-12, float(np.linalg.norm(d_loc)))
+    max_rx = max(abs(float(limits_rad[0][0])), abs(float(limits_rad[0][1])))
+    max_rz = max(abs(float(limits_rad[2][0])), abs(float(limits_rad[2][1])))
+    max_swing = min(math.pi * 0.95, math.hypot(max_rx, max_rz) + float(margin_rad))
+    cos_sw = float(np.clip(d_loc[1], -1.0, 1.0))
+    ang_sw = math.acos(cos_sw)
+    if ang_sw > max_swing and ang_sw > 1e-6:
+        u = max_swing / ang_sw
+        y_ax = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        d_loc = (
+            math.sin((1.0 - u) * ang_sw) / math.sin(ang_sw) * y_ax
+            + math.sin(u * ang_sw) / math.sin(ang_sw) * d_loc
+        )
+        d_loc /= max(1e-12, float(np.linalg.norm(d_loc)))
+    R_swing = minimum_swing_matrix_numpy(np.array([0.0, 1.0, 0.0], dtype=np.float64), d_loc)
+    R_twist = R_swing.T @ R_delta
+    tau = math.atan2(float(R_twist[0, 2]), float(R_twist[0, 0]))
+    tau_c = float(np.clip(tau, float(limits_rad[1][0]), float(limits_rad[1][1])))
+    return build_swing_twist_local_rotation(d_loc, tau_c)
+
+
+def clamp_local_delta_euler(R_delta: np.ndarray, limits_rad: list[list[float]]) -> np.ndarray:
+    """Clamps a local rotation matrix `R_delta` to `limits_rad` across both Euler branches."""
+    r = matrix_to_euler_xyz_numpy(R_delta)
+    alt = np.array([r[0] + math.pi, math.pi - r[1], r[2] + math.pi], dtype=np.float64)
+    alt = (alt + math.pi) % (2.0 * math.pi) - math.pi
+    lims_arr = np.array(limits_rad, dtype=np.float64)
+    best_R = None
+    best_dist = 1e18
+    for cand in (r, alt):
+        v = np.clip(cand, lims_arr[:, 0], lims_arr[:, 1])
+        Q = euler_xyz_to_matrix_numpy(float(v[0]), float(v[1]), float(v[2]))
+        dist = float(np.linalg.norm(Q - R_delta))
+        if dist < best_dist:
+            best_dist = dist
+            best_R = Q
+    assert best_R is not None
+    return best_R
+
+
+def mat_to_quat_wxyz_numpy(R: np.ndarray) -> np.ndarray:
+    """Converts a 3x3 rotation matrix to a unit quaternion `[w, x, y, z]`."""
+    tr = float(np.trace(R))
+    if tr > 0.0:
+        s = math.sqrt(tr + 1.0) * 2.0
+        w = 0.25 * s
+        x = (R[2, 1] - R[1, 2]) / s
+        y = (R[0, 2] - R[2, 0]) / s
+        z = (R[1, 0] - R[0, 1]) / s
+    elif (R[0, 0] > R[1, 1]) and (R[0, 0] > R[2, 2]):
+        s = math.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2]) * 2.0
+        w = (R[2, 1] - R[1, 2]) / s
+        x = 0.25 * s
+        y = (R[0, 1] + R[1, 0]) / s
+        z = (R[0, 2] + R[2, 0]) / s
+    elif R[1, 1] > R[2, 2]:
+        s = math.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2]) * 2.0
+        w = (R[0, 2] - R[2, 0]) / s
+        x = (R[0, 1] + R[1, 0]) / s
+        y = 0.25 * s
+        z = (R[1, 2] + R[2, 1]) / s
+    else:
+        s = math.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1]) * 2.0
+        w = (R[1, 0] - R[0, 1]) / s
+        x = (R[0, 2] + R[2, 0]) / s
+        y = (R[1, 2] + R[2, 1]) / s
+        z = 0.25 * s
+    q = np.array([w, x, y, z], dtype=np.float64)
+    return q / max(1e-12, float(np.linalg.norm(q)))
+
+
+def quat_wxyz_to_mat_numpy(q: np.ndarray) -> np.ndarray:
+    """Converts a unit quaternion `[w, x, y, z]` to a 3x3 rotation matrix."""
+    w, x, y, z = q / max(1e-12, float(np.linalg.norm(q)))
+    return np.array(
+        [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+
+
+def blend_rotation_matrices_slerp(
+    A: np.ndarray, B: np.ndarray, alpha: float, max_step_deg: float = 18.0
+) -> np.ndarray:
+    """Blends rotation matrix `A` toward `B` with step-size clamping (`max_step_deg`)."""
+    qa = mat_to_quat_wxyz_numpy(A)
+    qb = mat_to_quat_wxyz_numpy(B)
+    dot = float(np.dot(qa, qb))
+    if dot < 0.0:
+        qb = -qb
+        dot = -dot
+    angle = 2.0 * math.acos(min(1.0, dot))
+    step_alpha = min(float(alpha), math.radians(max_step_deg) / max(angle, 1e-12))
+    q = (1.0 - step_alpha) * qa + step_alpha * qb
+    q /= max(1e-12, float(np.linalg.norm(q)))
+    return quat_wxyz_to_mat_numpy(q)
+
+
+def select_root_kabsch_anchors(
+    bones_meta: dict[str, dict[str, Any]],
+    root_name: str,
+    children_map: dict[str, list[str]],
+) -> list[tuple[str, int]]:
+    """Selects non-collinear body anchor keypoints `[(bone_name, endpoint_0_or_1), ...]`
+    whose 3D positions are rigidly determined by the root bone's 6-DoF pose:
+      - `(root, 0)` (head) and `(root, 1)` (tail)
+      - `(child, 0)` for all direct children of `root` (their heads have fixed rest offsets in root space)
+      - `(child, 1)` for any direct central rigid core child (`Core_Rigid` or `RIGID_C_*`) with `fixed_local=True`.
+    """
+    anchors: list[tuple[str, int]] = [(root_name, 0), (root_name, 1)]
+    for c in children_map.get(root_name, []):
+        anchors.append((c, 0))
+    for c in children_map.get(root_name, []):
+        c_info = bones_meta.get(c, {})
+        if c_info.get("fixed_local") and (
+            c == "Core_Rigid"
+            or c_info.get("legacy_name") == "Core_Rigid"
+            or (c_info.get("kind") == "rigid" and c_info.get("side") == "C")
+        ):
+            anchors.append((c, 1))
+    return anchors
+
+
+def fit_root_rigid_irls_kabsch(
+    rest_pts: np.ndarray,
+    obs_pts: np.ndarray,
+    weights: np.ndarray,
+    depth_scale: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """4-iteration IRLS Huber-like weighted Kabsch SVD solver returning `(R_world, t_world)`."""
+    w = np.maximum(np.asarray(weights, dtype=np.float64), 1e-4)
+    w /= w.sum()
+    R = np.eye(3, dtype=np.float64)
+    t = np.zeros(3, dtype=np.float64)
+    for _ in range(4):
+        x = (rest_pts * w[:, None]).sum(axis=0)
+        y = (obs_pts * w[:, None]).sum(axis=0)
+        cov = (rest_pts - x).T @ (w[:, None] * (obs_pts - y))
+        U, _, Vt = np.linalg.svd(cov)
+        det_sign = 1.0 if float(np.linalg.det(Vt.T @ U.T)) >= 0.0 else -1.0
+        R = Vt.T @ np.diag([1.0, 1.0, det_sign]) @ U.T
+        t = y - R @ x
+        residual = np.linalg.norm(rest_pts @ R.T + t - obs_pts, axis=1)
+        w = np.maximum(w * np.minimum(1.0, 0.018 * float(depth_scale) / np.maximum(residual, 1e-9)), 1e-6)
+        w /= w.sum()
+    return R, t
+
+
+# ==============================================================================
+# Layer 3: Kind-Specific Kinematic Solvers
+# ==============================================================================
+
+def _child_twist_cost(
+    b_name: str,
+    R_cand: np.ndarray,
+    v_parent: np.ndarray,
+    h_b: np.ndarray,
+    valid_children: list[str],
+    frame_bones: dict[str, Any],
+    bones_meta: dict[str, dict[str, Any]],
+    rest_R: dict[str, np.ndarray],
+) -> float:
+    """Evaluates multi-child disconnected lever-arm + child hinge/shaft limit cost for candidate `R_cand`."""
+    info = bones_meta.get(b_name, {})
+    rest_h_b = np.array(info.get("rest_head_world", h_b), dtype=np.float64)
+    rest_t_b = np.array(info.get("rest_tail_world", h_b), dtype=np.float64)
+    deg = math.radians
+    default_lims = [[-deg(35), deg(45)], [-deg(5), deg(5)], [-deg(18), deg(18)]]
+    cost = 0.0
+
+    for c in valid_children:
+        c_info = bones_meta.get(c, {})
+        c_data = frame_bones[c]
+        h_c = np.array(c_data["head_3d"], dtype=np.float64)
+        t_c = np.array(c_data["tail_3d"], dtype=np.float64)
+
+        if "rest_head_world" in c_info and "rest_head_world" in info and "rest_tail_world" in info:
+            rest_h_c = np.array(c_info["rest_head_world"], dtype=np.float64)
+            gap_rest = float(np.linalg.norm(rest_h_c - rest_t_b))
+            if gap_rest > 0.008:
+                r_rest = rest_h_c - rest_h_b
+                r_curr = (R_cand @ rest_R[b_name].T) @ r_rest
+                r_targ = h_c - h_b
+                p_c = r_curr - np.dot(r_curr, v_parent) * v_parent
+                p_t = r_targ - np.dot(r_targ, v_parent) * v_parent
+                nc, nt = float(np.linalg.norm(p_c)), float(np.linalg.norm(p_t))
+                if nc > 0.015 and (0.45 * nc <= nt <= 1.85 * nc):
+                    ang_diff = math.atan2(
+                        float(np.dot(v_parent, np.cross(p_c / nc, p_t / nt))),
+                        float(np.clip(np.dot(p_c / nc, p_t / nt), -1.0, 1.0)),
+                    )
+                    w_lever = min(12.0, (nc / 0.06) ** 2)
+                    cost += w_lever * (ang_diff ** 2)
+
+        vec_c = t_c - h_c
+        norm_c = float(np.linalg.norm(vec_c))
+        if norm_c < 1e-6:
+            continue
+        v_c = vec_c / norm_c
+        sin_perp = float(np.linalg.norm(v_c - np.dot(v_c, v_parent) * v_parent))
+        if sin_perp > 0.16:
+            c_lims = c_info.get("limits_rad", default_lims)
+            R_c_init = R_cand @ (rest_R[b_name].T @ rest_R[c])
+            d_c_loc = R_c_init.T @ v_c
+            sx_c = float(np.clip(d_c_loc[2], -1.0, 1.0))
+            rx1 = math.asin(sx_c)
+            rx2 = (math.pi - rx1) if rx1 >= 0.0 else (-math.pi - rx1)
+            c_best_pen = 1e18
+            c_rz_span = float(c_lims[2][1]) - float(c_lims[2][0])
+            for rxc in (rx1, rx2):
+                pen_x = max(0.0, float(c_lims[0][0]) - rxc) + max(0.0, rxc - float(c_lims[0][1]))
+                cxc = math.cos(rxc)
+                rzc = math.atan2(-cxc * float(d_c_loc[0]), cxc * float(d_c_loc[1]))
+                pen_z = max(0.0, float(c_lims[2][0]) - rzc) + max(0.0, rzc - float(c_lims[2][1]))
+                hinge_pull = 0.25 * (rzc ** 2) if c_rz_span <= math.radians(15.0) else 0.0
+                pen = (pen_x ** 2) + 8.0 * (pen_z ** 2) + hinge_pull
+                if pen < c_best_pen:
+                    c_best_pen = pen
+            cost += (sin_perp ** 2) * c_best_pen * 6.0
+
+    return cost
+
+
+def _map_child_pivot_to_parent_local_y(
+    b_name: str,
+    c_name: str,
+    R_init: np.ndarray,
+    h_b_curr: np.ndarray,
+    h_c_obs: np.ndarray,
+    bones_meta: dict[str, dict[str, Any]],
+    rest_R: dict[str, np.ndarray],
+) -> np.ndarray | None:
+    """Maps an observed child head pivot vector `h_c_obs - h_b_curr` into bone `b_name`'s local
+    Y-axis direction `[0, 1, 0]^T` by compensating for the exact rest-pose angular offset between
+    `h_c_rest - h_b_rest` and `t_b_rest - h_b_rest`.
+    """
+    info_b = bones_meta.get(b_name, {})
+    info_c = bones_meta.get(c_name, {})
+    if "rest_head_world" not in info_b or "rest_head_world" not in info_c:
+        return None
+    v_rest = np.array(info_c["rest_head_world"], dtype=np.float64) - np.array(info_b["rest_head_world"], dtype=np.float64)
+    n_rest = float(np.linalg.norm(v_rest))
+    if n_rest < 1e-4:
+        return None
+    u_rest_loc = rest_R[b_name].T @ (v_rest / n_rest)
+    S_c2t_loc = minimum_swing_matrix_numpy(u_rest_loc, np.array([0.0, 1.0, 0.0], dtype=np.float64))
+
+    v_obs = h_c_obs - h_b_curr
+    n_obs = float(np.linalg.norm(v_obs))
+    if n_obs < 1e-4:
+        return None
+    u_obs_loc = R_init.T @ (v_obs / n_obs)
+    d_mapped = S_c2t_loc @ u_obs_loc
+    n_map = float(np.linalg.norm(d_mapped))
+    return (d_mapped / n_map) if n_map > 1e-8 else None
+
+
+def solve_bone_rotation_by_kind(
+    b_name: str,
+    R_init: np.ndarray,
+    frame_bones: dict[str, Any],
+    bones_meta: dict[str, dict[str, Any]],
+    rest_R: dict[str, np.ndarray],
+    children_map: dict[str, list[str]],
+    curr_ry_map: dict[str, float],
+    prev_ry_map: dict[str, float],
+    raw_obs_bones: dict[str, dict[str, Any]] | None = None,
+) -> tuple[np.ndarray, float]:
+    """Layer 3 Dispatcher: Solves bone `b_name`'s 3x3 world rotation matrix `R_final` and axial
+    twist `ry_best` according to its classified anatomical `kind` and `sub_role`.
+    """
+    info = bones_meta.get(b_name, {})
+    kind = str(info.get("kind", "limb"))
+    sub_role = str(info.get("sub_role", ""))
+
+    # 1. Rigid / Fixed-Local Solver
+    if kind == "rigid" or bool(info.get("fixed_local", False)):
+        return R_init.copy(), 0.0
+
+    b_data = frame_bones[b_name]
+    h_b = np.array(b_data["head_3d"], dtype=np.float64)
+    t_b = np.array(b_data["tail_3d"], dtype=np.float64)
+    vec = t_b - h_b
+    norm_v = float(np.linalg.norm(vec))
+    if norm_v < 1e-7:
+        return R_init.copy(), 0.0
+    v = vec / norm_v
+    d_loc = R_init.T @ v
+
+    deg = math.radians
+    default_lims = [[-deg(35), deg(45)], [-deg(5), deg(5)], [-deg(18), deg(18)]]
+    lims = info.get("limits_rad", default_lims)
+    rx_lims = (float(lims[0][0]), float(lims[0][1]))
+    ry_lo, ry_hi = float(lims[1][0]), float(lims[1][1])
+    rz_lims = (float(lims[2][0]), float(lims[2][1]))
+
+    p_name = info.get("parent")
+    corr = float(info.get("chain_corr", 0.0))
+    ry_prior = (
+        float(np.clip(corr * curr_ry_map.get(p_name, 0.0), ry_lo, ry_hi))
+        if (corr > 0.0 and p_name in curr_ry_map)
+        else 0.0
+    )
+    if b_name in prev_ry_map:
+        ry_prior = 0.55 * prev_ry_map[b_name] + 0.45 * ry_prior
+
+    obs_lookup = raw_obs_bones if raw_obs_bones is not None else frame_bones
+    valid_children = [c for c in children_map.get(b_name, []) if c in obs_lookup and c in rest_R]
+
+    # 2. Digit / Phalange Coupled Curl Solver (Gimbal-Free Swing-Twist, tau = 0, coupled curl damping)
+    if kind == "digit":
+        R_sw = minimum_swing_matrix_numpy(np.array([0.0, 1.0, 0.0], dtype=np.float64), d_loc)
+        delta_raw = clamp_local_delta_euler(R_sw, lims)
+        delta_damped = clamp_local_delta_euler(
+            blend_rotation_matrices_slerp(np.eye(3, dtype=np.float64), delta_raw, 0.20, 2.5),
+            lims,
+        )
+        return R_init @ delta_damped, 0.0
+
+    # 3. Limb Solver: Gimbal-Free Swing-Twist + Child-Tail Palm Fan (`hand_hub`) + Child-Head Elbow-Wrist Pivot (`forearm_hinge`)
+    if kind == "limb":
+        h_b_obs = np.array(obs_lookup.get(b_name, b_data)["head_3d"], dtype=np.float64)
+        t_b_obs = np.array(obs_lookup.get(b_name, b_data)["tail_3d"], dtype=np.float64)
+        obs_dir = t_b_obs - h_b_obs
+        rest_h_b = np.array(info.get("rest_head_world", h_b_obs), dtype=np.float64)
+
+        if sub_role == "hand_hub" or len(valid_children) >= 3:
+            # Fuse hand tail direction with child proximal finger tails (2x longer lever arm than palm alone)
+            conf_b = float(obs_lookup.get(b_name, b_data).get("tail_conf", obs_lookup.get(b_name, b_data).get("confidence", 0.5)))
+            v_sum = (obs_dir / max(1e-8, float(np.linalg.norm(obs_dir)))) * conf_b
+            for fc in valid_children:
+                fc_info = bones_meta.get(fc, {})
+                if "rest_tail_world" not in fc_info:
+                    continue
+                rest_t_fc = np.array(fc_info["rest_tail_world"], dtype=np.float64)
+                v_fc_rest = rest_t_fc - rest_h_b
+                n_fc_rest = float(np.linalg.norm(v_fc_rest))
+                if n_fc_rest < 1e-5:
+                    continue
+                u_fc_loc = rest_R[b_name].T @ (v_fc_rest / n_fc_rest)
+                S_loc = minimum_swing_matrix_numpy(u_fc_loc, np.array([0.0, 1.0, 0.0], dtype=np.float64))
+                t_fc_obs = np.array(obs_lookup[fc]["tail_3d"], dtype=np.float64)
+                v_fc_obs = t_fc_obs - h_b_obs
+                n_fc_obs = float(np.linalg.norm(v_fc_obs))
+                if n_fc_obs < 1e-5:
+                    continue
+                d_fc_loc = S_loc @ (R_init.T @ (v_fc_obs / n_fc_obs))
+                conf_fc = float(obs_lookup[fc].get("tail_conf", obs_lookup[fc].get("confidence", 0.5)))
+                v_sum += (R_init @ d_fc_loc) * conf_fc * 0.5
+            n_sum = float(np.linalg.norm(v_sum))
+            if n_sum > 1e-8:
+                d_loc = R_init.T @ (v_sum / n_sum)
+            R_sw = minimum_swing_matrix_numpy(np.array([0.0, 1.0, 0.0], dtype=np.float64), d_loc)
+            return R_init @ R_sw, 0.0
+
+        if sub_role == "forearm_hinge" and len(valid_children) == 1:
+            ha = valid_children[0]
+            ha_info = bones_meta.get(ha, {})
+            if "rest_head_world" in ha_info:
+                rest_h_ha = np.array(ha_info["rest_head_world"], dtype=np.float64)
+                v_c_rest = rest_h_ha - rest_h_b
+                n_c_rest = float(np.linalg.norm(v_c_rest))
+                if n_c_rest > 1e-5:
+                    u_c_rest_loc = rest_R[b_name].T @ (v_c_rest / n_c_rest)
+                    S_c_to_t_loc = minimum_swing_matrix_numpy(u_c_rest_loc, np.array([0.0, 1.0, 0.0], dtype=np.float64))
+                    u_t_obs = obs_dir / max(1e-8, float(np.linalg.norm(obs_dir)))
+                    v_c_obs = np.array(obs_lookup[ha]["head_3d"], dtype=np.float64) - h_b_obs
+                    u_c_obs = v_c_obs / max(1e-8, float(np.linalg.norm(v_c_obs)))
+                    d_t_loc = R_init.T @ u_t_obs
+                    d_c_mapped_loc = S_c_to_t_loc @ (R_init.T @ u_c_obs)
+                    d_blend = 0.45 * d_t_loc + 0.55 * d_c_mapped_loc
+                    d_loc = d_blend / max(1e-8, float(np.linalg.norm(d_blend)))
+                    R_sw = minimum_swing_matrix_numpy(np.array([0.0, 1.0, 0.0], dtype=np.float64), d_loc)
+                    u_c_obs_loc = R_init.T @ u_c_obs
+                    target_in_rest = R_sw.T @ u_c_obs_loc
+                    px0, pz0 = float(u_c_rest_loc[0]), float(u_c_rest_loc[2])
+                    px1, pz1 = float(target_in_rest[0]), float(target_in_rest[2])
+                    n0 = math.hypot(px0, pz0)
+                    n1 = math.hypot(px1, pz1)
+                    tau = 0.0
+                    if n0 > 0.15 and n1 > 0.10:
+                        tau_raw = math.atan2(px1 * pz0 - pz1 * px0, px1 * px0 + pz1 * pz0)
+                        w_tau = min(0.65, ((n1 / n0) ** 2) * 0.55)
+                        tau = float(np.clip(w_tau * tau_raw, -math.radians(45.0), math.radians(45.0)))
+                    return R_init @ build_swing_twist_local_rotation(d_loc, tau), tau
+
+        if sub_role != "upper_limb":
+            R_sw = minimum_swing_matrix_numpy(np.array([0.0, 1.0, 0.0], dtype=np.float64), d_loc)
+            return R_init @ R_sw, 0.0
+
+    # 4. Spine / Head / Jaw / Flex / Tail / Wing Solver (Bounded Local-Euler + Child Observability)
+    if not valid_children or (ry_hi - ry_lo) < 1e-4:
+        ry_best = 0.0 if not valid_children else ry_prior
+        R_loc = build_bounded_local_euler_rotation(d_loc, ry_best, rx_lims, rz_lims)
+        return R_init @ R_loc, ry_best
+
+    grid_ry = np.linspace(ry_lo, ry_hi, 11)
+    best_ry = ry_prior
+    best_cost = 1e18
+    for ry_cand in grid_ry:
+        ry_f = float(ry_cand)
+        R_cand = R_init @ build_bounded_local_euler_rotation(d_loc, ry_f, rx_lims, rz_lims)
+        cost = 1.25 * ((ry_f - ry_prior) ** 2) + _child_twist_cost(
+            b_name, R_cand, v, h_b, valid_children, frame_bones, bones_meta, rest_R
+        )
+        if cost < best_cost:
+            best_cost = cost
+            best_ry = ry_f
+
+    R_loc_best = build_bounded_local_euler_rotation(d_loc, best_ry, rx_lims, rz_lims)
+    return R_init @ R_loc_best, best_ry
+
+
+def reconstruct_frames_with_kind_solvers(
+    pts_3d: np.ndarray,
+    trust: np.ndarray,
+    bone_names: list[str],
+    classified_bones: dict[str, dict[str, Any]],
+    depth_scale: float = 1.0,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Executes Layer 2 (Universal Kinematic Core: multi-anchor IRLS Kabsch root fit + exact
+    rest-offset FK + strict local Euler limit clamping) and Layer 3 (Kind-Specific Solvers)
+    across `T` frames of 3D keypoint observations `pts_3d` (`(T, 2*N, 3)`) and `trust` (`(T, 2*N)`).
+    """
+    names = list(bone_names)
+    index = {n: i for i, n in enumerate(names)}
+    T = int(pts_3d.shape[0])
+    order = sorted(names, key=lambda n: int(classified_bones[n].get("depth", 0)))
+    root = order[0]
+
+    rest_R: dict[str, np.ndarray] = {}
+    rest_H: dict[str, np.ndarray] = {}
+    rest_T: dict[str, np.ndarray] = {}
+    children_map: dict[str, list[str]] = {n: [] for n in names}
+
+    for n in names:
+        info = classified_bones[n]
+        p = info.get("parent")
+        if p and p in children_map:
+            children_map[p].append(n)
+        rest_H[n] = np.array(info.get("rest_head_world", [0.0, 0.0, 0.0]), dtype=np.float64)
+        rest_T[n] = np.array(info.get("rest_tail_world", [0.0, 0.0, 0.04]), dtype=np.float64)
+        if "rest_rot_mat_world" in info:
+            rest_R[n] = np.array(info["rest_rot_mat_world"], dtype=np.float64)
+        else:
+            v0 = rest_T[n] - rest_H[n]
+            d0 = v0 / max(1e-8, float(np.linalg.norm(v0)))
+            up = np.array([0.0, 0.0, 1.0]) if abs(float(d0[2])) < 0.9 else np.array([1.0, 0.0, 0.0])
+            x_ax = np.cross(d0, up)
+            x_ax /= max(1e-8, float(np.linalg.norm(x_ax)))
+            z_ax = np.cross(x_ax, d0)
+            rest_R[n] = np.column_stack([x_ax, d0, z_ax])
+
+    anchors = select_root_kabsch_anchors(classified_bones, root, children_map)
+    ref_pts = np.array([rest_H[n] if e == 0 else rest_T[n] for n, e in anchors], dtype=np.float64)
+    anchor_ids = [2 * index[n] + e for n, e in anchors]
+
+    frames_out: list[dict[str, Any]] = []
+    previous_delta: dict[str, np.ndarray] = {}
+    prev_ry: dict[str, float] = {}
+    previous_root_h: np.ndarray | None = None
+    max_violation = 0.0
+
+    # Kind-specific temporal slerp parameters (alpha, max_step_deg)
+    slerp_params_by_kind = {
+        "root": (0.65, 8.0),
+        "rigid": (0.0, 0.0),
+        "spine": (0.78, 18.0),
+        "head": (0.78, 18.0),
+        "jaw": (0.78, 18.0),
+        "limb": (0.72, 16.0),
+        "flex": (0.78, 18.0),
+        "tail": (0.78, 18.0),
+        "wing": (0.78, 18.0),
+        "digit": (0.50, 2.5),
+    }
+
+    for f in range(T):
+        observed = pts_3d[f].astype(np.float64)
+        fit_R, _ = fit_root_rigid_irls_kabsch(
+            ref_pts,
+            observed[anchor_ids],
+            trust[f, anchor_ids] ** 2,
+            depth_scale=depth_scale,
+        )
+        root_lims = classified_bones[root]["limits_rad"]
+        root_delta = clamp_local_delta_euler(rest_R[root].T @ fit_R @ rest_R[root], root_lims)
+        if root in previous_delta:
+            root_delta = clamp_local_delta_euler(
+                blend_rotation_matrices_slerp(previous_delta[root], root_delta, 0.65, 8.0),
+                root_lims,
+            )
+        root_world = rest_R[root] @ root_delta
+        body_R = root_world @ rest_R[root].T
+
+        anchor_weights = trust[f, anchor_ids] ** 2
+        anchor_weights /= max(1e-12, float(anchor_weights.sum()))
+        root_h = ((observed[anchor_ids] - (ref_pts - rest_H[root]) @ body_R.T) * anchor_weights[:, None]).sum(axis=0)
+        if previous_root_h is not None:
+            root_h = 0.7 * root_h + 0.3 * previous_root_h
+        previous_root_h = root_h.copy()
+
+        posed_R: dict[str, np.ndarray] = {}
+        heads: dict[str, np.ndarray] = {}
+        bmap: dict[str, Any] = {}
+        curr_ry: dict[str, float] = {}
+
+        raw_obs_bones = {
+            n: {
+                "head_3d": observed[2 * i].tolist(),
+                "tail_3d": observed[2 * i + 1].tolist(),
+                "confidence": float(trust[f, 2 * i : 2 * i + 2].mean()),
+                "tail_conf": float(trust[f, 2 * i + 1]),
+            }
+            for i, n in enumerate(names)
+        }
+        fk_targets = copy.deepcopy(raw_obs_bones)
+
+        for n in order:
+            info = classified_bones[n]
+            p = info.get("parent")
+            kind = str(info.get("kind", "limb"))
+            sub_role = str(info.get("sub_role", ""))
+            lims = info["limits_rad"]
+
+            if p and p in posed_R:
+                init_R = posed_R[p] @ (rest_R[p].T @ rest_R[n])
+                head = heads[p] + posed_R[p] @ (rest_R[p].T @ (rest_H[n] - rest_H[p]))
+            else:
+                init_R = rest_R[n]
+                head = root_h
+
+            if n == root:
+                delta = root_delta
+                R_world = root_world
+                ry = 0.0
+            elif kind == "rigid" or bool(info.get("fixed_local", False)):
+                delta = np.eye(3, dtype=np.float64)
+                R_world = init_R
+                ry = 0.0
+            else:
+                obs_dir = observed[2 * index[n] + 1] - observed[2 * index[n]]
+                fk_targets[n] = {
+                    "head_3d": head.tolist(),
+                    "tail_3d": (head + obs_dir).tolist(),
+                    "confidence": raw_obs_bones[n]["confidence"],
+                    "tail_conf": raw_obs_bones[n]["tail_conf"],
+                }
+                R_solved, ry = solve_bone_rotation_by_kind(
+                    b_name=n,
+                    R_init=init_R,
+                    frame_bones=fk_targets,
+                    bones_meta=classified_bones,
+                    rest_R=rest_R,
+                    children_map=children_map,
+                    curr_ry_map=curr_ry,
+                    prev_ry_map=prev_ry,
+                    raw_obs_bones=raw_obs_bones,
+                )
+                delta = clamp_local_delta_euler(init_R.T @ R_solved, lims)
+                if n in previous_delta:
+                    alpha, max_step = slerp_params_by_kind.get(kind, (0.78, 18.0))
+                    delta = clamp_local_delta_euler(
+                        blend_rotation_matrices_slerp(previous_delta[n], delta, alpha, max_step),
+                        lims,
+                    )
+                R_world = init_R @ delta
+
+            previous_delta[n] = delta.copy()
+            curr_ry[n] = ry
+            posed_R[n] = R_world
+            heads[n] = head
+            rest_len = float(info.get("rest_length", np.linalg.norm(rest_T[n] - rest_H[n])))
+            tail = head + R_world[:, 1] * rest_len
+
+            vals = matrix_to_euler_xyz_numpy(delta)
+            chk_lims = np.array(lims, dtype=np.float64)
+            violation = float(np.maximum(chk_lims[:, 0] - vals, vals - chk_lims[:, 1]).max())
+            max_violation = max(max_violation, max(0.0, violation))
+
+            bmap[n] = {
+                "head_3d": [round(float(x), 5) for x in head],
+                "tail_3d": [round(float(x), 5) for x in tail],
+                "rot_mat_world": [[round(float(x), 5) for x in row] for row in R_world],
+                "confidence": round(float(trust[f, 2 * index[n] : 2 * index[n] + 2].mean()), 4),
+                "kind": kind,
+                "canonical_name": info.get("canonical_name", n),
+            }
+        prev_ry = curr_ry
+        frames_out.append({"frame": f, "bones": bmap})
+
+    kind_counts: dict[str, int] = {}
+    for n in names:
+        k = str(classified_bones[n].get("kind", "limb"))
+        kind_counts[k] = kind_counts.get(k, 0) + 1
+
+    diag = {
+        "schema": BONE_TAXONOMY_SCHEMA,
+        "frames": T,
+        "cross_frame_confidence_replacement": False,
+        "short_gap_max_frames": 3,
+        "root_anchors": anchors,
+        "final_limit_max_violation_rad": round(float(max_violation), 6),
+        "fixed_local_bones": [n for n in names if classified_bones[n].get("fixed_local")],
+        "kind_counts": kind_counts,
+    }
+    return frames_out, diag
+
+
+def compute_stratified_motion_metrics(
+    frames_pred: list[dict[str, Any]],
+    frames_gt: list[dict[str, Any]],
+    bones_meta: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Computes both All-Bone metrics and Primary-Bone (excluding tiny `digit` phalanges) metrics,
+    plus a per-`kind` anatomical breakdown (`root`, `rigid`, `spine`, `head`, `limb`, `flex`, `digit`, etc.).
+    """
+    classified = classify_rig_bones(bones_meta)
+    bone_names = sorted(classified.keys())
+    per_bone: dict[str, dict[str, list[float]]] = {
+        b: {"direction": [], "rotation": [], "position": []} for b in bone_names
+    }
+
+    for f_pr, f_gt in zip(frames_pred, frames_gt):
+        b_pr_map = f_pr.get("bones", f_pr.get("joints", {}))
+        b_gt_map = f_gt.get("bones", f_gt.get("joints", {}))
+        for b in bone_names:
+            if b not in b_pr_map or b not in b_gt_map:
+                continue
+            pr = b_pr_map[b]
+            gt = b_gt_map[b]
+            h_p = np.array(pr["head_3d"], dtype=np.float64)
+            t_p = np.array(pr["tail_3d"], dtype=np.float64)
+            h_g = np.array(gt["head_3d"], dtype=np.float64)
+            t_g = np.array(gt["tail_3d"], dtype=np.float64)
+
+            v_p = t_p - h_p
+            v_g = t_g - h_g
+            np_len = float(np.linalg.norm(v_p))
+            ng_len = float(np.linalg.norm(v_g))
+            if np_len > 1e-6 and ng_len > 1e-6:
+                cos_d = float(np.clip(np.dot(v_p / np_len, v_g / ng_len), -1.0, 1.0))
+                per_bone[b]["direction"].append(math.degrees(math.acos(cos_d)))
+
+            if "rot_mat_world" in pr and "rot_mat_world" in gt:
+                R_p = np.array(pr["rot_mat_world"], dtype=np.float64)
+                R_g = np.array(gt["rot_mat_world"], dtype=np.float64)
+                tr = float(np.clip((np.trace(R_g.T @ R_p) - 1.0) * 0.5, -1.0, 1.0))
+                per_bone[b]["rotation"].append(math.degrees(math.acos(tr)))
+
+            pos_err = 0.5 * (float(np.linalg.norm(h_p - h_g)) + float(np.linalg.norm(t_p - t_g)))
+            per_bone[b]["position"].append(pos_err)
+
+    summary_per_bone = {
+        b: {
+            k: round(float(np.mean(vals)), 4) if vals else 0.0
+            for k, vals in metrics.items()
+        }
+        for b, metrics in per_bone.items()
+    }
+
+    def _agg_subset(subset_bones: list[str]) -> dict[str, Any]:
+        if not subset_bones:
+            return {
+                "count": 0,
+                "direction_mean_deg": 0.0,
+                "direction_max_bone_deg": 0.0,
+                "full_rot_mean_deg": 0.0,
+                "nonleaf_rot_mean_deg": 0.0,
+                "endpoint_position_mean": 0.0,
+            }
+        dirs = [summary_per_bone[b]["direction"] for b in subset_bones]
+        rots = [summary_per_bone[b]["rotation"] for b in subset_bones]
+        nonleaf_rots = [
+            summary_per_bone[b]["rotation"]
+            for b in subset_bones
+            if classified[b].get("children")
+        ]
+        pos = [summary_per_bone[b]["position"] for b in subset_bones]
+        return {
+            "count": len(subset_bones),
+            "direction_mean_deg": round(float(np.mean(dirs)), 3),
+            "direction_max_bone_deg": round(float(np.max(dirs)), 3),
+            "full_rot_mean_deg": round(float(np.mean(rots)), 3),
+            "nonleaf_rot_mean_deg": round(float(np.mean(nonleaf_rots)), 3) if nonleaf_rots else round(float(np.mean(rots)), 3),
+            "endpoint_position_mean": round(float(np.mean(pos)), 5),
+        }
+
+    primary_bones = [b for b in bone_names if classified[b].get("is_primary", True)]
+    by_kind: dict[str, Any] = {}
+    for k in CANONICAL_KINDS:
+        k_bones = [b for b in bone_names if classified[b].get("kind") == k]
+        if k_bones:
+            by_kind[k] = _agg_subset(k_bones)
+
+    return {
+        "schema": BONE_TAXONOMY_SCHEMA,
+        "all_bones": _agg_subset(bone_names),
+        "primary_bones": _agg_subset(primary_bones),
+        "by_kind": by_kind,
+        "per_bone": summary_per_bone,
+    }
+
+
+# ==============================================================================
+# Layer 4: Stratified 4-Regime Decoupled Pose Sampler & Coverage / Rank Audit Gate
+# ==============================================================================
+
+def select_pose_sampling_regime(sample_idx: int | None, rng: Any) -> str:
+    """Selects one of the 4 stratified pose sampling regimes (`40%` synergistic, `30%` decoupled,
+    `15%` antiphase_extreme, `15%` workspace_cross_occlusion).
+    """
+    if sample_idx is not None:
+        slot = int(sample_idx) % 20
+    else:
+        slot = int(rng.random() * 20.0)
+    if slot < 8:
+        return "synergistic"
+    if slot < 14:
+        return "decoupled"
+    if slot < 17:
+        return "antiphase_extreme"
+    return "workspace_cross_occlusion"
+
+
+def effective_sampling_limits_for_bone(
+    info: dict[str, Any], enforce_anatomical_floor: bool = True
+) -> list[list[float]]:
+    """Returns effective `[[rx_lo, rx_hi], [ry_lo, ry_hi], [rz_lo, rz_hi]]` radians for Stage 2 pose
+    synthesis. When `enforce_anatomical_floor=True`, expands overly narrow empirical limits (e.g.,
+    a digit or limb joint that barely moved in template clips) to at least 65% of the canonical
+    anatomical envelope for its `(kind, sub_role)` so synthetic training data never has frozen-joint
+    blind spots.
+    """
+    kind = str(info.get("kind", "limb"))
+    if kind == "rigid" or bool(info.get("fixed_local", False)):
+        return [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]
+
+    sub_role = str(info.get("sub_role", ""))
+    is_leaf = not bool(info.get("children"))
+    def_lims, _, _ = default_limits_and_corr_for_kind(kind, sub_role, is_leaf=is_leaf)
+    raw_lims = info.get("limits_rad")
+    if not isinstance(raw_lims, list) or len(raw_lims) != 3:
+        return [[float(pair[0]), float(pair[1])] for pair in def_lims]
+
+    out: list[list[float]] = []
+    for ax in range(3):
+        lo = float(raw_lims[ax][0])
+        hi = float(raw_lims[ax][1])
+        if enforce_anatomical_floor and kind in ("digit", "limb", "flex", "tail", "wing", "head", "jaw"):
+            def_lo, def_hi = float(def_lims[ax][0]), float(def_lims[ax][1])
+            def_span = def_hi - def_lo
+            if (hi - lo) < 0.50 * def_span:
+                lo = min(lo, 0.65 * def_lo)
+                hi = max(hi, 0.65 * def_hi)
+        if is_leaf and ax == 1:
+            lo, hi = 0.0, 0.0
+        out.append([lo, hi])
+    return out
+
+
+def _sample_bimodal_boundary(rng: Any, lo: float, hi: float) -> float:
+    """Samples with 70% weight in the outer 28% boundary quartiles `[lo, lo+0.28*span]` and
+    `[hi-0.28*span, hi]` and 30% uniform across `[lo, hi]` to cover extreme joint angles.
+    """
+    span = hi - lo
+    if span <= 1e-8:
+        return lo
+    r = rng.random()
+    q = 0.28 * span
+    if r < 0.35:
+        return float(rng.uniform(lo, lo + q))
+    if r < 0.70:
+        return float(rng.uniform(hi - q, hi))
+    return float(rng.uniform(lo, hi))
+
+
+def sample_stratified_pose_euler_dict(
+    bones_meta: dict[str, dict[str, Any]],
+    rng: Any,
+    sample_idx: int | None = None,
+    enforce_anatomical_floor: bool = True,
+) -> tuple[dict[str, list[float]], str]:
+    """Samples a full-skeleton pose Euler dictionary `{bone_name: [rx, ry, rz]}` using the 4-Regime
+    Stratified Decoupled Sampler:
+      1. `synergistic` (40%): Per-finger independent curl factors (never a single hand-wide fixed
+         scalar across all 5 fingers!) + natural intra-chain synergy.
+      2. `decoupled` (30%): Zero parent-child correlation (`corr = 0.0`); every phalange and chain
+         segment is sampled independently across its full anatomical range to eliminate shortcut learning.
+      3. `antiphase_extreme` (15%): Negative parent-child correlation (`corr < 0`) + bimodal boundary
+         quartiles, covering S-curve waves, claw/hook fingers, and near-limit joint angles.
+      4. `workspace_cross_occlusion` (15%): Biases upper limbs toward cross-midline / chest-gathering
+         self-occlusion postures (`gather` / `prayer` / `offer`) and full forearm twist while mixing
+         open, splayed, and curled individual fingers.
+    """
+    if not bones_meta:
+        return {}, "synergistic"
+
+    first_info = next(iter(bones_meta.values()))
+    classified = (
+        bones_meta
+        if ("kind" in first_info and "sub_role" in first_info and "group_id" in first_info)
+        else classify_rig_bones(bones_meta)
+    )
+    regime = select_pose_sampling_regime(sample_idx, rng)
+    topo_names = sorted(classified.keys(), key=lambda b: (int(classified[b].get("depth", 0)), b))
+
+    # Per-finger (`(side, group_id)`) independent state so fingers on the same hand never lock to 1 scalar
+    finger_group_targets: dict[tuple[str, str], tuple[float, float]] = {}
+    for b_name in topo_names:
+        info = classified[b_name]
+        if info.get("kind") == "digit":
+            key = (str(info.get("side", "C")), str(info.get("group_id", "00")))
+            if key not in finger_group_targets:
+                if regime == "workspace_cross_occlusion":
+                    mode_r = rng.random()
+                    curl_u = rng.uniform(0.0, 0.25) if mode_r < 0.35 else (rng.uniform(0.75, 1.0) if mode_r < 0.70 else rng.uniform(0.25, 0.75))
+                else:
+                    curl_u = rng.uniform(0.0, 1.0)
+                splay_u = rng.uniform(0.0, 1.0)
+                finger_group_targets[key] = (float(curl_u), float(splay_u))
+
+    sampled_eulers: dict[str, list[float]] = {}
+    for b_name in topo_names:
+        info = classified[b_name]
+        kind = str(info.get("kind", "limb"))
+        sub_role = str(info.get("sub_role", ""))
+        side = str(info.get("side", "C"))
+        grp = str(info.get("group_id", "00"))
+        is_leaf = not bool(info.get("children"))
+
+        if kind == "rigid" or bool(info.get("fixed_local", False)):
+            sampled_eulers[b_name] = [0.0, 0.0, 0.0]
+            continue
+
+        lims = effective_sampling_limits_for_bone(info, enforce_anatomical_floor=enforce_anatomical_floor)
+        base_corr = float(info.get("chain_corr", 0.0))
+        if base_corr <= 0.0 and kind in ("digit", "flex", "tail", "spine", "wing", "head"):
+            _, base_corr, _ = default_limits_and_corr_for_kind(kind, sub_role, is_leaf=is_leaf)
+        parent_name = info.get("parent")
+        has_parent_euler = bool(parent_name and parent_name in sampled_eulers)
+
+        if regime == "decoupled":
+            raw = [float(rng.uniform(lo, hi)) for (lo, hi) in lims]
+
+        elif regime == "antiphase_extreme":
+            raw = [_sample_bimodal_boundary(rng, lo, hi) for (lo, hi) in lims]
+            anti_corr = -0.58 * max(0.45, base_corr)
+            if has_parent_euler and kind in ("digit", "flex", "tail", "spine", "wing", "head"):
+                p_rot = sampled_eulers[parent_name]  # type: ignore[index]
+                for ax in (0, 2):
+                    lo, hi = lims[ax]
+                    mid = 0.5 * (lo + hi)
+                    p_centered = p_rot[ax] - mid
+                    cand = mid + anti_corr * p_centered + (1.0 - abs(anti_corr)) * (raw[ax] - mid)
+                    raw[ax] = float(np.clip(cand, lo, hi))
+
+        elif regime == "workspace_cross_occlusion":
+            if kind == "limb":
+                raw = [_sample_bimodal_boundary(rng, lo, hi) for (lo, hi) in lims]
+                # Explicitly sample full forearm / upper-limb axial roll `ry` for palm flip coverage
+                raw[1] = _sample_bimodal_boundary(rng, lims[1][0], lims[1][1])
+            elif kind == "digit":
+                curl_u, splay_u = finger_group_targets.get((side, grp), (0.5, 0.5))
+                rx_base = lims[0][0] + curl_u * (lims[0][1] - lims[0][0])
+                rz_base = lims[2][0] + splay_u * (lims[2][1] - lims[2][0])
+                rx_jit = rng.uniform(-0.22, 0.22) * (lims[0][1] - lims[0][0])
+                rz_jit = rng.uniform(-0.25, 0.25) * (lims[2][1] - lims[2][0])
+                raw = [
+                    float(np.clip(rx_base + rx_jit, lims[0][0], lims[0][1])),
+                    float(rng.uniform(lims[1][0], lims[1][1])),
+                    float(np.clip(rz_base + rz_jit, lims[2][0], lims[2][1])),
+                ]
+            else:
+                raw = [float(rng.uniform(lo, hi)) for (lo, hi) in lims]
+                if base_corr > 0.0 and has_parent_euler:
+                    p_rot = sampled_eulers[parent_name]  # type: ignore[index]
+                    c_eff = 0.45 * base_corr
+                    raw[0] = float(np.clip(c_eff * p_rot[0] + (1.0 - c_eff) * raw[0], lims[0][0], lims[0][1]))
+                    raw[2] = float(np.clip(c_eff * p_rot[2] + (1.0 - c_eff) * raw[2], lims[2][0], lims[2][1]))
+
+        else:
+            # "synergistic" regime: per-finger independent target + intra-chain synergy
+            raw = [float(rng.uniform(lo, hi)) for (lo, hi) in lims]
+            if kind == "digit":
+                curl_u, splay_u = finger_group_targets.get((side, grp), (0.5, 0.5))
+                rx_finger = lims[0][0] + curl_u * (lims[0][1] - lims[0][0])
+                rz_finger = lims[2][0] + splay_u * (lims[2][1] - lims[2][0])
+                raw[0] = float(np.clip(0.55 * rx_finger + 0.45 * raw[0], lims[0][0], lims[0][1]))
+                raw[2] = float(np.clip(0.45 * rz_finger + 0.55 * raw[2], lims[2][0], lims[2][1]))
+                if has_parent_euler and classified.get(parent_name, {}).get("kind") == "digit":  # type: ignore[arg-type]
+                    p_rot = sampled_eulers[parent_name]  # type: ignore[index]
+                    raw[0] = float(np.clip(0.45 * p_rot[0] + 0.55 * raw[0], lims[0][0], lims[0][1]))
+                    raw[2] = float(np.clip(0.35 * p_rot[2] + 0.65 * raw[2], lims[2][0], lims[2][1]))
+            elif base_corr > 0.0 and has_parent_euler:
+                p_rot = sampled_eulers[parent_name]  # type: ignore[index]
+                c_eff = min(0.60, base_corr)
+                raw[0] = float(np.clip(c_eff * p_rot[0] + (1.0 - c_eff) * raw[0], lims[0][0], lims[0][1]))
+                raw[1] = float(np.clip((1.0 - 0.5 * c_eff) * raw[1], lims[1][0], lims[1][1]))
+                raw[2] = float(np.clip(c_eff * p_rot[2] + (1.0 - c_eff) * raw[2], lims[2][0], lims[2][1]))
+
+        if is_leaf:
+            raw[1] = 0.0
+
+        sampled_eulers[b_name] = raw
+
+    return sampled_eulers, regime
+
+
+def audit_pose_dataset_coverage(
+    samples_or_eulers: list[dict[str, Any]] | dict[str, Any],
+    bones_meta: dict[str, dict[str, Any]],
+    enforce_anatomical_floor: bool = True,
+) -> dict[str, Any]:
+    """Audits a synthesized pose dataset (`keypoints_gt.json["samples"]` or `{bone_name: (N, 3)}`)
+    for joint-space quantile coverage, inter-finger / intra-chain decoupling, PCA effective rank,
+    and S-curve anti-phase representation.
+    Automatically detects and fails on coupled "fixed-ratio hand curl" or frozen-joint defects.
+    """
+    classified = classify_rig_bones(bones_meta)
+    bone_names = sorted(classified.keys())
+    regime_counts: dict[str, int] = {r: 0 for r in POSE_SAMPLING_REGIMES}
+
+    if isinstance(samples_or_eulers, list):
+        N = len(samples_or_eulers)
+        eulers_by_bone: dict[str, np.ndarray] = {
+            b: np.zeros((N, 3), dtype=np.float64) for b in bone_names
+        }
+        for s_idx, item in enumerate(samples_or_eulers):
+            reg = item.get("sampling_regime")
+            if isinstance(reg, str):
+                regime_counts[reg] = regime_counts.get(reg, 0) + 1
+            jmap = item.get("joints", item.get("bones", item))
+            for b in bone_names:
+                if b in jmap:
+                    val = jmap[b].get("euler_xyz", jmap[b]) if isinstance(jmap[b], dict) else jmap[b]
+                    eulers_by_bone[b][s_idx] = np.asarray(val, dtype=np.float64)
+    elif isinstance(samples_or_eulers, dict):
+        first_arr = np.asarray(next(iter(samples_or_eulers.values())), dtype=np.float64)
+        N = int(first_arr.shape[0])
+        eulers_by_bone = {
+            b: np.asarray(samples_or_eulers[b], dtype=np.float64)
+            if b in samples_or_eulers
+            else np.zeros((N, 3), dtype=np.float64)
+            for b in bone_names
+        }
+    else:
+        raise TypeError("samples_or_eulers must be a list of sample records or a dict of Euler arrays")
+
+    p90_ratios: list[float] = []
+    full_ratios: list[float] = []
+    under_covered_bones: list[str] = []
+    active_bones: list[str] = []
+
+    for b in bone_names:
+        info = classified[b]
+        kind = str(info.get("kind", "limb"))
+        if kind == "rigid" or bool(info.get("fixed_local", False)):
+            continue
+        active_bones.append(b)
+        lims = effective_sampling_limits_for_bone(info, enforce_anatomical_floor=enforce_anatomical_floor)
+        is_leaf = not bool(info.get("children"))
+        arr = eulers_by_bone[b]
+        for ax in range(3):
+            if is_leaf and ax == 1:
+                continue
+            span = float(lims[ax][1] - lims[ax][0])
+            if span <= 1e-3:
+                continue
+            col = arr[:, ax]
+            p05, p95 = np.percentile(col, [5.0, 95.0])
+            p90_r = float((p95 - p05) / span)
+            full_r = float((np.max(col) - np.min(col)) / span)
+            p90_ratios.append(p90_r)
+            full_ratios.append(full_r)
+            if ax == 0 and p90_r < 0.50:
+                under_covered_bones.append(b)
+
+    # 1. Digit PCA Effective Rank & Inter-Finger Correlation Audit (Fixed-Ratio Hand Curl Guard)
+    digit_bones = [
+        b
+        for b in active_bones
+        if classified[b].get("kind") == "digit"
+        and (
+            effective_sampling_limits_for_bone(classified[b], enforce_anatomical_floor=enforce_anatomical_floor)[0][1]
+            - effective_sampling_limits_for_bone(classified[b], enforce_anatomical_floor=enforce_anatomical_floor)[0][0]
+        )
+        > 1e-3
+    ]
+    digit_pc1_var_ratio = 0.0
+    digit_eff_rank_ratio = 1.0
+    if len(digit_bones) >= 2 and N >= 10:
+        X_dig = np.column_stack([eulers_by_bone[b][:, 0] for b in digit_bones])
+        X_centered = X_dig - np.mean(X_dig, axis=0, keepdims=True)
+        std_dig = np.std(X_centered, axis=0, keepdims=True)
+        valid_cols = std_dig[0] > 1e-6
+        if int(np.sum(valid_cols)) >= 2:
+            X_norm = X_centered[:, valid_cols] / std_dig[:, valid_cols]
+            cov = (X_norm.T @ X_norm) / float(max(1, N - 1))
+            eigvals = np.linalg.eigvalsh(cov)
+            eigvals = np.maximum(eigvals, 0.0)
+            eig_sum = float(np.sum(eigvals))
+            if eig_sum > 1e-9:
+                digit_pc1_var_ratio = float(np.max(eigvals) / eig_sum)
+                part_ratio = (eig_sum ** 2) / float(np.sum(eigvals ** 2))
+                digit_eff_rank_ratio = float(part_ratio / float(len(eigvals)))
+
+    # Proximal finger bones across different `(side, group_id)` groups
+    proximal_by_group: dict[tuple[str, str], str] = {}
+    for b in digit_bones:
+        info = classified[b]
+        key = (str(info.get("side", "C")), str(info.get("group_id", "00")))
+        if key not in proximal_by_group or int(info.get("chain_index", 1)) < int(
+            classified[proximal_by_group[key]].get("chain_index", 99)
+        ):
+            proximal_by_group[key] = b
+
+    prox_bones = list(proximal_by_group.values())
+    max_inter_finger_corr = 0.0
+    if len(prox_bones) >= 2 and N >= 10:
+        M_prox = np.column_stack([eulers_by_bone[b][:, 0] for b in prox_bones])
+        M_c = M_prox - np.mean(M_prox, axis=0, keepdims=True)
+        M_std = np.std(M_c, axis=0, keepdims=True)
+        if np.all(M_std > 1e-6):
+            corr_mat = (M_c / M_std).T @ (M_c / M_std) / float(N)
+            off_diag = np.abs(corr_mat - np.diag(np.diag(corr_mat)))
+            max_inter_finger_corr = float(np.max(off_diag))
+
+    # 2. Parent-Child Intra-Chain Correlation & Anti-Phase Sign-Flip Ratio
+    max_parent_child_corr = 0.0
+    antiphase_ratios: list[float] = []
+    for b in active_bones:
+        info = classified[b]
+        p = info.get("parent")
+        if not p or p not in active_bones:
+            continue
+        if classified[p].get("kind") != info.get("kind"):
+            continue
+        if info.get("kind") not in ("digit", "flex", "tail", "spine", "wing"):
+            continue
+        x_p = eulers_by_bone[p][:, 0]
+        x_c = eulers_by_bone[b][:, 0]
+        lims_p = effective_sampling_limits_for_bone(classified[p], enforce_anatomical_floor=enforce_anatomical_floor)[0]
+        lims_c = effective_sampling_limits_for_bone(info, enforce_anatomical_floor=enforce_anatomical_floor)[0]
+        mid_p = 0.5 * (lims_p[0] + lims_p[1])
+        mid_c = 0.5 * (lims_c[0] + lims_c[1])
+        cp = x_p - mid_p
+        cc = x_c - mid_c
+        sp = float(np.std(cp))
+        sc = float(np.std(cc))
+        if sp > 1e-6 and sc > 1e-6:
+            r_pc = abs(float(np.mean(cp * cc) / (sp * sc)))
+            max_parent_child_corr = max(max_parent_child_corr, r_pc)
+            antiphase_ratios.append(float(np.mean((cp * cc) < 0.0)))
+
+    mean_antiphase_ratio = float(np.mean(antiphase_ratios)) if antiphase_ratios else 0.5
+    mean_p90_span = float(np.mean(p90_ratios)) if p90_ratios else 1.0
+    min_p90_span = float(np.min(p90_ratios)) if p90_ratios else 1.0
+    mean_full_span = float(np.mean(full_ratios)) if full_ratios else 1.0
+
+    failures: list[str] = []
+    if under_covered_bones:
+        failures.append(f"Under-covered primary flexion axis (<50% p90 span) on bones: {under_covered_bones[:8]}")
+    if len(digit_bones) >= 3 and digit_pc1_var_ratio > 0.55:
+        failures.append(
+            f"Coupled hand/digit curl detected: digit PC1 variance ratio {digit_pc1_var_ratio:.3f} > 0.55"
+        )
+    if len(prox_bones) >= 2 and max_inter_finger_corr > 0.65:
+        failures.append(
+            f"Inter-finger fixed-ratio coupling detected: max pairwise |corr| {max_inter_finger_corr:.3f} > 0.65"
+        )
+    if max_parent_child_corr > 0.82:
+        failures.append(
+            f"Excessive parent-child chain lockstep detected: max |corr| {max_parent_child_corr:.3f} > 0.82"
+        )
+    if antiphase_ratios and mean_antiphase_ratio < 0.12:
+        failures.append(
+            f"Insufficient S-curve / anti-phase pose coverage: sign-flip ratio {mean_antiphase_ratio:.3f} < 0.12"
+        )
+
+    return {
+        "schema": "monster-pose-coverage-audit-v1",
+        "num_samples": N,
+        "active_bone_count": len(active_bones),
+        "digit_bone_count": len(digit_bones),
+        "regime_counts": regime_counts,
+        "span_coverage": {
+            "mean_p90_span_ratio": round(mean_p90_span, 4),
+            "min_p90_span_ratio": round(min_p90_span, 4),
+            "mean_full_span_ratio": round(mean_full_span, 4),
+            "under_covered_bones": under_covered_bones,
+        },
+        "decoupling_metrics": {
+            "digit_pc1_variance_ratio": round(digit_pc1_var_ratio, 4),
+            "digit_effective_rank_ratio": round(digit_eff_rank_ratio, 4),
+            "max_inter_finger_abs_corr": round(max_inter_finger_corr, 4),
+            "max_parent_child_abs_corr": round(max_parent_child_corr, 4),
+            "antiphase_sign_flip_ratio": round(mean_antiphase_ratio, 4),
+        },
+        "thresholds": {
+            "min_p90_span_ratio": 0.50,
+            "max_digit_pc1_variance_ratio": 0.55,
+            "max_inter_finger_abs_corr": 0.65,
+            "max_parent_child_abs_corr": 0.82,
+            "min_antiphase_sign_flip_ratio": 0.12,
+        },
+        "passed": len(failures) == 0,
+        "failures": failures,
+    }

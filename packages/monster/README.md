@@ -1,5 +1,7 @@
 # Monster
 
+[![Open in Colab](../../docs/images/open-in-colab.svg)](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb)
+
 Monster 是 Open Game Studio monorepo 中的角色绑定、姿态训练与动作制作模块。Python Worker、客户端、协议、Colab 入口和部署脚本集中在本目录维护。本机工作台继续使用仓库根目录的 `src/`，本轮不搬动其启动路径。
 
 ## 目录与运行边界
@@ -16,7 +18,9 @@ Monster 是 Open Game Studio monorepo 中的角色绑定、姿态训练与动作
 
 ## 在 Colab 启动（推荐：一键打开）
 
-1. 直接点击 **[Open in Colab](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb)** 打开仓库中的 [Notebook](notebooks/colab.ipynb)，选择 G4 GPU。
+[![Open in Colab](../../docs/images/open-in-colab.svg)](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb)
+
+1. 直接点击上方 **[Open in Colab](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb)** 徽章打开仓库中的 [Notebook](notebooks/colab.ipynb)，选择 G4 GPU。
 2. 依次运行 Cell 1（默认直接从 GitHub 拉取最新代码并配置，默认使用 `H3_PROFILE="full"` 满血权重与 `1344×768` 双视图分辨率，可选开启 `ENABLE_2K_RESOLUTION=True` 切换至 `2560×1440` 2K 全链路模式）、2（SkinTokens）、3（ComfyUI/H3）、4（启动 Worker）。首次安装和模型下载仍需等待；之后复用既有 Drive 缓存。
 3. Worker 写入私有的 `MonsterStudio/runtime/endpoint_registry.json`（含 Gradio 地址、用户名、密码及协议版本），并在控制台输出一行 `connect` 配对命令。
 
@@ -40,7 +44,7 @@ Monster 是 Open Game Studio monorepo 中的角色绑定、姿态训练与动作
 ```sh
 npm run monster:call -- status
 npm run monster:call -- rig creature_01 /absolute/path/input.glb
-npm run monster:call -- train creature_01 --samples 3000 --epochs 15
+npm run monster:call -- train creature_01 --samples 5000 --epochs 15
 npm run monster:call -- animate creature_01 'idle:loop walk:loop'
 npm run monster:call -- shutdown
 ```

@@ -89,8 +89,9 @@ for (const locale of locales) {
     `${locale}: locale structure, links or commands drifted`,
   );
   assert.ok(
-    text.indexOf('id="try-it"') < text.indexOf('id="install"'),
-    `${locale}: show usage before setup`,
+    text.indexOf('id="try-it"') < text.indexOf('id="monster"') &&
+      text.indexOf('id="monster"') < text.indexOf('id="install"'),
+    `${locale}: show usage and monster before setup`,
   );
   assert.match(text, /26/);
   assert.match(text, /11/);

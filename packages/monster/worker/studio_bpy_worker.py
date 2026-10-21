@@ -9,8 +9,10 @@ Bridges VAST-AI SkinTokens output (.glb) with:
   1. [Stage 1] 4-Candidate Geometric Audit (multi-ray parity + surface-distance containment check,
      4-quadrant limb extremity coverage supporting raised front claws, left-right symmetry check,
      and Air-Bridging Chord Repair), Finger-Weight Merging & Pruning, and Bone Classification.
-  2. [Stage 2] Dual-Orthographic Camera Studio (`1344x768` split-screen = `672x768` Front + `672x768` Side)
-     synthesizing 3,000 constrained random poses (50% crisp static + 50% inter-frame shutter blur).
+  2. [Stage 2] Dual-Orthographic Camera Studio (`1344x768` or 2K `2560x1440` split-screen)
+     synthesizing 5,000 stratified decoupled poses (40% synergistic, 30% decoupled, 15% anti-phase/extreme,
+     15% cross-midline self-occlusion; 50% crisp static + 50% inter-frame shutter blur) with an automatic
+     Pose Coverage & Decoupling Rank Audit Gate.
   3. [Stage 4] Procedural Constrained Random Continuous Animation Synthesizer (96 frames @ 24 FPS)
      using sparse keyframes + Blender native `AUTO_CLAMPED` Bezier spline interpolation.
   4. [Stage 6] Two-Stage Swing + Child-Plane Twist Quaternion IK Retargeter (`bake_3d_joints_to_animated_glb`):
@@ -27,6 +29,19 @@ import math
 import os
 import random
 from pose_features import features_enabled, DATASET_SCHEMA, dataset_signature, studio_resolution, idle_split_filename
+from bone_taxonomy import (
+    BONE_TAXONOMY_SCHEMA,
+    DEFAULT_SYNTH_SAMPLES,
+    audit_pose_dataset_coverage,
+    build_bounded_local_euler_rotation,
+    canonicalize_rig_bone_names_in_blender,
+    classify_rig_bones,
+    compute_stratified_motion_metrics,
+    effective_sampling_limits_for_bone,
+    sample_stratified_pose_euler_dict,
+    select_pose_sampling_regime,
+    solve_bone_rotation_by_kind,
+)
 from pathlib import Path
 from typing import Any
 
@@ -359,9 +374,13 @@ def merge_child_weights_and_prune(mesh_obj: Any, arm_obj: Any, bones_to_remove: 
 
 
 def classify_anonymous_bones_and_assign_limits(
-    mesh_obj: Any, arm_obj: Any
+    mesh_obj: Any,
+    arm_obj: Any,
+    prune_digits: bool | None = None,
+    canonicalize_names: bool | None = None,
 ) -> tuple[list[str], dict[str, Any]]:
-    """Solves SkinTokens' anonymous bone naming (`bone_0, bone_1...`) via 3D graph topology.
+    """Solves SkinTokens' anonymous bone naming (`bone_0, bone_1...`) via 3D graph topology
+    and enriches metadata with the v2 Canonical Bone Taxonomy (`<KIND>_<SIDE>_<GROUP>_<INDEX>`).
     IMPORTANT: In Blender PoseBone local space, the Y axis (`euler[1]`) is the longitudinal
     twist/roll axis along the bone shaft. Because a 2-point `(head, tail)` segment cannot observe
     pure longitudinal shaft spin on terminal bones, we constrain local Y roll (`limits[1]`) tightly
@@ -375,22 +394,27 @@ def classify_anonymous_bones_and_assign_limits(
     height = float(max(1e-4, extent[2]))
     width = float(max(1e-4, extent[0]))
 
-    # Step A: Detect dense distal finger/toe clusters to fold into the hand/foot bone
+    if prune_digits is None:
+        prune_digits = os.environ.get("MONSTER_PRUNE_DIGITS", "1").strip().lower() in ("1", "true", "on")
+    if canonicalize_names is None:
+        canonicalize_names = os.environ.get("MONSTER_CANONICALIZE_BONE_NAMES", "0").strip().lower() in ("1", "true", "on")
+
+    # Step A: Optionally detect dense distal finger/toe clusters to fold into the hand/foot bone
     finger_bones: list[str] = []
-    for bone in arm_obj.data.bones:
-        if len(bone.children) >= 3:
-            short_children = [
-                c for c in bone.children if (mw_arm @ c.tail_local - mw_arm @ c.head_local).length < 0.085 * height
-            ]
-            if len(short_children) >= 3:
-                for sc in short_children:
-                    finger_bones.append(sc.name)
-                    for desc in sc.children_recursive:
-                        finger_bones.append(desc.name)
+    if prune_digits:
+        for bone in arm_obj.data.bones:
+            if len(bone.children) >= 3:
+                short_children = [
+                    c for c in bone.children if (mw_arm @ c.tail_local - mw_arm @ c.head_local).length < 0.085 * height
+                ]
+                if len(short_children) >= 3:
+                    for sc in short_children:
+                        finger_bones.append(sc.name)
+                        for desc in sc.children_recursive:
+                            finger_bones.append(desc.name)
+        merge_child_weights_and_prune(mesh_obj, arm_obj, finger_bones)
 
-    merge_child_weights_and_prune(mesh_obj, arm_obj, finger_bones)
-
-    # Step B: Classify pruned skeleton and assign biomechanical Euler limits (in radians)
+    # Step B: Classify skeleton and assign biomechanical Euler limits (in radians)
     # Note: limits = [(X_pitch_lo, X_pitch_hi), (Y_roll_lo, Y_roll_hi), (Z_yaw_lo, Z_yaw_hi)]
     bone_meta: dict[str, Any] = {}
     deg = math.radians
@@ -446,11 +470,31 @@ def classify_anonymous_bones_and_assign_limits(
             "chain_corr": chain_corr,
         }
 
+    bmin_list = [round(float(x), 5) for x in bbox_min]
+    bmax_list = [round(float(x), 5) for x in bbox_max]
+    bone_meta = classify_rig_bones(bone_meta, bbox_min=bmin_list, bbox_max=bmax_list)
+
+    rename_map: dict[str, str] = {}
+    if canonicalize_names:
+        rename_map = canonicalize_rig_bone_names_in_blender(arm_obj, [mesh_obj], bone_meta)
+        remapped_meta: dict[str, Any] = {}
+        for old_name, info in bone_meta.items():
+            new_name = rename_map.get(old_name, old_name)
+            info["legacy_name"] = old_name
+            info["canonical_name"] = new_name
+            if info.get("parent") in rename_map:
+                info["parent"] = rename_map[info["parent"]]
+            info["children"] = [rename_map.get(c, c) for c in info.get("children", [])]
+            remapped_meta[new_name] = info
+        bone_meta = remapped_meta
+
     return finger_bones, {
-        "bbox_min": [round(float(x), 5) for x in bbox_min],
-        "bbox_max": [round(float(x), 5) for x in bbox_max],
+        "bone_taxonomy_schema": BONE_TAXONOMY_SCHEMA,
+        "bbox_min": bmin_list,
+        "bbox_max": bmax_list,
         "num_active_bones": len(bone_meta),
         "folded_finger_bones": finger_bones,
+        "canonical_rename_map": rename_map,
         "bones": bone_meta,
     }
 
@@ -773,40 +817,50 @@ def render_split_screen_frame(
 
 
 # ==============================================================================
-# 3. Stage 2 (3,000 Poses + 50% Motion Blur) & Stage 4 (96-Frame Continuous Exam)
+# 3. Stage 2 (5,000 Stratified Poses + 50% Motion Blur + Coverage Audit) & Stage 4 (96-Frame Exam)
 # ==============================================================================
 
-def sample_in_limit_pose(arm_obj: Any, bones_meta: dict[str, Any], rng: random.Random) -> dict[str, list[float]]:
-    """Samples a biomechanically valid random pose with positive correlation along spine/tail chains."""
+def sample_in_limit_pose(
+    arm_obj: Any,
+    bones_meta: dict[str, Any],
+    rng: random.Random,
+    sample_idx: int | None = None,
+) -> dict[str, list[float]]:
+    """Samples a biomechanically valid pose using the 4-Regime Stratified Decoupled Sampler
+    (`synergistic`, `decoupled`, `antiphase_extreme`, `workspace_cross_occlusion`) and applies
+    it to `arm_obj.pose.bones`.
+    """
+    sampled_raw, _ = sample_stratified_pose_euler_dict(
+        bones_meta=bones_meta,
+        rng=rng,
+        sample_idx=sample_idx,
+        enforce_anatomical_floor=True,
+    )
     sampled_eulers: dict[str, list[float]] = {}
-    for b_name, info in bones_meta.items():
+    for b_name, raw in sampled_raw.items():
         pbone = arm_obj.pose.bones.get(b_name)
         if not pbone:
             continue
-        lims = info["limits_rad"]
-        raw = [rng.uniform(lo, hi) for (lo, hi) in lims]
-        corr = float(info.get("chain_corr", 0.0))
-        parent_name = info.get("parent")
-        if corr > 0.0 and parent_name in sampled_eulers:
-            p_rot = sampled_eulers[parent_name]
-            # Correlate observable bending axes (X pitch, Z yaw), damp unobservable longitudinal Y roll
-            raw[0] = float(np.clip(corr * p_rot[0] + (1.0 - corr) * raw[0], lims[0][0], lims[0][1]))
-            raw[1] = float(np.clip((1.0 - corr) * raw[1], lims[1][0], lims[1][1]))
-            raw[2] = float(np.clip(corr * p_rot[2] + (1.0 - corr) * raw[2], lims[2][0], lims[2][1]))
-        # Suppress unobservable longitudinal Y-shaft spin on terminal bones (no children)
+        rot = list(raw)
         if not pbone.children:
-            raw[1] = 0.0
+            rot[1] = 0.0
         pbone.rotation_mode = "XYZ"
-        pbone.rotation_euler = Euler(raw, "XYZ")
-        sampled_eulers[b_name] = raw
+        pbone.rotation_euler = Euler(rot, "XYZ")
+        sampled_eulers[b_name] = rot
     bpy.context.view_layer.update()
     return sampled_eulers
 
 
 def generate_stage2_synthetic_dataset(
-    blend_path: str, meta_path: str, out_dir: str, num_samples: int = 3000, seed: int = 42
+    blend_path: str,
+    meta_path: str,
+    out_dir: str,
+    num_samples: int = DEFAULT_SYNTH_SAMPLES,
+    seed: int = 42,
 ) -> None:
-    """Renders the Stage 2 synthetic dataset (default 3,000 dual-view images)."""
+    """Renders the Stage 2 synthetic dataset (default 5,000 stratified decoupled dual-view images)
+    and verifies the dataset with `audit_pose_dataset_coverage`.
+    """
     require_bpy()
     bpy.ops.wm.open_mainfile(filepath=str(blend_path))
     with open(meta_path, "r", encoding="utf-8") as f:
@@ -849,7 +903,11 @@ def generate_stage2_synthetic_dataset(
     scene = bpy.context.scene
     if enhanced:
         scene.render.motion_blur_position = "CENTER"
-    bones_meta = meta["bones"]
+    bones_meta = classify_rig_bones(
+        meta["bones"],
+        bbox_min=meta.get("bbox_min"),
+        bbox_max=meta.get("bbox_max"),
+    )
     bone_names = list(bones_meta.keys())
     records = []
 
@@ -859,16 +917,19 @@ def generate_stage2_synthetic_dataset(
         arm_obj.animation_data_create()
         scene.frame_set(1)
 
-        pose_f1 = sample_in_limit_pose(arm_obj, bones_meta, rng)
+        regime = select_pose_sampling_regime(idx, rng)
+        pose_f1 = sample_in_limit_pose(arm_obj, bones_meta, rng, sample_idx=idx)
         if enhanced and use_blur:
             # Symmetric shutter samples around the labeled pose at frame 1.
             # Put keyframes on both sides; labels always refer to the center pose.
             for b_name, rot in pose_f1.items():
                 pb = arm_obj.pose.bones[b_name]
-                lims = bones_meta[b_name]["limits_rad"]
+                lims = effective_sampling_limits_for_bone(bones_meta[b_name], enforce_anatomical_floor=True)
                 delta = [rng.uniform(-0.5, 0.5) for _ in range(3)]
-                if not pb.children:
+                if not pb.children or bones_meta[b_name].get("fixed_local") or bones_meta[b_name].get("kind") == "rigid":
                     delta[1] = 0.0
+                if bones_meta[b_name].get("fixed_local") or bones_meta[b_name].get("kind") == "rigid":
+                    delta = [0.0, 0.0, 0.0]
                 for frame, sign in ((0, -1), (1, 0), (2, 1)):
                     pb.rotation_euler = Euler([float(np.clip(rot[i]+sign*delta[i], lims[i][0], lims[i][1])) for i in range(3)], "XYZ")
                     pb.keyframe_insert(data_path="rotation_euler", frame=frame)
@@ -884,8 +945,8 @@ def generate_stage2_synthetic_dataset(
             for b_name in bone_names:
                 info = bones_meta[b_name]
                 pb = arm_obj.pose.bones[b_name]
-                if info["role"] not in ("root", "spine") and rng.random() < 0.45:
-                    lims = info["limits_rad"]
+                if info.get("role") not in ("root", "spine") and not info.get("fixed_local") and rng.random() < 0.45:
+                    lims = effective_sampling_limits_for_bone(info, enforce_anatomical_floor=True)
                     delta = [rng.uniform(-0.35, 0.35) for _ in range(3)]
                     if not pb.children:
                         delta[1] = 0.0
@@ -930,14 +991,24 @@ def generate_stage2_synthetic_dataset(
                 for view, camera in (("front", cam_f), ("side", cam_s)):
                     for endpoint, point in (("head", head_w), ("tail", tail_w)):
                         joints_gt[b_name][f"{view}_{endpoint}_aux"] = visibility.label(point, b_name, camera, calib)
-        records.append({"image": img_name, "motion_blur": use_blur, "joints": joints_gt,
-                        "label_frame": 1, "shutter": float(scene.render.motion_blur_shutter) if use_blur else 0.0,
+        records.append({"image": img_name, "motion_blur": use_blur, "sampling_regime": regime,
+                        "joints": joints_gt, "label_frame": 1,
+                        "shutter": float(scene.render.motion_blur_shutter) if use_blur else 0.0,
                         "lighting": lighting})
+
+    coverage_audit = audit_pose_dataset_coverage(records, bones_meta, enforce_anatomical_floor=True)
+    with open(out_path / "pose_coverage_audit.json", "w", encoding="utf-8") as f:
+        json.dump(coverage_audit, f, indent=2, ensure_ascii=False)
+    if not coverage_audit.get("passed", False):
+        raise RuntimeError(
+            f"[Stage 2 Pose Coverage Audit Gate Failed] {coverage_audit.get('failures')}"
+        )
 
     with open(out_path / "keypoints_gt.json", "w", encoding="utf-8") as f:
         json.dump({"schema": DATASET_SCHEMA if enhanced else "monster-pose-legacy-v1",
                    "signature": signature, "depth_visibility_enabled": enhanced,
                    "bone_names": sorted(bone_names), "visibility_method": "skin_weight_surface_proxy_v1" if enhanced else None,
+                   "coverage_audit": coverage_audit,
                    "calibration": calib, "samples": records}, f, indent=2, ensure_ascii=False)
 
 
@@ -1072,29 +1143,9 @@ def build_clamped_local_euler_rotation(
 ) -> np.ndarray:
     """Constructs the PoseBone local rotation matrix `R_loc` whose Y-axis points along unit vector
     `d_loc` while locking longitudinal roll to `ry` and clamping `(rx, rz)` within anatomical limits
-    (`rx_lims`, `rz_lims`) across both inverse-sine branches so gimbal lock or 180-deg flips never occur.
+    (`rx_lims`, `rz_lims`) across both inverse-sine branches without any post-clamp `minimum_swing` override.
     """
-    d_unit = d_loc / max(1e-8, float(np.linalg.norm(d_loc)))
-    cy, sy = math.cos(ry), math.sin(ry)
-    sx = float(np.clip(d_unit[2] / max(1e-6, cy), -1.0, 1.0))
-    rx1 = math.asin(sx)
-    rx2 = (math.pi - rx1) if rx1 >= 0.0 else (-math.pi - rx1)
-    best_R = None
-    best_align = -2.0
-    for rx_cand in (rx1, rx2):
-        rx_c = float(np.clip(rx_cand, float(rx_lims[0]), float(rx_lims[1])))
-        cx_c, sx_c = math.cos(rx_c), math.sin(rx_c)
-        a = sy * sx_c
-        b = cx_c
-        rz_raw = math.atan2(a * float(d_unit[1]) - b * float(d_unit[0]), a * float(d_unit[0]) + b * float(d_unit[1]))
-        rz_c = float(np.clip(rz_raw, float(rz_lims[0]), float(rz_lims[1])))
-        R_ref = euler_xyz_to_matrix_numpy(rx_c, ry, rz_c)
-        align = float(np.dot(R_ref[:, 1], d_unit))
-        if align > best_align:
-            best_align = align
-            best_R = R_ref
-    assert best_R is not None
-    return minimum_swing_matrix_numpy(best_R[:, 1], d_unit) @ best_R
+    return build_bounded_local_euler_rotation(d_loc, ry, rx_lims, rz_lims)
 
 
 def compute_swing_and_child_plane_twist_matrix(
@@ -1151,15 +1202,25 @@ def solve_bounded_bone_rotation_matrix(
     children_map: dict[str, list[str]],
     curr_ry_map: dict[str, float],
     prev_ry_map: dict[str, float],
+    raw_obs_bones: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[np.ndarray, float]:
-    """Solves bone `b_name`'s 3x3 world rotation matrix `R_final` using:
-      1. Bounded Local-Euler parameterization (`build_clamped_local_euler_rotation`);
-      2. All child bones' observability-weighted hinge plane constraints (`pen_x`, `pen_z`);
-      3. Disconnected child-head rigid lever arms (`||rest_head[c] - rest_tail[b]|| > 5mm`);
-      4. Temporal & parent-chain roll prior (`0.5 * corr * ry_parent + 0.5 * prev_ry`),
-         strictly clamped within `limits_rad[1]` (`[ry_lo, ry_hi]`) and `ry = 0` on leaf bones.
+    """Solves bone `b_name`'s 3x3 world rotation matrix `R_final` using Layer 3 Kind-Specific
+    Solvers (`solve_bone_rotation_by_kind`) when taxonomy metadata is present, or falls back
+    to Bounded Local-Euler + Multi-Child Observability & Rigid Child-Head Lever-Arm IK.
     """
     info = bones_meta.get(b_name, {})
+    if "kind" in info or "fixed_local" in info:
+        return solve_bone_rotation_by_kind(
+            b_name=b_name,
+            R_init=R_init,
+            frame_bones=frame_bones,
+            bones_meta=bones_meta,
+            rest_R=rest_R,
+            children_map=children_map,
+            curr_ry_map=curr_ry_map,
+            prev_ry_map=prev_ry_map,
+            raw_obs_bones=raw_obs_bones,
+        )
     b_data = frame_bones[b_name]
     h_b = np.array(b_data["head_3d"], dtype=np.float64)
     t_b = np.array(b_data["tail_3d"], dtype=np.float64)
@@ -1413,11 +1474,15 @@ def bake_3d_joints_to_animated_glb(
         info.setdefault("rest_head_world", [float(h_w.x), float(h_w.y), float(h_w.z)])
         info.setdefault("rest_tail_world", [float(t_w.x), float(t_w.y), float(t_w.z)])
         info.setdefault("rest_length", float((t_w - h_w).length))
+        info.setdefault("rest_rot_mat_world", [[float(v) for v in row] for row in R0])
+
+    bones_meta = classify_rig_bones(bones_meta)
 
     # Step 1: Solve bounded world rotation matrices across all frames in topological order
     solved_world_R: dict[str, np.ndarray] = {
         pb.name: np.zeros((total_frames, 3, 3), dtype=np.float64) for pb in topo_bones
     }
+    has_precomputed_rot = False
     prev_ry_map: dict[str, float] = {}
     for f_idx, frame_item in enumerate(frames_list):
         b_dict = frame_item["bones"]
@@ -1434,6 +1499,12 @@ def bake_3d_joints_to_animated_glb(
                 posed_R[b_name] = R_init
                 solved_world_R[b_name][f_idx] = R_init
                 continue
+            if "rot_mat_world" in b_dict[b_name]:
+                R_pre = np.array(b_dict[b_name]["rot_mat_world"], dtype=np.float64)
+                posed_R[b_name] = R_pre
+                solved_world_R[b_name][f_idx] = R_pre
+                has_precomputed_rot = True
+                continue
             R_final, ry_best = solve_bounded_bone_rotation_matrix(
                 b_name=b_name,
                 R_init=R_init,
@@ -1443,14 +1514,15 @@ def bake_3d_joints_to_animated_glb(
                 children_map=children_map,
                 curr_ry_map=curr_ry_map,
                 prev_ry_map=prev_ry_map,
+                raw_obs_bones=b_dict,
             )
             posed_R[b_name] = R_final
             curr_ry_map[b_name] = ry_best
             prev_ry_map[b_name] = ry_best
             solved_world_R[b_name][f_idx] = R_final
 
-    # Step 2: Apply 5-frame Quaternion Savitzky-Golay temporal smoothing to eliminate frame-to-frame jitter
-    if total_frames >= 5:
+    # Step 2: Apply 5-frame Quaternion Savitzky-Golay temporal smoothing when not already smoothed
+    if total_frames >= 5 and not has_precomputed_rot:
         for pb in topo_bones:
             b_name = pb.name
             depth = int(bones_meta.get(b_name, {}).get("depth", 1))
@@ -1593,7 +1665,7 @@ def main() -> None:
     parser.add_argument(
         "--mode",
         required=True,
-        choices=["sanitize_input", "audit", "render_3000", "render_exam", "bake_ik", "verify_exam_glb"],
+        choices=["sanitize_input", "audit", "render_3000", "render_5000", "render_exam", "bake_ik", "verify_exam_glb"],
     )
     parser.add_argument("--input_glb", help="Raw input GLB for sanitize_input mode")
     parser.add_argument("--yaw_deg", type=float, default=0.0, help="Optional Z-axis rotation in degrees")
@@ -1605,7 +1677,7 @@ def main() -> None:
     parser.add_argument("--out_glb", help="Output GLB path for sanitize_input or Stage 6 bake_ik")
     parser.add_argument("--exam_gt_json", help="Path to exam_gt.json for verify_exam_glb mode")
     parser.add_argument("--out_report", help="Output JSON report path for verify_exam_glb mode")
-    parser.add_argument("--num_samples", type=int, default=3000)
+    parser.add_argument("--num_samples", type=int, default=DEFAULT_SYNTH_SAMPLES)
     parser.add_argument("--exam_frames", type=int, default=96)
     args = parser.parse_args()
 
@@ -1636,7 +1708,7 @@ def main() -> None:
             json.dump(rig_meta, f, indent=2, ensure_ascii=False)
         print(f"[Stage 1 Audit Complete] Best candidate: {best['path']} (score={best['score']})")
 
-    elif args.mode == "render_3000":
+    elif args.mode in ("render_3000", "render_5000"):
         generate_stage2_synthetic_dataset(args.blend_path, args.meta_path, args.out_dir, args.num_samples)
         print(f"[Stage 2 Render Complete] Generated {args.num_samples} dual-view pairs in {args.out_dir}")
 

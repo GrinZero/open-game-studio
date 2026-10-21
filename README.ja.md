@@ -18,7 +18,7 @@
 
 > **Alpha · macOS 用インストーラー · MIT ライセンス。** ローカルでの整理は単独で利用できます。AI 制作には自分で設定したツールとアカウントが必要です。README は多言語ですが、ワークベンチの UI は現在中国語です。
 
-[試す](#try-it) · [インストール](#install) · [機能](#features) · [画面](#gallery) · [ドキュメント](#documentation) · [制限](#limits)
+[試す](#try-it) · [Monster](#monster) · [インストール](#install) · [機能](#features) · [画面](#gallery) · [ドキュメント](#documentation) · [制限](#limits)
 
 ---
 
@@ -39,6 +39,34 @@ Open Game Studio ワークベンチを開いてください。
 整理と確認はワークベンチで、制作の指示は会話で行います。接続は入力を指定するもので、制作の開始は別の操作です。
 
 ファイル整理の出発点が必要なら、任意の[プロジェクトファイルガイド（中国語）](skills/studio-project/references/project-file-guide.md)を参照し、`ゲームプロジェクトに Open Game Studio ファイルガイドの標準構成を採用してください。` と依頼できます。一部のルールだけでも利用でき、移行を明示的に依頼するまでは既存の配置を維持します。
+
+<a id="monster"></a>
+
+## Monster モジュール：クラウド GPU リギング・姿勢学習・アニメーション生成
+
+[![Open in Colab](docs/images/open-in-colab.svg)](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb)
+
+[Monster ガイド](packages/monster/README.md) · [ワークフローと G1/G2/G3 監査スキル](packages/monster/skills/monster-workflow/SKILL.md) · [Colab ノートブック](packages/monster/notebooks/colab.ipynb)
+
+Colab G4 GPU 上で、静的な 3D クリーチャー／キャラクターメッシュから候補スケルトンのリギング、専用姿勢プローブの学習、アニメーションのベイクまでを一貫して実行します。手元の Mac に CUDA、PyTorch、Blender を入れる必要はありません。明示的な **G1 / G2 / G3** ユーザー監査ゲートにより、骨格の選定・姿勢サンプリング・モーション品質を人間が確認しながら進められます。
+
+| ステージ | パイプラインと主な機能 |
+| --- | --- |
+| **1. 候補リギング（`rig` · G1）** | **SkinTokens + Blender Cycles GPU**（`OPTIX`/`CUDA`、GPU `OpenImageDenoise`、永続 BVH）で 4 種類の候補リグを生成し、独立した装飾トポロジを保持したまま **G1** 選定用の多視点比較シートをレンダリングします。 |
+| **2. 姿勢プローブ（`train` · G2/G3）** | **G2** の 50 ポーズ確認後に正・側面の平行投影ペア（標準 `1344×768`、または任意の `2560×1440` 2K モード）を合成し、専用 **DINOv2** ヒートマップ＋深度／可視性ヘッド（SDPA Attention、TF32、5×5 ピーク質量信頼度）を学習して **G3** 動画復元試験で検証します。 |
+| **3. アクションベイク（`animate`）** | フル精度 **MiniMax H3**（`bf16`/`fp16`、2K 時は 2 段階 3D 潜在超解像＋タイル精修）で同期デュアルビュー動画を生成し、2D Hampel スパイク除去・5 点 Savitzky–Golay 四元数平滑化・制限付きローカルオイラー多子骨 Swing-Twist IK で `<action>_animated.glb` をベイクします。 |
+| **4. ゼロ CUDA ローカルクライアント** | 上の **Open in Colab** バッジから G4 Worker を起動（標準で GitHub 最新版を取得し Google Drive キャッシュを再利用）。macOS では `npm run monster:call` 初回実行時に `packages/monster/.venv` を自動構築し、デスクトップ版 Google Drive の `endpoint_registry.json` 自動検出（または 1 行 `connect`）と `protocol_version` 検証を行って結果をダウンロードします。 |
+
+Colab Worker の起動後、リポジトリのルートから直接呼び出せます：
+
+```sh
+npm run monster:call -- status
+npm run monster:call -- rig creature_01 /absolute/path/input.glb
+npm run monster:call -- train creature_01 --samples 3000 --epochs 15
+npm run monster:call -- animate creature_01 'idle:loop walk:loop'
+```
+
+ダウンロードした成果物はワークベンチで不変のアセット版として取り込めます。オフライン配布用アーカイブは `npm run monster:package` で作成できます。
 
 <a id="install"></a>
 
@@ -114,7 +142,7 @@ npm run install:local
 | [ツール契約](docs/TOOL_CONTRACT.md) | 全ツールの索引、入力 schema、状態のルール。 |
 | [検証記録](docs/VERIFICATION.md) | 実行済みの検証と、実環境での確認が必要な項目。 |
 | [実装状況](docs/IMPLEMENTATION.md) | 構成、未完了の段階、今後の作業。 |
-| [Monster モジュール](packages/monster/README.md) | [Open in Colab](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb) 起動、Worker ソース、自動検出ローカルクライアント。 |
+| [Monster モジュール](packages/monster/README.md) | [![Open in Colab](docs/images/open-in-colab.svg)](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb) 起動、Worker ソース、自動検出ローカルクライアント。 |
 
 <a id="limits"></a>
 

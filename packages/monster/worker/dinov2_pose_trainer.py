@@ -28,11 +28,23 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from pose_features import (features_enabled, DATASET_SCHEMA, FEATURE_VERSION, validate_enhanced_dataset,
                            video_domain_degrade, fuse_depth_visibility, dinov2_panel_padding)
+from bone_taxonomy import (
+    BONE_TAXONOMY_SCHEMA,
+    classify_rig_bones,
+    compute_stratified_motion_metrics,
+    reconstruct_frames_with_kind_solvers,
+    savgol_smooth_array,
+    short_gap_fill_1d_or_nd,
+)
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image, ImageEnhance, ImageFilter
+
+try:
+    from PIL import Image, ImageEnhance, ImageFilter
+except ImportError:
+    Image = ImageEnhance = ImageFilter = Any  # type: ignore
 
 try:
     import torch
@@ -476,14 +488,14 @@ def clean_2d_trajectories_hampel(
 
         val_f = ~out_f
         if np.any(val_f) and not np.all(val_f):
-            uv_f[:, k, 0] = np.interp(t_idx, t_idx[val_f], uf[val_f])
-            uv_f[:, k, 1] = np.interp(t_idx, t_idx[val_f], vf[val_f])
+            uv_f[:, k, 0] = short_gap_fill_1d_or_nd(uf, out_f, max_gap=3)
+            uv_f[:, k, 1] = short_gap_fill_1d_or_nd(vf, out_f, max_gap=3)
             cf[out_f, k] *= 0.25
 
         val_s = ~out_s
         if np.any(val_s) and not np.all(val_s):
-            uv_s[:, k, 0] = np.interp(t_idx, t_idx[val_s], us[val_s])
-            uv_s[:, k, 1] = np.interp(t_idx, t_idx[val_s], vs[val_s])
+            uv_s[:, k, 0] = short_gap_fill_1d_or_nd(us, out_s, max_gap=3)
+            uv_s[:, k, 1] = short_gap_fill_1d_or_nd(vs, out_s, max_gap=3)
             cs[out_s, k] *= 0.25
 
     return uv_f.astype(np.float32), uv_s.astype(np.float32), cf.astype(np.float32), cs.astype(np.float32)
@@ -592,15 +604,12 @@ def evaluate_epipolar_consistency_and_triangulate(
         depth = int(bones_meta.get(b_name, {}).get("depth", 1)) if bones_meta else 1
         side_valid = conf_s_clean[:, k] >= 0.45
         if not enhanced and np.any(side_valid) and not np.all(side_valid):
-            t_all = np.arange(T)
-            pts_3d[:, k, 1] = np.interp(t_all, t_all[side_valid], pts_3d[side_valid, k, 1])
+            pts_3d[:, k, 1] = short_gap_fill_1d_or_nd(pts_3d[:, k, 1], ~side_valid, max_gap=3)
 
         valid_mask = joint_conf[:, k] >= 0.40
-        if np.any(valid_mask) and not np.all(valid_mask):
-            t_all = np.arange(T)
-            t_val = t_all[valid_mask]
-            for dim in ((0, 1, 2) if enhanced else (0, 2)):
-                pts_3d[:, k, dim] = np.interp(t_all, t_val, pts_3d[valid_mask, k, dim])
+        if not enhanced and np.any(valid_mask) and not np.all(valid_mask):
+            for dim in (0, 2):
+                pts_3d[:, k, dim] = short_gap_fill_1d_or_nd(pts_3d[:, k, dim], ~valid_mask, max_gap=3)
 
         if T >= 5:
             # 5-tap symmetric quadratic Savitzky-Golay filter (preserves stride amplitude, removes high-freq noise)
@@ -608,16 +617,48 @@ def evaluate_epipolar_consistency_and_triangulate(
                 p5 = np.pad(pts_3d[:, k, dim].astype(np.float64), (2, 2), mode="edge")
                 sg = (-3.0 * p5[:-4] + 12.0 * p5[1:-3] + 17.0 * p5[2:-2] + 12.0 * p5[3:-1] - 3.0 * p5[4:]) / 35.0
                 pts_3d[:, k, dim] = sg.astype(np.float32)
-            # Light 3-tap Gaussian polish for distal limbs (depth >= 2)
-            if depth >= 2:
+            # Light 3-tap Gaussian polish for distal limbs (depth >= 2) when not using enhanced FK solver
+            if depth >= 2 and not enhanced:
                 for dim in range(3):
                     p3 = np.pad(pts_3d[:, k, dim], (1, 1), mode="edge")
                     pts_3d[:, k, dim] = 0.22 * p3[:-2] + 0.56 * p3[1:-1] + 0.22 * p3[2:]
 
+    classified_meta = classify_rig_bones(bones_meta) if bones_meta else None
+    if enhanced and classified_meta:
+        depth_scale = float(calib.get("depth_scale", max(1e-4, S)))
+        frames_out, taxonomy_diag = reconstruct_frames_with_kind_solvers(
+            pts_3d=pts_3d.astype(np.float64),
+            trust=np.clip(joint_conf.astype(np.float64), 0.01, 1.0),
+            bone_names=bone_names,
+            classified_bones=classified_meta,
+            depth_scale=depth_scale,
+        )
+        for t in range(T):
+            b_map = frames_out[t]["bones"]
+            for b_idx, b_name in enumerate(bone_names):
+                endpoints = slice(b_idx * 2, b_idx * 2 + 2)
+                b_map[b_name]["depth_front_relative"] = depth_front_all[t, endpoints].tolist()
+                b_map[b_name]["depth_side_relative"] = depth_side_all[t, endpoints].tolist()
+                b_map[b_name]["visibility_front"] = visibility_front_all[t, endpoints].tolist()
+                b_map[b_name]["visibility_side"] = visibility_side_all[t, endpoints].tolist()
+                b_map[b_name]["depth_std_front"] = np.exp(0.5 * logvar_front_all[t, endpoints]).tolist()
+                b_map[b_name]["depth_std_side"] = np.exp(0.5 * logvar_side_all[t, endpoints]).tolist()
+        return {
+            "bone_taxonomy_schema": BONE_TAXONOMY_SCHEMA,
+            "depth_visibility_enabled": enhanced,
+            "gate_passed": gate_passed,
+            "mean_epipolar_diff_px": round(mean_v_diff_px, 3),
+            "vertical_trajectory_corr": round(v_corr, 4),
+            "calibration": calib,
+            "bones_meta": classified_meta,
+            "taxonomy_diagnostics": taxonomy_diag,
+            "frames": frames_out,
+        }
+
     # Top-down hierarchical rigid bone-length projection (parent-first so connected child heads stay locked!)
     topo_order = list(range(len(bone_names)))
-    if bones_meta:
-        topo_order.sort(key=lambda idx: int(bones_meta.get(bone_names[idx], {}).get("depth", 0)))
+    if classified_meta:
+        topo_order.sort(key=lambda idx: int(classified_meta.get(bone_names[idx], {}).get("depth", 0)))
 
     frames_out = []
     for t in range(T):
@@ -626,14 +667,14 @@ def evaluate_epipolar_consistency_and_triangulate(
             b_name = bone_names[b_idx]
             h_pt = pts_3d[t, b_idx * 2].copy()
             t_pt = pts_3d[t, b_idx * 2 + 1].copy()
-            if bones_meta and b_name in bones_meta:
-                p_name = bones_meta[b_name].get("parent")
-                if p_name and p_name in b_map and p_name in bones_meta:
-                    rest_h = np.array(bones_meta[b_name].get("rest_head_world", h_pt))
-                    rest_pt = np.array(bones_meta[p_name].get("rest_tail_world", h_pt))
+            if classified_meta and b_name in classified_meta:
+                p_name = classified_meta[b_name].get("parent")
+                if p_name and p_name in b_map and p_name in classified_meta:
+                    rest_h = np.array(classified_meta[b_name].get("rest_head_world", h_pt))
+                    rest_pt = np.array(classified_meta[p_name].get("rest_tail_world", h_pt))
                     if float(np.linalg.norm(rest_h - rest_pt)) < 0.015:
                         h_pt = np.array(b_map[p_name]["tail_3d"], dtype=np.float32)
-                rest_len = float(bones_meta[b_name].get("rest_length", 0.0))
+                rest_len = float(classified_meta[b_name].get("rest_length", 0.0))
                 if rest_len > 1e-5:
                     vec = t_pt - h_pt
                     norm = float(np.linalg.norm(vec))
@@ -654,16 +695,17 @@ def evaluate_epipolar_consistency_and_triangulate(
                 b_map[b_name]["depth_std_side"] = np.exp(0.5 * logvar_side_all[t, endpoints]).tolist()
         frames_out.append({"frame": t, "bones": b_map})
 
-    if bones_meta:
-        reconstruct_frame_so3_rotations_from_keypoints(frames_out, bones_meta)
+    if classified_meta:
+        reconstruct_frame_so3_rotations_from_keypoints(frames_out, classified_meta)
 
     return {
+        "bone_taxonomy_schema": BONE_TAXONOMY_SCHEMA,
         "depth_visibility_enabled": enhanced,
         "gate_passed": gate_passed,
         "mean_epipolar_diff_px": round(mean_v_diff_px, 3),
         "vertical_trajectory_corr": round(v_corr, 4),
         "calibration": calib,
-        "bones_meta": bones_meta,
+        "bones_meta": classified_meta,
         "frames": frames_out,
     }
 
@@ -789,9 +831,11 @@ def reconstruct_frame_so3_rotations_from_keypoints(
 
     if not frames_pred:
         return
+    if all("rot_mat_world" in b_info for b_info in frames_pred[0]["bones"].values()):
+        return
     bone_names = list(frames_pred[0]["bones"].keys())
     topo_names = list(bone_names)
-    meta_dict: dict[str, Any] = {b: dict((bones_meta or {}).get(b, {})) for b in bone_names}
+    meta_dict: dict[str, Any] = classify_rig_bones({b: dict((bones_meta or {}).get(b, {})) for b in bone_names})
     topo_names.sort(key=lambda b: int(meta_dict.get(b, {}).get("depth", 0)))
 
     # Always reconstruct children_map from parent links so legacy metadata without "children" works!
@@ -962,7 +1006,11 @@ def evaluate_stage4_studio_exam(ckpt_path: str, exam_dir: str, out_report: str) 
                     auxiliary_depth_errors.extend((
                         abs(predicted["depth_front_relative"][endpoint_index]-(y-cy)/depth_scale),
                         abs(predicted["depth_side_relative"][endpoint_index]-(cx-x)/depth_scale)))
+    stratified = compute_stratified_motion_metrics(pred_res["frames"], gt_data["frames"], ckpt_meta or {})
+    primary_stats = stratified.get("primary_bones", {})
+
     report = {
+        "bone_taxonomy_schema": BONE_TAXONOMY_SCHEMA,
         "depth_mae_relative": float(np.mean(auxiliary_depth_errors)) if auxiliary_depth_errors else None,
         "depth_visibility_enabled": pred_res.get("depth_visibility_enabled", False),
         "feature_version": FEATURE_VERSION,
@@ -974,6 +1022,10 @@ def evaluate_stage4_studio_exam(ckpt_path: str, exam_dir: str, out_report: str) 
         "full_rot_mpjre_deg": full_mpjre,
         "full_rot_max_bone_deg": full_max,
         "non_leaf_full_rot_mpjre_deg": non_leaf_mpjre,
+        "primary_directional_mpjre_deg": primary_stats.get("direction_mean_deg", dir_mpjre),
+        "primary_directional_max_bone_deg": primary_stats.get("direction_max_bone_deg", dir_max),
+        "primary_non_leaf_full_rot_mpjre_deg": primary_stats.get("nonleaf_rot_mean_deg", non_leaf_mpjre),
+        "metrics_by_kind": stratified.get("by_kind", {}),
         "epipolar_gate_passed": pred_res["gate_passed"],
         "pred_traj_json": str(pred_traj_path),
         "per_bone_mean_deg": per_bone_dir,

@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MonsterEvalBenchmarkManifest",
+  "description": "Manifest locking the Google Drive asset bundle, file SHA-256 digests, camera calibration, and G3 thresholds for a Monster Studio 2K video reconstruction benchmark.",
+  "type": "object",
+  "required": [
+    "schema",
+    "benchmark_id",
+    "monster_id",
+    "resolution_mode",
+    "composite_resolution",
+    "panel_resolution",
+    "fps",
+    "frame_count",
+    "bone_count",
+    "drive_bundle",
+    "files",
+    "thresholds"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "monster-eval-benchmark-manifest-v1"
+    },
+    "benchmark_id": {
+      "type": "string"
+    },
+    "monster_id": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "resolution_mode": {
+      "type": "string",
+      "const": "2k"
+    },
+    "composite_resolution": {
+      "type": "array",
+      "items": { "type": "integer" },
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "panel_resolution": {
+      "type": "array",
+      "items": { "type": "integer" },
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "padded_panel_resolution": {
+      "type": "array",
+      "items": { "type": "integer" },
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "dino_patch_grid": {
+      "type": "array",
+      "items": { "type": "integer" },
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "fps": {
+      "type": "number"
+    },
+    "frame_count": {
+      "type": "integer"
+    },
+    "bone_count": {
+      "type": "integer"
+    },
+    "drive_bundle": {
+      "type": "object",
+      "required": ["archive_name", "archive_sha256", "archive_bytes", "share_url", "file_id"],
+      "properties": {
+        "archive_name": { "type": "string" },
+        "archive_sha256": { "type": "string" },
+        "archive_bytes": { "type": "integer" },
+        "share_url": { "type": "string" },
+        "file_id": { "type": "string" }
+      }
+    },
+    "files": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["rel_path", "sha256", "bytes"],
+        "properties": {
+          "rel_path": { "type": "string" },
+          "sha256": { "type": "string" },
+          "bytes": { "type": "integer" },
+          "uncompressed_sha256": { "type": "string" }
+        }
+      }
+    },
+    "thresholds": {
+      "type": "object",
+      "required": [
+        "epipolar_max_v_diff_px",
+        "epipolar_min_corr",
+        "direction_mean_deg",
+        "direction_max_bone_deg",
+        "nonleaf_so3_mean_deg",
+        "skin_roundtrip_max_units"
+      ],
+      "properties": {
+        "epipolar_max_v_diff_px": { "type": "number" },
+        "epipolar_min_corr": { "type": "number" },
+        "direction_mean_deg": { "type": "number" },
+        "direction_max_bone_deg": { "type": "number" },
+        "nonleaf_so3_mean_deg": { "type": "number" },
+        "skin_roundtrip_max_units": { "type": "number" }
+      }
+    }
+  }
+}

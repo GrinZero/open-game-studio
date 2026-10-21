@@ -251,6 +251,180 @@ class MigrationTests(unittest.TestCase):
         finally:
             sys.path.remove(str(ROOT / "worker"))
 
+    def test_canonical_bone_taxonomy_and_kind_solvers(self):
+        try:
+            import numpy as np
+        except ImportError:
+            return
+        sys.path.insert(0, str(ROOT / "worker"))
+        try:
+            tax = load("monster_bone_taxonomy", "worker/bone_taxonomy.py")
+            # 1. Canonical naming parse & format
+            formatted = tax.format_canonical_bone_name("limb", "L", 1, 3)
+            self.assertEqual(formatted, "LIMB_L_01_03")
+            parsed = tax.parse_canonical_bone_name(formatted)
+            self.assertIsNotNone(parsed)
+            self.assertEqual(parsed["kind"], "limb")
+            self.assertEqual(parsed["side"], "L")
+            self.assertEqual(parsed["group_id"], "01")
+            self.assertEqual(parsed["chain_index"], 3)
+
+            # 2. Hybrid classification on an anonymous rig with torso, arm hub, 3 fingers, rigid & flex
+            def make_bone(parent, head, tail, limits_rad=None, fixed_local=False):
+                h = np.asarray(head, dtype=np.float64)
+                t = np.asarray(tail, dtype=np.float64)
+                L = float(np.linalg.norm(t - h))
+                d0 = (t - h) / max(1e-8, L)
+                up = np.array([0.0, 0.0, 1.0]) if abs(float(d0[2])) < 0.9 else np.array([1.0, 0.0, 0.0])
+                x_ax = np.cross(d0, up)
+                x_ax /= max(1e-8, float(np.linalg.norm(x_ax)))
+                z_ax = np.cross(x_ax, d0)
+                rest_r = np.column_stack([x_ax, d0, z_ax])
+                info = {
+                    "parent": parent,
+                    "rest_head_world": h.tolist(),
+                    "rest_tail_world": t.tolist(),
+                    "rest_length": L,
+                    "rest_rot_mat_world": rest_r.tolist(),
+                }
+                if limits_rad is not None:
+                    info["limits_rad"] = limits_rad
+                if fixed_local:
+                    info["fixed_local"] = True
+                return info
+
+            rig_bones = {
+                "bone_0": make_bone(None, [0.0, 0.0, 0.50], [0.0, 0.0, 0.60]),
+                "bone_1": make_bone("bone_0", [0.0, 0.0, 0.60], [0.0, 0.0, 0.75]),
+                "bone_2": make_bone("bone_1", [0.0, 0.0, 0.75], [0.0, 0.0, 0.95]),
+                "bone_3": make_bone("bone_1", [0.05, 0.0, 0.72], [0.15, 0.0, 0.72]),
+                "bone_4": make_bone("bone_3", [0.15, 0.0, 0.72], [0.30, 0.0, 0.60]),
+                "bone_5": make_bone("bone_4", [0.30, 0.0, 0.60], [0.42, 0.0, 0.50]),
+                "bone_6": make_bone("bone_5", [0.42, 0.0, 0.50], [0.442, 0.0, 0.485]),
+                "bone_7": make_bone("bone_6", [0.442, 0.02, 0.485], [0.465, 0.02, 0.470]),
+                "bone_8": make_bone("bone_7", [0.465, 0.02, 0.470], [0.485, 0.02, 0.455]),
+                "bone_9": make_bone("bone_6", [0.442, 0.00, 0.485], [0.465, 0.00, 0.470]),
+                "bone_10": make_bone("bone_9", [0.465, 0.00, 0.470], [0.485, 0.00, 0.455]),
+                "bone_11": make_bone("bone_6", [0.442, -0.02, 0.485], [0.465, -0.02, 0.470]),
+                "bone_12": make_bone("bone_11", [0.465, -0.02, 0.470], [0.485, -0.02, 0.455]),
+                "Core_Rigid": make_bone(
+                    "bone_0",
+                    [0.0, 0.0, 0.55],
+                    [0.0, 0.0, 0.65],
+                    limits_rad=[[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
+                    fixed_local=True,
+                ),
+                "Flex_Cape_0": make_bone("bone_0", [0.0, 0.05, 0.50], [0.0, 0.05, 0.25]),
+            }
+            classified = tax.classify_rig_bones(rig_bones)
+            self.assertEqual(classified["bone_0"]["kind"], "root")
+            self.assertEqual(classified["bone_1"]["kind"], "spine")
+            self.assertEqual(classified["bone_3"]["kind"], "limb")
+            self.assertEqual(classified["bone_3"]["sub_role"], "clavicle_socket")
+            self.assertEqual(classified["bone_4"]["kind"], "limb")
+            self.assertEqual(classified["bone_4"]["sub_role"], "upper_limb")
+            self.assertEqual(classified["bone_5"]["kind"], "limb")
+            self.assertEqual(classified["bone_5"]["sub_role"], "forearm_hinge")
+            self.assertEqual(classified["bone_6"]["kind"], "limb")
+            self.assertEqual(classified["bone_6"]["sub_role"], "hand_hub")
+            for d_name in ("bone_7", "bone_8", "bone_9", "bone_10", "bone_11", "bone_12"):
+                self.assertEqual(classified[d_name]["kind"], "digit")
+            self.assertEqual(classified["Core_Rigid"]["kind"], "rigid")
+            self.assertEqual(classified["Flex_Cape_0"]["kind"], "flex")
+
+            # 3. Short-gap 2D fill (<= 3 frames filled; > 3 frames NOT filled)
+            vals = np.linspace(0.0, 10.0, 11, dtype=np.float64)[:, None]
+            vals_corrupt = vals.copy()
+            vals_corrupt[2:4, 0] = -999.0
+            vals_corrupt[6:10, 0] = -999.0
+            bad_mask = np.zeros((11,), dtype=bool)
+            bad_mask[2:4] = True
+            bad_mask[6:10] = True
+            filled = tax.short_gap_fill_1d_or_nd(vals_corrupt, bad_mask, max_gap=3)
+            self.assertTrue(np.allclose(filled[2:4, 0], vals[2:4, 0], atol=1e-5))
+            self.assertEqual(float(filled[7, 0]), -999.0)
+
+            # 4. Two-branch Euler clamping without post-clamp minimum_swing override
+            r_big = tax.euler_xyz_to_matrix_numpy(*np.deg2rad([60.0, -50.0, 70.0]))
+            lim = [np.deg2rad([-25.0, 25.0]).tolist(), np.deg2rad([-20.0, 20.0]).tolist(), np.deg2rad([-30.0, 30.0]).tolist()]
+            r_clamped = tax.clamp_local_delta_euler(r_big, lim)
+            e_clamped = tax.matrix_to_euler_xyz_numpy(r_clamped)
+            self.assertLessEqual(abs(float(np.rad2deg(e_clamped[0]))), 25.0 + 1e-4)
+            self.assertLessEqual(abs(float(np.rad2deg(e_clamped[1]))), 20.0 + 1e-4)
+            self.assertLessEqual(abs(float(np.rad2deg(e_clamped[2]))), 30.0 + 1e-4)
+            self.assertAlmostEqual(float(np.linalg.det(r_clamped)), 1.0, places=5)
+
+            # 5. End-to-end reconstruct_frames_with_kind_solvers & compute_stratified_motion_metrics
+            bone_names = sorted(classified.keys())
+            n_bones = len(bone_names)
+            pts_3d = np.zeros((5, n_bones * 2, 3), dtype=np.float64)
+            for bi, b_name in enumerate(bone_names):
+                pts_3d[:, bi * 2, :] = classified[b_name]["rest_head_world"]
+                pts_3d[:, bi * 2 + 1, :] = classified[b_name]["rest_tail_world"]
+            trust = np.full((5, n_bones * 2), 0.9, dtype=np.float64)
+            frames, diag = tax.reconstruct_frames_with_kind_solvers(
+                pts_3d, trust, bone_names, classified, depth_scale=1.0
+            )
+            self.assertEqual(len(frames), 5)
+            self.assertEqual(diag["short_gap_max_frames"], 3)
+            gt_frames = [
+                {
+                    "frame": fi,
+                    "bones": {
+                        b_name: {
+                            "head_3d": classified[b_name]["rest_head_world"],
+                            "tail_3d": classified[b_name]["rest_tail_world"],
+                            "rot_mat_world": frames[fi]["bones"][b_name]["rot_mat_world"],
+                        }
+                        for b_name in bone_names
+                    },
+                }
+                for fi in range(5)
+            ]
+            strat = tax.compute_stratified_motion_metrics(frames, gt_frames, classified)
+            self.assertLess(strat["all_bones"]["direction_mean_deg"], 0.1)
+            self.assertLess(strat["primary_bones"]["full_rot_mean_deg"], 0.1)
+            self.assertIn("limb", strat["by_kind"])
+            self.assertIn("digit", strat["by_kind"])
+
+            # 6. Stratified 5,000-sample 4-regime decoupled pose sampler & coupled-curl audit gate
+            import random
+            self.assertEqual(tax.DEFAULT_SYNTH_SAMPLES, 5000)
+            rng = random.Random(42)
+            samples_500 = []
+            for idx in range(500):
+                eulers, regime = tax.sample_stratified_pose_euler_dict(
+                    classified, rng=rng, sample_idx=idx, enforce_anatomical_floor=True
+                )
+                samples_500.append({"sampling_regime": regime, "joints": eulers})
+            cov_good = tax.audit_pose_dataset_coverage(samples_500, classified, enforce_anatomical_floor=True)
+            self.assertTrue(cov_good["passed"], msg=f"Unexpected failures: {cov_good['failures']}")
+            self.assertEqual(cov_good["regime_counts"]["synergistic"], 200)
+            self.assertEqual(cov_good["regime_counts"]["decoupled"], 150)
+            self.assertEqual(cov_good["regime_counts"]["antiphase_extreme"], 75)
+            self.assertEqual(cov_good["regime_counts"]["workspace_cross_occlusion"], 75)
+            self.assertLess(cov_good["decoupling_metrics"]["digit_pc1_variance_ratio"], 0.45)
+            self.assertLess(cov_good["decoupling_metrics"]["max_inter_finger_abs_corr"], 0.45)
+            self.assertGreaterEqual(cov_good["decoupling_metrics"]["antiphase_sign_flip_ratio"], 0.15)
+
+            # Simulate a defective "fixed-ratio hand curl" dataset where all fingers curl by 1 scalar
+            bad_samples = []
+            for idx in range(200):
+                global_curl = -0.25 + 0.80 * (idx / 199.0)
+                jmap = {}
+                for b_name in bone_names:
+                    if classified[b_name]["kind"] == "digit":
+                        jmap[b_name] = [global_curl, 0.0, 0.0]
+                    else:
+                        jmap[b_name] = samples_500[idx]["joints"][b_name]
+                bad_samples.append({"sampling_regime": "synergistic", "joints": jmap})
+            cov_bad = tax.audit_pose_dataset_coverage(bad_samples, classified, enforce_anatomical_floor=True)
+            self.assertFalse(cov_bad["passed"])
+            self.assertTrue(any("Coupled hand/digit curl" in f for f in cov_bad["failures"]))
+            self.assertTrue(any("Inter-finger fixed-ratio coupling" in f for f in cov_bad["failures"]))
+        finally:
+            sys.path.remove(str(ROOT / "worker"))
+
 
 class FakeTransport:
     protocol_version = 1
@@ -347,6 +521,98 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(receipt["status"], "CONNECTED")
             self.assertNotIn("token", receipt)
             self.assertEqual(json.loads(saved_path.read_text())["username"], "monster")
+
+    def test_eval_suite_manifest_and_synthetic_pipeline(self):
+        pkg_script = (ROOT / "scripts/package-release.py").read_text()
+        self.assertNotIn('"evals"', pkg_script)
+
+        manifest_path = ROOT / "evals/benchmarks/fantasy_creature_2k_v1/manifest.json"
+        golden_path = ROOT / "evals/benchmarks/fantasy_creature_2k_v1/golden_frames.json"
+        baseline_path = ROOT / "evals/benchmarks/fantasy_creature_2k_v1/baseline_latest.json"
+        self.assertTrue(manifest_path.is_file())
+        self.assertTrue(golden_path.is_file())
+        self.assertTrue(baseline_path.is_file())
+
+        manifest = json.loads(manifest_path.read_text())
+        self.assertEqual(manifest["resolution_mode"], "2k")
+        self.assertEqual(manifest["composite_resolution"], [2560, 1440])
+        self.assertEqual(manifest["panel_resolution"], [1280, 1440])
+        self.assertEqual(manifest["bone_count"], 77)
+
+        baseline = json.loads(baseline_path.read_text())
+        self.assertEqual(baseline["solver_name"], "taxonomy_kind_v2")
+        self.assertTrue(baseline["golden_frames"]["all_passed"])
+
+        try:
+            import numpy as np
+        except ImportError:
+            return
+
+        from evals.metrics.evaluator import diagnose_single_frame, evaluate_full_pipeline
+        from evals.reporters.markdown_reporter import render_eval_summary_markdown
+        from evals.solvers.latest_solver import run_latest_solver
+
+        studio_meta = {
+            "bbox_min": [-0.3, -0.2, 0.0],
+            "bbox_max": [0.3, 0.2, 1.0],
+            "calibration": {
+                "center": [0.0, 0.0, 0.5],
+                "panel_width": 1280,
+                "panel_height": 1440,
+                "composite_width": 2560,
+                "composite_height": 1440,
+                "ortho_scale": 1.2,
+                "depth_scale": 0.8,
+            },
+            "bones": {
+                "ROOT_C_00_00": {
+                    "parent": None,
+                    "rest_head_world": [0.0, 0.0, 0.50],
+                    "rest_tail_world": [0.0, 0.0, 0.60],
+                    "rest_length": 0.10,
+                    "rest_rot_mat_world": [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]],
+                },
+                "RIGID_C_01_01": {
+                    "parent": "ROOT_C_00_00",
+                    "rest_head_world": [0.0, 0.0, 0.50],
+                    "rest_tail_world": [0.0, 0.0, 0.58],
+                    "rest_length": 0.08,
+                    "fixed_local": True,
+                    "rest_rot_mat_world": [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]],
+                },
+            },
+        }
+        T, K = 6, 4
+        obs = {
+            "uv_front_all": np.full((T, K, 2), [640.0, 720.0], dtype=np.float32),
+            "uv_side_all": np.full((T, K, 2), [640.0, 720.0], dtype=np.float32),
+            "conf_front_all": np.full((T, K), 0.95, dtype=np.float32),
+            "conf_side_all": np.full((T, K), 0.95, dtype=np.float32),
+            "depth_front_all": np.zeros((T, K), dtype=np.float32),
+            "depth_side_all": np.zeros((T, K), dtype=np.float32),
+            "visibility_front_all": np.ones((T, K), dtype=np.float32),
+            "visibility_side_all": np.ones((T, K), dtype=np.float32),
+            "logvar_front_all": np.full((T, K), -4.0, dtype=np.float32),
+            "logvar_side_all": np.full((T, K), -4.0, dtype=np.float32),
+        }
+        # Set tail v slightly higher (smaller pixel y)
+        obs["uv_front_all"][:, 1::2, 1] = 600.0
+        obs["uv_side_all"][:, 1::2, 1] = 600.0
+
+        solver_res = run_latest_solver(obs, studio_meta)
+        gt = {"frames": solver_res.stage4_frames}
+        golden = {
+            "probes": [
+                {"frame": 0, "name": "f0", "description": "start", "max_root_rot_deg": 5.0, "max_primary_dir_deg": 5.0}
+            ]
+        }
+        report = evaluate_full_pipeline("synth_2k", "fast", solver_res, gt, golden)
+        self.assertTrue(report["golden_frames"]["all_passed"])
+        self.assertAlmostEqual(report["stratified_kinematics"]["primary_bones"]["direction_mean_deg"], 0.0, places=2)
+        diag = diagnose_single_frame(solver_res, gt, frame_idx=0)
+        self.assertEqual(diag["frame"], 0)
+        md = render_eval_summary_markdown(report)
+        self.assertIn("Monster Studio Eval Report", md)
 
 
 if __name__ == "__main__":
