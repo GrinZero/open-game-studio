@@ -1,0 +1,4 @@
+interface:
+  display_name: "同坐标逐帧叠图评分"
+  short_description: "Same-frame overlays and paired animation scores"
+  default_prompt: "Use $frame-overlay-review to compare reference and repaired animation frames in the same coordinates and report both views."

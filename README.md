@@ -133,7 +133,7 @@ Real screenshots from an isolated local demo, using the repository’s original 
 
 ## Tools and documentation
 
-**26 domain MCP tools + 1 app-only bridge · 11 workflow skills.** HTTP and embedded MCP Apps share the same project core and asset history.
+**26 domain MCP tools + 1 app-only bridge · 12 workflow skills.** HTTP and embedded MCP Apps share the same project core and asset history.
 
 | Start here | Reference |
 | --- | --- |

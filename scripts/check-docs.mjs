@@ -77,7 +77,7 @@ assert.equal(
   26,
   "Domain tool count changed; update README facts and tool index",
 );
-assert.equal(skillCount, 11, "Skill count changed; update README facts");
+assert.equal(skillCount, 12, "Skill count changed; update README facts");
 const contract = read("docs/TOOL_CONTRACT.md");
 for (const name of [...names, "studio_ui_request"])
   assert.ok(contract.includes(`\`${name}\``), `Tool index omits ${name}`);
@@ -94,7 +94,7 @@ for (const locale of locales) {
     `${locale}: show usage and monster before setup`,
   );
   assert.match(text, /26/);
-  assert.match(text, /11/);
+  assert.match(text, /12/);
   for (const other of locales)
     assert.ok(
       targets(text).includes(other),

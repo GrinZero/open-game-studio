@@ -797,7 +797,7 @@ def build_bounded_local_euler_rotation(
         )
         rz_c = float(np.clip(rz_raw, float(rz_lims[0]), float(rz_lims[1])))
         R_cand = euler_xyz_to_matrix_numpy(rx_c, ry, rz_c)
-        align = float(np.dot(R_cand[:, 1], d_unit))
+        align = float(np.dot(R_cand[:, 1], d_unit)) - 1e-4 * (rx_c ** 2)
         if align > best_align:
             best_align = align
             best_R = R_cand
@@ -938,18 +938,15 @@ def select_root_kabsch_anchors(
     whose 3D positions are rigidly determined by the root bone's 6-DoF pose:
       - `(root, 0)` (head) and `(root, 1)` (tail)
       - `(child, 0)` for all direct children of `root` (their heads have fixed rest offsets in root space)
-      - `(child, 1)` for any direct central rigid core child (`Core_Rigid` or `RIGID_C_*`) with `fixed_local=True`.
+      - `(child, 1)` for all direct rigid support children (`fixed_local=True` or `kind == "rigid"`),
+        providing full 3D lateral + sagittal lever arms to prevent ill-conditioned Kabsch yaw twists.
     """
     anchors: list[tuple[str, int]] = [(root_name, 0), (root_name, 1)]
     for c in children_map.get(root_name, []):
         anchors.append((c, 0))
     for c in children_map.get(root_name, []):
         c_info = bones_meta.get(c, {})
-        if c_info.get("fixed_local") and (
-            c == "Core_Rigid"
-            or c_info.get("legacy_name") == "Core_Rigid"
-            or (c_info.get("kind") == "rigid" and c_info.get("side") == "C")
-        ):
+        if c_info.get("fixed_local") or c_info.get("kind") == "rigid":
             anchors.append((c, 1))
     return anchors
 
@@ -992,18 +989,21 @@ def _child_twist_cost(
     frame_bones: dict[str, Any],
     bones_meta: dict[str, dict[str, Any]],
     rest_R: dict[str, np.ndarray],
+    obs_lookup: dict[str, Any] | None = None,
 ) -> float:
     """Evaluates multi-child disconnected lever-arm + child hinge/shaft limit cost for candidate `R_cand`."""
     info = bones_meta.get(b_name, {})
     rest_h_b = np.array(info.get("rest_head_world", h_b), dtype=np.float64)
     rest_t_b = np.array(info.get("rest_tail_world", h_b), dtype=np.float64)
+    raw_src = obs_lookup if obs_lookup is not None else frame_bones
+    h_b_obs = np.array(raw_src.get(b_name, {}).get("head_3d", h_b), dtype=np.float64)
     deg = math.radians
     default_lims = [[-deg(35), deg(45)], [-deg(5), deg(5)], [-deg(18), deg(18)]]
     cost = 0.0
 
     for c in valid_children:
         c_info = bones_meta.get(c, {})
-        c_data = frame_bones[c]
+        c_data = raw_src.get(c, frame_bones[c])
         h_c = np.array(c_data["head_3d"], dtype=np.float64)
         t_c = np.array(c_data["tail_3d"], dtype=np.float64)
 
@@ -1013,7 +1013,7 @@ def _child_twist_cost(
             if gap_rest > 0.008:
                 r_rest = rest_h_c - rest_h_b
                 r_curr = (R_cand @ rest_R[b_name].T) @ r_rest
-                r_targ = h_c - h_b
+                r_targ = h_c - h_b_obs
                 p_c = r_curr - np.dot(r_curr, v_parent) * v_parent
                 p_t = r_targ - np.dot(r_targ, v_parent) * v_parent
                 nc, nt = float(np.linalg.norm(p_c)), float(np.linalg.norm(p_t))
@@ -1098,6 +1098,7 @@ def solve_bone_rotation_by_kind(
     curr_ry_map: dict[str, float],
     prev_ry_map: dict[str, float],
     raw_obs_bones: dict[str, dict[str, Any]] | None = None,
+    lims_override: list[list[float]] | None = None,
 ) -> tuple[np.ndarray, float]:
     """Layer 3 Dispatcher: Solves bone `b_name`'s 3x3 world rotation matrix `R_final` and axial
     twist `ry_best` according to its classified anatomical `kind` and `sub_role`.
@@ -1122,7 +1123,7 @@ def solve_bone_rotation_by_kind(
 
     deg = math.radians
     default_lims = [[-deg(35), deg(45)], [-deg(5), deg(5)], [-deg(18), deg(18)]]
-    lims = info.get("limits_rad", default_lims)
+    lims = lims_override if lims_override is not None else info.get("limits_rad", default_lims)
     rx_lims = (float(lims[0][0]), float(lims[0][1]))
     ry_lo, ry_hi = float(lims[1][0]), float(lims[1][1])
     rz_lims = (float(lims[2][0]), float(lims[2][1]))
@@ -1150,17 +1151,29 @@ def solve_bone_rotation_by_kind(
         )
         return R_init @ delta_damped, 0.0
 
-    # 3. Limb Solver: Gimbal-Free Swing-Twist + Child-Tail Palm Fan (`hand_hub`) + Child-Head Elbow-Wrist Pivot (`forearm_hinge`)
+    # 3. Limb Solver: Gimbal-Free Swing-Twist + Palm Centroid Swing (`hand_hub`) + Child-Pivot Swing-Twist (`forearm_hinge`)
     if kind == "limb":
         h_b_obs = np.array(obs_lookup.get(b_name, b_data)["head_3d"], dtype=np.float64)
         t_b_obs = np.array(obs_lookup.get(b_name, b_data)["tail_3d"], dtype=np.float64)
         obs_dir = t_b_obs - h_b_obs
+        norm_obs_dir = float(np.linalg.norm(obs_dir))
         rest_h_b = np.array(info.get("rest_head_world", h_b_obs), dtype=np.float64)
+        rest_t_b = np.array(info.get("rest_tail_world", t_b_obs), dtype=np.float64)
+        rest_len_b = max(1e-5, float(np.linalg.norm(rest_t_b - rest_h_b)))
 
         if sub_role == "hand_hub" or len(valid_children) >= 3:
-            # Fuse hand tail direction with child proximal finger tails (2x longer lever arm than palm alone)
-            conf_b = float(obs_lookup.get(b_name, b_data).get("tail_conf", obs_lookup.get(b_name, b_data).get("confidence", 0.5)))
-            v_sum = (obs_dir / max(1e-8, float(np.linalg.norm(obs_dir)))) * conf_b
+            R_sw_self = minimum_swing_matrix_numpy(np.array([0.0, 1.0, 0.0], dtype=np.float64), d_loc)
+            conf_b = float(
+                obs_lookup.get(b_name, b_data).get("tail_conf", obs_lookup.get(b_name, b_data).get("confidence", 0.5))
+            )
+            # If the short hand_hub bone is observed at exact rest length with high confidence (Oracle/clean),
+            # its direct swing has <0.01 deg error; otherwise fuse with the single rest-to-observed palm centroid
+            # vector and damp local wrist deflection to prevent 90-degree wrist snaps from finger keypoint scatter.
+            if abs(norm_obs_dir - rest_len_b) < 0.04 * rest_len_b and conf_b >= 0.98:
+                return R_init @ R_sw_self, 0.0
+
+            v_palm_rest = (rest_t_b - rest_h_b) / rest_len_b * conf_b
+            v_palm_obs = (obs_dir / max(1e-8, norm_obs_dir)) * conf_b
             for fc in valid_children:
                 fc_info = bones_meta.get(fc, {})
                 if "rest_tail_world" not in fc_info:
@@ -1168,23 +1181,27 @@ def solve_bone_rotation_by_kind(
                 rest_t_fc = np.array(fc_info["rest_tail_world"], dtype=np.float64)
                 v_fc_rest = rest_t_fc - rest_h_b
                 n_fc_rest = float(np.linalg.norm(v_fc_rest))
-                if n_fc_rest < 1e-5:
-                    continue
-                u_fc_loc = rest_R[b_name].T @ (v_fc_rest / n_fc_rest)
-                S_loc = minimum_swing_matrix_numpy(u_fc_loc, np.array([0.0, 1.0, 0.0], dtype=np.float64))
                 t_fc_obs = np.array(obs_lookup[fc]["tail_3d"], dtype=np.float64)
                 v_fc_obs = t_fc_obs - h_b_obs
                 n_fc_obs = float(np.linalg.norm(v_fc_obs))
-                if n_fc_obs < 1e-5:
+                if n_fc_rest < 1e-5 or n_fc_obs < 1e-5:
                     continue
-                d_fc_loc = S_loc @ (R_init.T @ (v_fc_obs / n_fc_obs))
-                conf_fc = float(obs_lookup[fc].get("tail_conf", obs_lookup[fc].get("confidence", 0.5)))
-                v_sum += (R_init @ d_fc_loc) * conf_fc * 0.5
-            n_sum = float(np.linalg.norm(v_sum))
-            if n_sum > 1e-8:
-                d_loc = R_init.T @ (v_sum / n_sum)
-            R_sw = minimum_swing_matrix_numpy(np.array([0.0, 1.0, 0.0], dtype=np.float64), d_loc)
-            return R_init @ R_sw, 0.0
+                conf_fc = float(obs_lookup[fc].get("tail_conf", obs_lookup[fc].get("confidence", 0.5))) * 0.45
+                v_palm_rest += (v_fc_rest / n_fc_rest) * conf_fc
+                v_palm_obs += (v_fc_obs / n_fc_obs) * conf_fc
+
+            n_pr = float(np.linalg.norm(v_palm_rest))
+            n_po = float(np.linalg.norm(v_palm_obs))
+            if n_pr > 1e-6 and n_po > 1e-6:
+                u_pr_loc = rest_R[b_name].T @ (v_palm_rest / n_pr)
+                u_po_loc = R_init.T @ (v_palm_obs / n_po)
+                R_sw_palm = minimum_swing_matrix_numpy(u_pr_loc, u_po_loc)
+                R_sw_comb = blend_rotation_matrices_slerp(R_sw_self, R_sw_palm, 0.45, 30.0)
+            else:
+                R_sw_comb = R_sw_self
+
+            R_sw_damped = blend_rotation_matrices_slerp(np.eye(3, dtype=np.float64), R_sw_comb, 0.68, 25.0)
+            return R_init @ R_sw_damped, 0.0
 
         if sub_role == "forearm_hinge" and len(valid_children) == 1:
             ha = valid_children[0]
@@ -1194,17 +1211,39 @@ def solve_bone_rotation_by_kind(
                 v_c_rest = rest_h_ha - rest_h_b
                 n_c_rest = float(np.linalg.norm(v_c_rest))
                 if n_c_rest > 1e-5:
+                    y_ax = np.array([0.0, 1.0, 0.0], dtype=np.float64)
                     u_c_rest_loc = rest_R[b_name].T @ (v_c_rest / n_c_rest)
-                    S_c_to_t_loc = minimum_swing_matrix_numpy(u_c_rest_loc, np.array([0.0, 1.0, 0.0], dtype=np.float64))
-                    u_t_obs = obs_dir / max(1e-8, float(np.linalg.norm(obs_dir)))
+                    S_c_to_t_loc = minimum_swing_matrix_numpy(u_c_rest_loc, y_ax)
+                    u_t_obs = obs_dir / max(1e-8, norm_obs_dir)
                     v_c_obs = np.array(obs_lookup[ha]["head_3d"], dtype=np.float64) - h_b_obs
-                    u_c_obs = v_c_obs / max(1e-8, float(np.linalg.norm(v_c_obs)))
+                    n_c_obs = float(np.linalg.norm(v_c_obs))
+                    u_c_obs = v_c_obs / max(1e-8, n_c_obs)
                     d_t_loc = R_init.T @ u_t_obs
-                    d_c_mapped_loc = S_c_to_t_loc @ (R_init.T @ u_c_obs)
-                    d_blend = 0.45 * d_t_loc + 0.55 * d_c_mapped_loc
-                    d_loc = d_blend / max(1e-8, float(np.linalg.norm(d_blend)))
-                    R_sw = minimum_swing_matrix_numpy(np.array([0.0, 1.0, 0.0], dtype=np.float64), d_loc)
                     u_c_obs_loc = R_init.T @ u_c_obs
+                    d_c_mapped_loc = S_c_to_t_loc @ u_c_obs_loc
+
+                    # Chord-Ratio Gated Swing-Twist in [0,1,0] frame (zero spherical holonomy twist):
+                    # Only treat the separation chord as clean/Oracle when BOTH bone tail and child head
+                    # preserve their rest lengths (<8% length error) AND their angular chord matches rest pose.
+                    chord_rest = float(np.linalg.norm(y_ax - u_c_rest_loc))
+                    chord_obs = float(np.linalg.norm(d_t_loc - u_c_obs_loc))
+                    rho_chord = chord_obs / max(1e-4, chord_rest)
+                    len_t_ok = abs(norm_obs_dir - rest_len_b) < 0.08 * rest_len_b
+                    len_c_ok = abs(n_c_obs - n_c_rest) < 0.08 * n_c_rest
+                    w_clean = (
+                        min(1.0, max(0.0, (rho_chord - 0.65) / 0.30) ** 2)
+                        if (chord_rest > 0.10 and 0.65 < rho_chord < 1.30 and len_t_ok and len_c_ok)
+                        else 0.0
+                    )
+                    if abs(rho_chord - 1.0) < 0.05 and len_t_ok and len_c_ok:
+                        w_clean = 1.0
+
+                    # If forearm tail is foreshortened relative to child wrist pivot, favor child wrist pivot
+                    rel_c = float(np.clip(0.62 + 0.30 * ((n_c_obs / n_c_rest) - (norm_obs_dir / rest_len_b)), 0.50, 0.88))
+                    w_c = (1.0 - w_clean) * rel_c
+                    d_blend = (1.0 - w_c) * d_t_loc + w_c * d_c_mapped_loc
+                    d_loc = d_blend / max(1e-8, float(np.linalg.norm(d_blend)))
+                    R_sw = minimum_swing_matrix_numpy(y_ax, d_loc)
                     target_in_rest = R_sw.T @ u_c_obs_loc
                     px0, pz0 = float(u_c_rest_loc[0]), float(u_c_rest_loc[2])
                     px1, pz1 = float(target_in_rest[0]), float(target_in_rest[2])
@@ -1213,8 +1252,10 @@ def solve_bone_rotation_by_kind(
                     tau = 0.0
                     if n0 > 0.15 and n1 > 0.10:
                         tau_raw = math.atan2(px1 * pz0 - pz1 * px0, px1 * px0 + pz1 * pz0)
-                        w_tau = min(0.65, ((n1 / n0) ** 2) * 0.55)
-                        tau = float(np.clip(w_tau * tau_raw, -math.radians(45.0), math.radians(45.0)))
+                        w_tau_noisy = min(0.55, ((n1 / n0) ** 2) * 0.45)
+                        w_tau = w_clean * 1.0 + (1.0 - w_clean) * w_tau_noisy
+                        max_tau = math.radians(65.0) if w_clean > 0.5 else math.radians(42.0)
+                        tau = float(np.clip(w_tau * tau_raw, -max_tau, max_tau))
                     return R_init @ build_swing_twist_local_rotation(d_loc, tau), tau
 
         if sub_role != "upper_limb":
@@ -1234,7 +1275,7 @@ def solve_bone_rotation_by_kind(
         ry_f = float(ry_cand)
         R_cand = R_init @ build_bounded_local_euler_rotation(d_loc, ry_f, rx_lims, rz_lims)
         cost = 1.25 * ((ry_f - ry_prior) ** 2) + _child_twist_cost(
-            b_name, R_cand, v, h_b, valid_children, frame_bones, bones_meta, rest_R
+            b_name, R_cand, v, h_b, valid_children, frame_bones, bones_meta, rest_R, obs_lookup=obs_lookup
         )
         if cost < best_cost:
             best_cost = cost
@@ -1288,6 +1329,33 @@ def reconstruct_frames_with_kind_solvers(
     ref_pts = np.array([rest_H[n] if e == 0 else rest_T[n] for n, e in anchors], dtype=np.float64)
     anchor_ids = [2 * index[n] + e for n, e in anchors]
 
+    deg = math.radians
+    # Sanitize corrupted empirical Euler wrap-around bounds on short hand/foot hub bones
+    effective_base_limits: dict[str, list[list[float]]] = {}
+    for n in names:
+        info = classified_bones[n]
+        raw_lims = copy.deepcopy(info["limits_rad"])
+        sub = str(info.get("sub_role", ""))
+        if sub == "hand_hub":
+            max_abs = max(abs(float(pair[0])) for pair in raw_lims)
+            max_abs = max(max_abs, max(abs(float(pair[1])) for pair in raw_lims))
+            if max_abs > deg(45.0):
+                raw_lims = [[-deg(32.0), deg(32.0)], [-deg(12.0), deg(12.0)], [-deg(28.0), deg(28.0)]]
+        elif sub == "forearm_hinge":
+            max_span = max(float(pair[1]) - float(pair[0]) for pair in raw_lims)
+            if max_span > deg(130.0):
+                raw_lims = [[-math.pi, math.pi], [-math.pi, math.pi], [-math.pi, math.pi]]
+        effective_base_limits[n] = raw_lims
+
+    axial_nodes = [
+        n
+        for n in order
+        if n == root or (classified_bones[n].get("kind") in ("spine", "head") and classified_bones[n].get("side") == "C")
+    ]
+    top_axial = axial_nodes[-1] if len(axial_nodes) >= 2 else None
+    dz_axial_rest = float(rest_T[top_axial][2] - rest_H[root][2]) if top_axial is not None else 0.0
+    frame_macro_collapse = np.zeros(T, dtype=np.float64)
+
     frames_out: list[dict[str, Any]] = []
     previous_delta: dict[str, np.ndarray] = {}
     prev_ry: dict[str, float] = {}
@@ -1309,14 +1377,41 @@ def reconstruct_frames_with_kind_solvers(
     }
 
     for f in range(T):
-        observed = pts_3d[f].astype(np.float64)
+        observed = pts_3d[f].astype(np.float64).copy()
+
+        # Detect macro-axial vertical foreshortening (e.g., prone collapse / deep bow)
+        macro_collapse = 0.0
+        u_macro: np.ndarray | None = None
+        if top_axial is not None and dz_axial_rest > 0.08:
+            v_macro_obs = observed[2 * index[top_axial] + 1] - observed[2 * index[root]]
+            dz_obs = float(v_macro_obs[2])
+            if dz_obs < 0.78 * dz_axial_rest and float(np.linalg.norm(v_macro_obs)) > 0.15 * dz_axial_rest:
+                macro_collapse = float(np.clip((0.78 - dz_obs / dz_axial_rest) / 0.22, 0.0, 1.0))
+                vx_m, vy_m = float(v_macro_obs[0]), float(v_macro_obs[1])
+                target_len_m = 0.92 * dz_axial_rest
+                if vx_m * vx_m + dz_obs * dz_obs < target_len_m * target_len_m and float(np.linalg.norm(v_macro_obs)) < target_len_m:
+                    vy_taylor = math.sqrt(max(0.0, target_len_m * target_len_m - vx_m * vx_m - dz_obs * dz_obs))
+                    sy_m = -1.0 if vy_m <= 0.02 * dz_axial_rest else 1.0
+                    vy_m = (1.0 - 0.80 * macro_collapse) * vy_m + (0.80 * macro_collapse) * (sy_m * vy_taylor)
+                v_m_comp = np.array([vx_m, vy_m, dz_obs], dtype=np.float64)
+                u_macro = v_m_comp / max(1e-8, float(np.linalg.norm(v_m_comp)))
+        frame_macro_collapse[f] = macro_collapse
+
         fit_R, _ = fit_root_rigid_irls_kabsch(
             ref_pts,
             observed[anchor_ids],
             trust[f, anchor_ids] ** 2,
             depth_scale=depth_scale,
         )
-        root_lims = classified_bones[root]["limits_rad"]
+        root_lims = copy.deepcopy(effective_base_limits[root])
+        if macro_collapse > 0.0:
+            pitch_exp = macro_collapse * deg(30.0)
+            root_lims[0] = [min(float(root_lims[0][0]), -pitch_exp), max(float(root_lims[0][1]), pitch_exp)]
+            if u_macro is not None and top_axial is not None:
+                v_ax_rest = rest_T[top_axial] - rest_H[root]
+                u_ax_rest = v_ax_rest / max(1e-8, float(np.linalg.norm(v_ax_rest)))
+                R_mac_sw = minimum_swing_matrix_numpy(u_ax_rest, u_macro)
+                fit_R = blend_rotation_matrices_slerp(fit_R, R_mac_sw @ fit_R, 0.55 * macro_collapse, 28.0)
         root_delta = clamp_local_delta_euler(rest_R[root].T @ fit_R @ rest_R[root], root_lims)
         if root in previous_delta:
             root_delta = clamp_local_delta_euler(
@@ -1354,7 +1449,10 @@ def reconstruct_frames_with_kind_solvers(
             p = info.get("parent")
             kind = str(info.get("kind", "limb"))
             sub_role = str(info.get("sub_role", ""))
-            lims = info["limits_rad"]
+            lims = copy.deepcopy(effective_base_limits[n])
+            if macro_collapse > 0.0 and kind in ("spine", "head") and info.get("side") == "C":
+                pitch_exp = macro_collapse * deg(35.0)
+                lims[0] = [min(float(lims[0][0]), -pitch_exp), max(float(lims[0][1]), pitch_exp)]
 
             if p and p in posed_R:
                 init_R = posed_R[p] @ (rest_R[p].T @ rest_R[n])
@@ -1373,6 +1471,105 @@ def reconstruct_frames_with_kind_solvers(
                 ry = 0.0
             else:
                 obs_dir = observed[2 * index[n] + 1] - observed[2 * index[n]]
+                rest_len = float(info.get("rest_length", np.linalg.norm(rest_T[n] - rest_H[n])))
+
+                # Macro-axial foreshortening completion with progressive flexion arc for midline spine/head segments:
+                # In a deep prone/bow collapse, the chest/spine arch forms the apex while the neck/head bows
+                # past the chord angle (~85-95 deg world pitch).
+                if macro_collapse > 0.0 and u_macro is not None and kind in ("spine", "head") and info.get("side") == "C":
+                    s_ax = (
+                        float(axial_nodes.index(n)) / float(max(1, len(axial_nodes) - 1))
+                        if n in axial_nodes
+                        else 0.5
+                    )
+                    theta_mac = math.atan2(-float(u_macro[1]), max(1e-6, float(u_macro[2])))
+                    theta_arc = min(math.radians(96.0), theta_mac * (0.72 + 1.08 * s_ax))
+                    u_arc = np.array(
+                        [u_macro[0], -math.sin(theta_arc), math.cos(theta_arc)],
+                        dtype=np.float64,
+                    )
+                    u_arc /= max(1e-8, float(np.linalg.norm(u_arc)))
+                    w_mac = min(0.92, 0.85 * macro_collapse)
+                    obs_dir = (1.0 - w_mac) * obs_dir + w_mac * (u_arc * rest_len)
+
+                # Taylor orthographic foreshortening + bilateral/gravity completion for occluded lateral limb segments
+                if kind == "limb" and info.get("side") in ("L", "R"):
+                    if macro_collapse > 0.30 and sub_role in ("upper_limb", "ball_socket"):
+                        opp_side = "R" if info.get("side") == "L" else "L"
+                        twin_up = [
+                            tn
+                            for tn in names
+                            if classified_bones[tn].get("kind") == "limb"
+                            and classified_bones[tn].get("sub_role") == sub_role
+                            and classified_bones[tn].get("side") == opp_side
+                            and classified_bones[tn].get("group_id") == info.get("group_id")
+                        ]
+                        if twin_up:
+                            tn = twin_up[0]
+                            v_tw = observed[2 * index[tn] + 1] - observed[2 * index[tn]]
+                            v_tw_mir = np.array([-v_tw[0], v_tw[1], v_tw[2]], dtype=np.float64)
+                            w_up_sym = 0.45 * macro_collapse
+                            obs_dir = (1.0 - w_up_sym) * obs_dir + w_up_sym * v_tw_mir
+
+                    if sub_role == "forearm_hinge" and len(children_map.get(n, [])) == 1:
+                        ha = children_map[n][0]
+                        if ha in raw_obs_bones:
+                            h_n_obs = np.asarray(raw_obs_bones[n]["head_3d"], dtype=np.float64)
+                            h_ha_obs = np.asarray(raw_obs_bones[ha]["head_3d"], dtype=np.float64)
+                            vc = h_ha_obs - h_n_obs
+                            lc_rest = float(np.linalg.norm(rest_H[ha] - rest_H[n]))
+                            nc_obs = float(np.linalg.norm(vc))
+                            if macro_collapse > 0.30 and lc_rest > 0.03:
+                                # During deep prone collapse, regularize occluded/crossed forearms with bilateral symmetry + gravity hang
+                                opp_side = "R" if info.get("side") == "L" else "L"
+                                twin_Candidates = [
+                                    tn
+                                    for tn in names
+                                    if classified_bones[tn].get("kind") == "limb"
+                                    and classified_bones[tn].get("sub_role") == "forearm_hinge"
+                                    and classified_bones[tn].get("side") == opp_side
+                                    and classified_bones[tn].get("group_id") == info.get("group_id")
+                                    and len(children_map.get(tn, [])) == 1
+                                ]
+                                vc_grav = np.array(
+                                    [
+                                        (0.025 if info.get("side") == "L" else -0.025) * lc_rest,
+                                        -0.18 * lc_rest,
+                                        -0.96 * lc_rest,
+                                    ],
+                                    dtype=np.float64,
+                                )
+                                if twin_Candidates:
+                                    tn = twin_Candidates[0]
+                                    tha = children_map[tn][0]
+                                    vc_twin = observed[2 * index[tha]] - observed[2 * index[tn]]
+                                    vc_mir = np.array([-vc_twin[0], vc_twin[1], vc_twin[2]], dtype=np.float64)
+                                    vc_avg = 0.5 * (vc + vc_mir)
+                                else:
+                                    vc_avg = vc
+                                w_grav = 0.55 * macro_collapse
+                                vc_new = (1.0 - w_grav) * vc_avg + w_grav * vc_grav
+                                raw_obs_bones[ha]["head_3d"] = (h_n_obs + vc_new).tolist()
+                                raw_obs_bones[n]["tail_3d"] = (h_n_obs + vc_new).tolist()
+                                obs_dir = vc_new
+                            elif lc_rest > 0.03 and nc_obs < 0.78 * lc_rest:
+                                l_eff = 0.85 * lc_rest
+                                dxz2 = float(vc[0] * vc[0] + vc[2] * vc[2])
+                                if dxz2 < l_eff * l_eff:
+                                    dy_tay = math.sqrt(max(0.0, l_eff * l_eff - dxz2))
+                                    u_c0_world = init_R @ (rest_R[n].T @ ((rest_H[ha] - rest_H[n]) / lc_rest))
+                                    sy = (
+                                        math.copysign(1.0, float(vc[1]))
+                                        if abs(float(vc[1])) > 0.06 * lc_rest
+                                        else (-1.0 if float(u_c0_world[1]) <= 0.08 else 1.0)
+                                    )
+                                    w_fore = min(0.80, max(0.0, (0.78 - nc_obs / lc_rest) / 0.25))
+                                    vc_new = np.array(
+                                        [vc[0], (1.0 - w_fore) * vc[1] + w_fore * sy * dy_tay, vc[2]],
+                                        dtype=np.float64,
+                                    )
+                                    raw_obs_bones[ha]["head_3d"] = (h_n_obs + vc_new).tolist()
+
                 fk_targets[n] = {
                     "head_3d": head.tolist(),
                     "tail_3d": (head + obs_dir).tolist(),
@@ -1389,6 +1586,7 @@ def reconstruct_frames_with_kind_solvers(
                     curr_ry_map=curr_ry,
                     prev_ry_map=prev_ry,
                     raw_obs_bones=raw_obs_bones,
+                    lims_override=lims,
                 )
                 delta = clamp_local_delta_euler(init_R.T @ R_solved, lims)
                 if n in previous_delta:
@@ -1482,11 +1680,19 @@ def reconstruct_frames_with_kind_solvers(
             posed_R = {}
             heads = {}
             bmap_f = frames_out[f]["bones"]
+            m_col = float(frame_macro_collapse[f])
             for n in order:
                 info = classified_bones[n]
                 p = info.get("parent")
                 k = str(info.get("kind", "limb"))
-                lims = info["limits_rad"]
+                lims = copy.deepcopy(effective_base_limits[n])
+                if m_col > 0.0:
+                    if n == root:
+                        pitch_exp = m_col * deg(28.0)
+                        lims[0] = [min(float(lims[0][0]), -pitch_exp), max(float(lims[0][1]), pitch_exp)]
+                    elif k in ("spine", "head") and info.get("side") == "C":
+                        pitch_exp = m_col * deg(35.0)
+                        lims[0] = [min(float(lims[0][0]), -pitch_exp), max(float(lims[0][1]), pitch_exp)]
                 if p and p in posed_R:
                     init_R = posed_R[p] @ (rest_R[p].T @ rest_R[n])
                     head = heads[p] + posed_R[p] @ (rest_R[p].T @ (rest_H[n] - rest_H[p]))

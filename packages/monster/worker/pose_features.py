@@ -170,17 +170,51 @@ def fuse_depth_visibility(uv_front, uv_side, conf_front, conf_side, calib,
     W, H, S = float(calib["panel_width"]), float(calib["panel_height"]), float(calib["ortho_scale"])
     vf, vs = np.clip(visibility_front, 0, 1), np.clip(visibility_side, 0, 1)
     cf, cs = np.clip(conf_front, 0.001, 1), np.clip(conf_side, 0.001, 1)
-    wf, ws = cf**2 * (0.05 + 0.95 * vf), cs**2 * (0.05 + 0.95 * vs)
-    # Depth is capped below a clear direct observation; learned variance tempers its weight.
-    wdf = 0.35 * cf**2 / (1 + np.exp(np.clip(logvar_front, -6, 3)) / 0.05**2)
-    wds = 0.35 * cs**2 / (1 + np.exp(np.clip(logvar_side, -6, 3)) / 0.05**2)
     x_direct = cx + (uv_front[..., 0] / W - 0.5) * S * W / H
     y_direct = cy + (uv_side[..., 0] / W - 0.5) * S * W / H
     x_depth = cx - depth_side * scale
     y_depth = cy + depth_front * scale
     zf, zs = cz + (0.5 - uv_front[..., 1] / H) * S, cz + (0.5 - uv_side[..., 1] / H) * S
-    points = np.stack(((wf*x_direct + wds*x_depth)/(wf+wds),
-                       (ws*y_direct + wdf*y_depth)/(ws+wdf),
-                       (wf*zf + ws*zs)/(wf+ws)), axis=-1).astype(np.float32)
+
+    # Asymmetric epipolar V-consistency & cross-view depth consistency gating:
+    # When |zf - zs| is large (one view is occluded or jumped to a wrong landmark),
+    # compare each view's visibility * confidence and cross-check its direct coordinate
+    # against the other view's depth prior so the occluded view is downweighted rather than averaged 50/50.
+    s_safe = max(S, 1e-4)
+    dz = np.abs(zf - zs)
+    epi_ok = np.exp(-0.5 * (dz / (0.065 * s_safe)) ** 2)
+    qf = cf * (0.10 + 0.90 * vf)
+    qs = cs * (0.10 + 0.90 * vs)
+    q_sum = np.maximum(1e-6, qf + qs)
+    f_ratio = qf / q_sum
+    s_ratio = qs / q_sum
+
+    wf = (cf ** 2) * (0.05 + 0.95 * vf) * (epi_ok + (1.0 - epi_ok) * (2.0 * f_ratio) ** 2)
+    ws = (cs ** 2) * (0.05 + 0.95 * vs) * (epi_ok + (1.0 - epi_ok) * (2.0 * s_ratio) ** 2)
+    # Depth is capped below a clear direct observation; boost cross-view depth when the orthogonal view is heavily occluded.
+    f_occ_boost = 1.0 + 1.8 * np.maximum(0.0, vf - vs - 0.35)
+    s_occ_boost = 1.0 + 1.8 * np.maximum(0.0, vs - vf - 0.35)
+    wdf = (
+        0.35
+        * (cf ** 2)
+        * (0.25 + 0.75 * vf)
+        * f_occ_boost
+        / (1.0 + np.exp(np.clip(logvar_front, -6, 3)) / (0.05 ** 2))
+    )
+    wds = (
+        0.35
+        * (cs ** 2)
+        * (0.25 + 0.75 * vs)
+        * s_occ_boost
+        / (1.0 + np.exp(np.clip(logvar_side, -6, 3)) / (0.05 ** 2))
+    )
+    points = np.stack(
+        (
+            (wf * x_direct + wds * x_depth) / np.maximum(1e-12, wf + wds),
+            (ws * y_direct + wdf * y_depth) / np.maximum(1e-12, ws + wdf),
+            (wf * zf + ws * zs) / np.maximum(1e-12, wf + ws),
+        ),
+        axis=-1,
+    ).astype(np.float32)
     reliability = np.maximum(cf * (0.2 + 0.8 * vf), cs * (0.2 + 0.8 * vs))
     return points, reliability
