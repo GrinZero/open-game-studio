@@ -6,6 +6,14 @@
 
 Requirements: macOS, Node.js 24+ with npm, and a Codex CLI with `codex plugin` support. Embedded UI additionally requires an MCP Apps-capable host.
 
+One-line install (clones or updates the source under `~/.local/share/codex-integrations/game-studio-local/source` and runs the local installer):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/GrinZero/codex-game-studio/main/scripts/bootstrap.sh | bash
+```
+
+Or clone the repository manually:
+
 ```sh
 git clone https://github.com/GrinZero/codex-game-studio.git
 cd codex-game-studio

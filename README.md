@@ -46,7 +46,11 @@ Want a starting point for file organization? Read the optional [project file gui
 
 You need **macOS**, **Node.js 24+** (with npm), and a Codex CLI that provides `codex plugin`. The embedded workbench also needs a Codex host with MCP Apps support.
 
-Clone the repository and run the local installer:
+Run the one-line installer (or clone the repository manually):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/GrinZero/codex-game-studio/main/scripts/bootstrap.sh | bash
+```
 
 ```sh
 git clone https://github.com/GrinZero/codex-game-studio.git

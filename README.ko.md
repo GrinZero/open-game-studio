@@ -46,7 +46,11 @@ Open Game Studio 워크벤치를 열어 주세요.
 
 **macOS**, **Node.js 24+**(npm 포함), `codex plugin` 명령을 제공하는 Codex CLI가 필요합니다. 내장 워크벤치에는 MCP Apps를 지원하는 Codex 호스트도 필요합니다.
 
-저장소를 복제한 뒤 로컬 설치 프로그램을 실행하세요:
+한 줄 명령으로 설치하거나(또는 저장소를 직접 복제하여 실행):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/GrinZero/codex-game-studio/main/scripts/bootstrap.sh | bash
+```
 
 ```sh
 git clone https://github.com/GrinZero/codex-game-studio.git

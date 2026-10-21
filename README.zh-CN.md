@@ -46,7 +46,11 @@
 
 需要 **macOS**、**Node.js 24+**（含 npm），以及提供 `codex plugin` 命令的 Codex CLI。内嵌工作台还需要宿主支持 MCP Apps。
 
-克隆仓库后运行本地安装器：
+执行一行命令安装（或手动克隆仓库运行安装器）：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/GrinZero/codex-game-studio/main/scripts/bootstrap.sh | bash
+```
 
 ```sh
 git clone https://github.com/GrinZero/codex-game-studio.git
