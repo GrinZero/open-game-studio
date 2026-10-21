@@ -101,7 +101,7 @@ npm run install:local
 
 ## ツールとドキュメント
 
-**26 個のドメイン MCP ツール + UI 専用ブリッジ 1 個 · 10 個のワークフロースキル。** HTTP 版と MCP Apps 埋め込み版は同じプロジェクトコアとアセット履歴を共有します。
+**26 個のドメイン MCP ツール + UI 専用ブリッジ 1 個 · 11 個のワークフロースキル。** HTTP 版と MCP Apps 埋め込み版は同じプロジェクトコアとアセット履歴を共有します。
 
 | 入口 | 内容 |
 | --- | --- |
@@ -110,6 +110,7 @@ npm run install:local
 | [ツール契約](docs/TOOL_CONTRACT.md) | 全ツールの索引、入力 schema、状態のルール。 |
 | [検証記録](docs/VERIFICATION.md) | 実行済みの検証と、実環境での確認が必要な項目。 |
 | [実装状況](docs/IMPLEMENTATION.md) | 構成、未完了の段階、今後の作業。 |
+| [Monster モジュール](packages/monster/README.md) | [Open in Colab](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb) 起動、Worker ソース、自動検出ローカルクライアント。 |
 
 <a id="limits"></a>
 

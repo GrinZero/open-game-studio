@@ -13,6 +13,7 @@ import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { runtimeCopyFilter } from "./runtime-copy.mjs";
 
 // The plugin cache contains only skills and configuration. Its runtime lives
 // outside the cache so Codex can replace the cache without losing dependencies.
@@ -57,10 +58,12 @@ mkdirSync(base, { recursive: true });
 const stagedRuntime = mkdtempSync(path.join(base, "runtime-next-"));
 for (const entry of [
   "src",
+  "packages",
   "assets",
   "dist",
   "node_modules",
   "package.json",
+  "package-lock.json",
   ...readdirSync(repo).filter((file) => /^README(?:\.[\w-]+)?\.md$/.test(file)),
   "CONTRIBUTING.md",
   "LICENSE",
@@ -75,6 +78,7 @@ for (const entry of [
   cpSync(path.join(repo, entry), destination, {
     recursive: true,
     verbatimSymlinks: true,
+    filter: (source) => runtimeCopyFilter(entry, source, repo),
   });
 }
 // Finish the new copy before stopping this installer's service. Replacing the

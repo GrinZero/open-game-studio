@@ -10,6 +10,8 @@ import {
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import os from "node:os";
+import { runtimeCopyFilter } from "./runtime-copy.mjs";
+import { exportPackageSkills } from "./export-package-skills.mjs";
 const repo = process.cwd();
 const base = path.join(
   os.homedir(),
@@ -27,10 +29,12 @@ if (
   throw new Error("Runtime configuration differs; inspect before updating.");
 if (!existsSync(path.join(repo, "dist/mcp/index.html")))
   throw new Error("Build first.");
+exportPackageSkills(repo);
 const backup = path.join(base, "backups", `resources-${Date.now()}`);
 mkdirSync(backup, { recursive: true });
 for (const entry of [
   "src",
+  "packages",
   "dist",
   "package.json",
   "package-lock.json",
@@ -49,6 +53,7 @@ for (const entry of [
     });
   cpSync(path.join(repo, entry), path.join(runtime, entry), {
     recursive: true,
+    filter: (source) => runtimeCopyFilter(entry, source, repo),
   });
 }
 const sync = spawnSync(

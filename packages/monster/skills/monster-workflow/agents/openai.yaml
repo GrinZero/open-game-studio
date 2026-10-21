@@ -1,0 +1,4 @@
+interface:
+  display_name: "Monster 角色动画工作流"
+  short_description: "从静态怪物到骨骼动画，执行三道用户审计与云端生命周期管理"
+  default_prompt: "使用 $monster-workflow，检查当前模型与已有审阅记录，从适用阶段继续 Monster 制作流程。"

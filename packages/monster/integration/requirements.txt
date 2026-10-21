@@ -1,0 +1,2 @@
+# CPU-only client; do not install the GPU worker's dependencies locally.
+gradio-client>=1.4.0,<2

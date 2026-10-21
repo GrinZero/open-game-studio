@@ -21,6 +21,8 @@ npm run check
 npm test
 npm run build
 npm run check:distribution
+npm run monster:check
+npm run monster:package
 ```
 
 Documentation checks validate local links and assets, locale parity, installation examples, and tool/skill counts against the implementation. They compare requirements rather than exact translated headings. The documentation workflow runs this check on pushes and pull requests.
@@ -54,19 +56,24 @@ Verify served HTTP and MCP artifacts, then refresh the user's actual workbench a
 
 ## Repository map
 
-| Path | Responsibility |
-| --- | --- |
-| `src/server/` | Shared core, HTTP, stdio MCP and production execution |
-| `src/shared/` | Domain types, input rules and build marker |
-| `src/ui/` | React, React Flow and lazy-loaded GLB preview |
-| `skills/` | Setup and production workflow skills |
-| `samples/` | Original illustrations, brief and viewer sample |
-| `templates/` | Character workflow template |
-| `tests/` | Domain, media and real stdio MCP checks |
-| `scripts/` | Installer, build, runtime sync, demo and browser checks |
-| `docs/` | Setup, workbench guide, contracts and verification |
+| Path                | Responsibility                                                                          |
+| ------------------- | --------------------------------------------------------------------------------------- |
+| `src/server/`       | Shared core, HTTP, stdio MCP and production execution                                   |
+| `src/shared/`       | Domain types, input rules and build marker                                              |
+| `src/ui/`           | React, React Flow and lazy-loaded GLB preview                                           |
+| `packages/monster/` | Monster Python Worker, client integration, protocol, Colab entry and deployment tooling |
+| `skills/`           | Setup and production workflow skills                                                    |
+| `samples/`          | Original illustrations, brief and viewer sample                                         |
+| `templates/`        | Character workflow template                                                             |
+| `tests/`            | Domain, media and real stdio MCP checks                                                 |
+| `scripts/`          | Installer, build, runtime sync, demo and browser checks                                 |
+| `docs/`             | Setup, workbench guide, contracts and verification                                      |
 
 The registry stores project locations. Each project's `.game-studio/studio.db` is authoritative; asset revisions live in `.game-studio/assets/<assetId>/<revisionId>/`, production outputs in `.game-studio/generated/`, and exports in `.game-studio/exports/`. JSON files are snapshots or exports, not a second source of truth.
+
+## Monster module
+
+The repository is an npm workspace monorepo. The current workbench retains its root `src/` layout; the mixed Python/Node Monster module lives under `packages/monster/`. Keep its Worker, contracts, client and Colab deployment entry together. See the [Monster guide](packages/monster/README.md) for CPU-only checks, deployment bundles, local client calls and GPU verification boundaries. Both local installation and runtime synchronization copy `packages/`; neither deploys to an already running Colab instance.
 
 ## Bundled project file guide
 

@@ -1,9 +1,15 @@
 # Dependencies and generated build output
 node_modules/
 dist/
+# Generated from packages/monster/skills/monster-workflow during build/install.
+skills/monster-workflow/
 coverage/
 *.tsbuildinfo
 .cache/
+__pycache__/
+*.py[cod]
+.venv/
+endpoint_registry.json
 
 # Local projects, registry databases, and runtime state
 var/

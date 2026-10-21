@@ -101,7 +101,7 @@ npm run install:local
 
 ## 工具與文件
 
-**26 個領域 MCP 工具 + 1 個介面專用橋接工具 · 10 個工作流程技能。** HTTP 與 MCP 內嵌工作台共用專案核心及資產歷史。
+**26 個領域 MCP 工具 + 1 個介面專用橋接工具 · 11 個工作流程技能。** HTTP 與 MCP 內嵌工作台共用專案核心及資產歷史。
 
 | 入口 | 內容 |
 | --- | --- |
@@ -110,6 +110,7 @@ npm run install:local
 | [工具契約](docs/TOOL_CONTRACT.md) | 完整工具索引、輸入 schema 與狀態規則。 |
 | [驗證紀錄](docs/VERIFICATION.md) | 已執行的檢查與仍需實測的功能。 |
 | [實作狀態](docs/IMPLEMENTATION.md) | 架構、未完成階段與後續計畫。 |
+| [Monster 模組](packages/monster/README.md) | [Open in Colab](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb) 一鍵啟動、Worker 原始碼與自動配對本機用戶端。 |
 
 <a id="limits"></a>
 

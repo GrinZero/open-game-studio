@@ -101,7 +101,7 @@ Real screenshots from an isolated local demo, using the repository’s original 
 
 ## Tools and documentation
 
-**26 domain MCP tools + 1 app-only bridge · 10 workflow skills.** HTTP and embedded MCP Apps share the same project core and asset history.
+**26 domain MCP tools + 1 app-only bridge · 11 workflow skills.** HTTP and embedded MCP Apps share the same project core and asset history.
 
 | Start here | Reference |
 | --- | --- |
@@ -110,6 +110,7 @@ Real screenshots from an isolated local demo, using the repository’s original 
 | [Tool contract](docs/TOOL_CONTRACT.md) | Complete tool index, input schemas and state rules. |
 | [Verification record](docs/VERIFICATION.md) | What was tested and what still needs real-world validation. |
 | [Implementation status](docs/IMPLEMENTATION.md) | Architecture, incomplete milestones and planned work. |
+| [Monster module](packages/monster/README.md) | [Open in Colab](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb), Worker source and auto-discovered local client. |
 
 <a id="limits"></a>
 

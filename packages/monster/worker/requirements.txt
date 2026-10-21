@@ -1,0 +1,12 @@
+# Colab system interpreter. SkinTokens/bpy uses its own venv (bootstrap-skintokens.sh).
+# ComfyUI and VideoHelperSuite requirements are installed by setup-comfy.py.
+gradio==5.49.1
+gradio-client>=1.4.0,<2
+huggingface_hub
+hf_xet
+psutil
+requests
+Pillow
+numpy
+imageio-ffmpeg
+websocket-client
