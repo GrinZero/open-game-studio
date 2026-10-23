@@ -54,7 +54,7 @@ from pose_features import (  # noqa: E402
     studio_view_order,
 )
 from sop_preflight import (  # noqa: E402
-    _find_bpy_python,
+    _worker_command,
     resolve_scratch_dirs,
 )
 
@@ -396,26 +396,24 @@ def build_g2_review_pack(
     }
 
     blend_path = work_dir / "g1_candidates" / f"candidate_{selected_cid}_full.blend"
-    bpy_py = _find_bpy_python()
-    bpy_worker = WORKER_DIR / "studio_bpy_worker.py"
-    if bpy_py and bpy_worker.is_file() and blend_path.is_file():
-        subprocess.run(
-            [
-                bpy_py,
-                str(bpy_worker),
-                "--mode",
-                "render_g2_50",
-                "--blend_path",
-                str(blend_path),
-                "--meta_path",
-                str(meta_path),
-                "--out_dir",
-                str(g2_dir),
-                "--num_samples",
-                str(num_poses),
-            ],
-            check=False,
-        )
+    worker_cmd = _worker_command(
+        [
+            "--mode",
+            "render_g2_50",
+            "--blend_path",
+            str(blend_path),
+            "--meta_path",
+            str(meta_path),
+            "--out_dir",
+            str(g2_dir),
+            "--num_samples",
+            str(num_poses),
+            "--seed",
+            str(seed),
+        ]
+    )
+    if worker_cmd and blend_path.is_file():
+        subprocess.run(worker_cmd, check=False)
 
     rng = random.Random(int(seed))
     pose_records: list[dict[str, Any]] = []

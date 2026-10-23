@@ -29,6 +29,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -268,20 +269,42 @@ def _find_bpy_python() -> str | None:
     return None
 
 
-def _render_fallback_preflight_check_image(out_png: Path, summary: dict[str, Any]) -> None:
-    """Generates a deterministic Front/Side check sheet if headless `bpy` is not available locally."""
-    try:
-        from PIL import Image, ImageDraw
-    except ImportError:
-        out_png.write_bytes(b"\x89PNG\r\n\x1a\n")
-        return
-    img = Image.new("RGB", (1344, 768), (20, 24, 33))
-    draw = ImageDraw.Draw(img)
-    draw.line([(672, 0), (672, 768)], fill=(65, 78, 102), width=2)
-    draw.text((24, 20), f"PREFLIGHT FRONT VIEW | {Path(summary['file']).name}", fill=(235, 242, 255))
-    draw.text((696, 20), f"PREFLIGHT SIDE VIEW | Meshes: {summary['num_meshes']}", fill=(235, 242, 255))
-    out_png.parent.mkdir(parents=True, exist_ok=True)
-    img.save(out_png)
+def _worker_command(arguments: list[str]) -> list[str] | None:
+    """Use bpy Python on Colab, or an installed Blender executable on a desktop."""
+    worker = WORKER_DIR / "studio_bpy_worker.py"
+    python = _find_bpy_python()
+    if python:
+        return [python, str(worker), *arguments]
+    candidates = [os.environ.get("MONSTER_BLENDER"), shutil.which("blender")]
+    candidates.extend(str(p) for p in sorted(Path("/Applications").glob("Blender*.app/Contents/MacOS/Blender"), reverse=True))
+    for executable in candidates:
+        if executable and Path(executable).is_file():
+            expression = (
+                "import sys,runpy; "
+                f"sys.path.insert(0, {str(WORKER_DIR)!r}); "
+                f"sys.argv={[str(worker), *arguments]!r}; "
+                f"runpy.run_path({str(worker)!r}, run_name='__main__')"
+            )
+            return [executable, "--background", "--factory-startup", "--python-exit-code", "1", "--python-expr", expression]
+    return None
+
+
+def _write_report(path: Path, report: dict[str, Any]) -> None:
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def _validate_preflight_evidence(report: dict[str, Any]) -> None:
+    if report.get("schema_version") != 2 or report.get("backend") != "blender":
+        raise RuntimeError("预检报告缺少真实 Blender 证据；必须重新运行 preflight")
+    evidence = report.get("evidence", {})
+    required = {"source", "rig_input", "front_side", "decorations", "backup"}
+    if not required.issubset(evidence):
+        raise RuntimeError("预检产物不完整；必须重新运行 preflight")
+    for name, item in evidence.items():
+        if not item.get("sha256") or sha256_file(item.get("path")) != item["sha256"]:
+            raise RuntimeError(f"预检证据已改变或缺失: {name}；必须重新运行 preflight")
 
 
 def run_preflight(
@@ -292,131 +315,99 @@ def run_preflight(
     yaw_deg: float = 0.0,
     canonicalize_existing_rig: bool = True,
 ) -> dict[str, Any]:
-    """Executes SOP §2.1 model preflight in `scratch/work/<monster_id>/` and `scratch/checks/<monster_id>/`."""
+    """Produce real Blender evidence; never promote an unmeasured check to passed."""
     proj = Path(project_root or os.environ.get("MONSTER_PROJECT_ROOT") or Path.cwd()).resolve()
-    redline = check_workspace_redlines(proj, monster_id)
-    if not redline["passed"]:
-        raise RuntimeError(
-            "[SOP §2.1 目录与版本控制红线拦截] " + "；".join(redline["violations"])
-        )
-
-    src_path = Path(input_glb).expanduser().resolve()
-    if not src_path.is_file():
-        raise FileNotFoundError(f"Input model not found: {src_path}")
-
     dirs = resolve_scratch_dirs(proj, monster_id)
-    work_dir = dirs["work_dir"]
-    checks_dir = dirs["checks_dir"]
-
-    rig_input_glb = work_dir / "rig_input_variant.glb"
-    decor_manifest_path = work_dir / "decoration_manifest.json"
-    check_img_path = checks_dir / "preflight_front_side.png"
+    work_dir, checks_dir = dirs["work_dir"], dirs["checks_dir"]
+    src_path = Path(input_glb).expanduser().resolve()
     report_path = checks_dir / "preflight_report.json"
-    rig_meta_out = work_dir / "studio_rig_meta.json"
-
-    bpy_py = _find_bpy_python()
-    bpy_worker = WORKER_DIR / "studio_bpy_worker.py"
-    bpy_report: dict[str, Any] = {}
-
-    if bpy_py and bpy_worker.is_file():
-        cmd = [
-            bpy_py,
-            str(bpy_worker),
-            "--mode",
-            "preflight_check",
-            "--input_glb",
-            str(src_path),
-            "--out_glb",
-            str(rig_input_glb),
-            "--out_dir",
-            str(work_dir),
-            "--out_report",
-            str(report_path),
-            "--yaw_deg",
-            str(yaw_deg),
-        ]
-        subprocess.run(cmd, check=True)
-        if report_path.is_file():
-            bpy_report = json.loads(report_path.read_text(encoding="utf-8"))
-        if (work_dir / "preflight_front_side.png").is_file() and not check_img_path.is_file():
-            shutil.copy2(work_dir / "preflight_front_side.png", check_img_path)
-    else:
-        # Pure-Python inspection + safe copy to scratch/work/rig_input_variant.glb
-        shutil.copy2(src_path, rig_input_glb)
-
-    glb_info = inspect_glb_binary_preflight(rig_input_glb)
-
-    # If the model already contains a skeleton and canonicalize_existing_rig is enabled in pure-Python fallback,
-    # synthesize the canonicalized studio_rig_meta.json and verify zero anonymous bones.
-    if glb_info["has_existing_rig"] and not bpy_report.get("bone_naming_validation"):
-        if canonicalize_existing_rig and not glb_info["bone_naming_validation"]["valid"]:
-            # Remap to canonical names in studio_rig_meta.json
-            remapped: dict[str, Any] = {}
-            rename_map: dict[str, str] = {}
-            for old_name, binfo in glb_info["classified_bones_preview"].items():
-                c_name = binfo["canonical_name"]
-                rename_map[old_name] = c_name
-                remapped[c_name] = {**binfo, "legacy_name": old_name}
-            val_after = validate_canonical_rig_bone_names(remapped)
-            meta_payload = {
-                "schema_version": 2,
-                "canonical_rename_map": rename_map,
-                "bone_naming_validation": val_after,
-                "bones": remapped,
-            }
-            rig_meta_out.write_text(json.dumps(meta_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-            glb_info["bone_naming_validation"] = val_after
-            glb_info["canonical_rename_map"] = rename_map
-
-        if not glb_info["bone_naming_validation"]["valid"]:
-            raise RuntimeError(
-                f"[SOP §2.1 强制骨骼命名门禁阻断] 输入模型含未规范命名的骨骼: "
-                f"{glb_info['bone_naming_validation']['non_canonical_bones']}。"
-                "严禁携带 bone_0..N 等匿名骨跳过预检进入后续流程！"
-            )
-
-    if not decor_manifest_path.is_file():
-        decor_candidates = [m for m in glb_info["mesh_nodes"] if m.get("decoration_candidate")]
-        decor_manifest = {
-            "monster_id": monster_id,
-            "source_model": str(src_path),
-            "detached_decorations": [
-                {
-                    "name": d["name"],
-                    "binding_mode": "rigid" if any(k in d["name"].lower() for k in ("armor", "horn", "weapon", "pendant")) else "flex",
-                }
-                for d in decor_candidates
-            ],
-        }
-        decor_manifest_path.write_text(json.dumps(decor_manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-
-    if not check_img_path.is_file():
-        _render_fallback_preflight_check_image(check_img_path, glb_info)
-
-    full_report = {
-        "monster_id": monster_id,
-        "checked_at": now_taipei_iso(),
-        "workspace_redlines": redline,
-        "source_model": str(src_path),
-        "source_sha256": sha256_file(src_path),
-        "rig_input_variant_glb": str(rig_input_glb),
-        "rig_input_sha256": sha256_file(rig_input_glb),
-        "decoration_manifest": str(decor_manifest_path),
-        "front_side_check_image": str(check_img_path),
-        "checks": {
-            "origin_and_transforms_ok": len(glb_info["unapplied_transform_nodes"]) == 0 or bool(bpy_report.get("transforms_applied")),
-            "topology_independence_checked": True,
-            "mesh_quality_checked": True,
-            "front_side_occlusion_checked": True,
-            "side_limb_occlusion_ratio": bpy_report.get("side_limb_occlusion_ratio", 0.12),
-            "bone_naming_validation": bpy_report.get("bone_naming_validation") or glb_info["bone_naming_validation"],
-        },
-        "glb_inspection": glb_info,
-        "bpy_preflight": bpy_report,
-        "passed": True,
+    report: dict[str, Any] = {
+        "schema_version": 2, "monster_id": monster_id, "checked_at": now_taipei_iso(),
+        "source_model": str(src_path), "source_sha256": sha256_file(src_path),
+        "passed": False, "automatic_ready": False, "status": "running", "evidence": {},
     }
-    report_path.write_text(json.dumps(full_report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    return full_report
+    # Invalidate the last success before doing anything that can fail.
+    _write_report(report_path, report)
+    try:
+        redline = check_workspace_redlines(proj, monster_id)
+        report["workspace_redlines"] = redline
+        if not redline["passed"]:
+            raise RuntimeError("[SOP 目录与版本控制红线拦截] " + "；".join(redline["violations"]))
+        if src_path == work_dir / "rig_input_variant.glb":
+            raise ValueError("请使用原始源模型，不能原地覆盖 rig_input_variant.glb")
+        if not src_path.is_file():
+            raise FileNotFoundError(f"Input model not found: {src_path}")
+        report["glb_inspection"] = inspect_glb_binary_preflight(src_path)
+        with tempfile.TemporaryDirectory(prefix=".preflight-", dir=work_dir) as temporary:
+            stage = Path(temporary)
+            args = ["--mode", "preflight_check", "--input_glb", str(src_path),
+                    "--out_dir", str(stage), "--out_glb", str(stage / "rig_input_variant.glb"),
+                    "--out_report", str(stage / "bpy_preflight.json"), "--monster_id", monster_id,
+                    "--yaw_deg", str(yaw_deg), "--canonicalize_existing_rig", str(int(canonicalize_existing_rig))]
+            command = _worker_command(args)
+            if command is None:
+                raise RuntimeError("找不到可用的 bpy/Blender；设置 MONSTER_BPY_PYTHON 或 MONSTER_BLENDER 后重试。未生成有效绑定输入。")
+            subprocess.run(command, check=True)
+            bpy_report = json.loads((stage / "bpy_preflight.json").read_text(encoding="utf-8"))
+            report["prepared_glb_inspection"] = inspect_glb_binary_preflight(stage / "rig_input_variant.glb")
+            image_header = (stage / "preflight_front_side.png").read_bytes()[:24]
+            if (len(image_header) != 24 or image_header[:8] != b"\x89PNG\r\n\x1a\n"
+                    or struct.unpack(">II", image_header[16:24]) != (1344, 768)):
+                raise RuntimeError("Blender 预检未输出有效的 1344×768 正侧视 PNG")
+            artifacts = {
+                "rig_input": ("rig_input_variant.glb", work_dir),
+                "front_side": ("preflight_front_side.png", checks_dir),
+                "decorations": ("decoration_manifest.json", work_dir),
+                "backup": ("decorations_backup.blend", work_dir),
+            }
+            if bpy_report.get("bone_naming_validation", {}).get("total_bones", 0):
+                artifacts["rig_meta"] = ("studio_rig_meta.json", work_dir)
+            for name, (filename, destination) in artifacts.items():
+                artifact = stage / filename
+                if not artifact.is_file() or artifact.stat().st_size < 16:
+                    raise RuntimeError(f"Blender 预检缺少有效产物: {filename}")
+                shutil.copy2(artifact, destination / filename)
+                report["evidence"][name] = {"path": str(destination / filename), "sha256": sha256_file(destination / filename)}
+            if "rig_meta" not in artifacts:
+                (work_dir / "studio_rig_meta.json").unlink(missing_ok=True)
+            report["evidence"]["source"] = {"path": str(src_path), "sha256": report["source_sha256"]}
+            shutil.copy2(stage / "bpy_preflight.json", work_dir / "bpy_preflight.json")
+        report.update({
+            "backend": "blender", "bpy_preflight": bpy_report, "checks": bpy_report["checks"],
+            "rig_input_variant_glb": str(work_dir / "rig_input_variant.glb"),
+            "rig_input_sha256": sha256_file(work_dir / "rig_input_variant.glb"),
+            "decoration_manifest": str(work_dir / "decoration_manifest.json"),
+            "front_side_check_image": str(checks_dir / "preflight_front_side.png"),
+            "automatic_ready": bpy_report["automatic_ready"] is True,
+            "visual_review": {"status": "pending", "required_checks": ["pose_and_orientation", "limb_occlusion", "decorations_and_topology", "intentional_open_surfaces"]},
+            "status": "awaiting_preflight_review" if bpy_report["automatic_ready"] else "needs_repair",
+        })
+        _validate_preflight_evidence(report)
+    except Exception as exc:
+        report.update({"passed": False, "status": "failed", "error": str(exc)})
+        _write_report(report_path, report)
+        raise
+    _write_report(report_path, report)
+    return report
+
+
+def review_preflight(monster_id: str, *, project_root: Path | str, note: str) -> dict[str, Any]:
+    """Record an operator's actual visual inspection of the fingerprinted evidence."""
+    if not note.strip():
+        raise ValueError("必须记录姿态、遮挡、装饰和拓扑的实际检查结论")
+    dirs = resolve_scratch_dirs(project_root, monster_id)
+    report_path = dirs["checks_dir"] / "preflight_report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    _validate_preflight_evidence(report)
+    if report.get("monster_id") != monster_id or report.get("automatic_ready") is not True:
+        raise RuntimeError("自动预检尚未通过，不能用视觉审阅绕过几何错误")
+    report["visual_review"] = {"status": "approved", "reviewed_at": now_taipei_iso(), "note": note.strip(),
+                               "front_side_sha256": report["evidence"]["front_side"]["sha256"]}
+    report["checks"]["front_side_occlusion_checked"] = True
+    report["checks"]["pose_orientation_checked"] = True
+    report.update({"passed": True, "status": "passed"})
+    _write_report(report_path, report)
+    return report
 
 
 def sync_u1_to_drive(
@@ -440,7 +431,14 @@ def sync_u1_to_drive(
         raise RuntimeError("执行 U1 上传前必须先运行 preflight 生成 rig_input_variant.glb 与 preflight_report.json")
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
-    if not report.get("passed"):
+    _validate_preflight_evidence(report)
+    if (report.get("monster_id") != monster_id
+            or report["evidence"]["rig_input"]["path"] != str(rig_input_glb)
+            or not check_workspace_redlines(proj, monster_id)["passed"]):
+        raise RuntimeError("U1 输入或工作区与预检报告不匹配")
+    if not (report.get("passed") is True and report.get("automatic_ready") is True
+            and report.get("visual_review", {}).get("status") == "approved"
+            and report["visual_review"].get("front_side_sha256") == report["evidence"]["front_side"]["sha256"]):
         raise RuntimeError("预检未通过，严禁执行 U1 上传")
 
     u1_dir = drv / "monsters" / monster_id / "u1"
@@ -483,6 +481,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--project-root", default=None)
     parser.add_argument("--drive-root", default=None)
     parser.add_argument("--yaw-deg", type=float, default=0.0)
+    parser.add_argument("--review-visual", action="store_true", help="Record actual visual inspection of the current preflight evidence; do not rerun Blender")
+    parser.add_argument("--review-note", default="", help="Observed pose, occlusion, decoration and topology findings")
     parser.add_argument("--sync-u1", action="store_true", help="Immediately sync U1 package to Google Drive after preflight")
     parser.add_argument("--check-redlines-only", action="store_true", help="Only run workspace & VCS redline checks")
     return parser
@@ -497,6 +497,14 @@ def main(argv: list[str] | None = None) -> int:
         res = check_workspace_redlines(proj, args.monster_id)
         print(json.dumps(res, indent=2, ensure_ascii=False))
         return 0 if res["passed"] else 2
+
+    if args.review_visual:
+        report = review_preflight(args.monster_id, project_root=proj, note=args.review_note)
+        out = {"preflight": report}
+        if args.sync_u1:
+            out["u1_sync"] = sync_u1_to_drive(args.monster_id, project_root=proj, drive_root=args.drive_root)
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        return 0
 
     if not args.input:
         parser.error("--input is required unless --check-redlines-only is specified")
@@ -515,7 +523,7 @@ def main(argv: list[str] | None = None) -> int:
             drive_root=args.drive_root,
         )
     print(json.dumps(out, indent=2, ensure_ascii=False))
-    return 0
+    return 0 if report["passed"] else 2
 
 
 if __name__ == "__main__":

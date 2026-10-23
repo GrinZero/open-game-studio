@@ -46,8 +46,11 @@ from pose_features import (
     studio_view_order,
 )
 from bone_taxonomy import (
+    ARCHETYPE_SPECS,
     BONE_TAXONOMY_SCHEMA,
     DEFAULT_SYNTH_SAMPLES,
+    G1_SYNC_VIEWS,
+    G1_VIEWS,
     audit_pose_dataset_coverage,
     build_bounded_local_euler_rotation,
     canonicalize_rig_bone_names_in_blender,
@@ -59,6 +62,7 @@ from bone_taxonomy import (
     sample_stratified_pose_euler_dict,
     select_pose_sampling_regime,
     solve_bone_rotation_by_kind,
+    synthesize_archetype_pose_eulers,
     validate_canonical_rig_bone_names,
 )
 from pathlib import Path
@@ -868,8 +872,6 @@ def render_split_screen_frame(
       - 3-view mode (`cam_right is not None`): `[ Left (cam_side) | Front (cam_front) | Right (cam_right) ]` (`W * 3`)
     Uses Linux RAM disk (`/dev/shm`) when available to avoid disk/FUSE writes during synthesis.
     """
-    from PIL import Image
-
     scene = bpy.context.scene
     shm_dir = Path("/dev/shm")
     scratch_dir = shm_dir if (shm_dir.is_dir() and os.access(shm_dir, os.W_OK)) else tmp_dir
@@ -885,26 +887,57 @@ def render_split_screen_frame(
     scene.render.filepath = str(s_path)
     bpy.ops.render.render(write_still=True)
 
-    im_f = Image.open(f_path).convert("RGB")
-    im_s = Image.open(s_path).convert("RGB")
+    try:
+        from PIL import Image
 
-    if cam_right is not None:
-        r_path = scratch_dir / f"_tmp_right_{pid}.jpg"
-        scene.camera = cam_right
-        scene.render.filepath = str(r_path)
-        bpy.ops.render.render(write_still=True)
-        im_r = Image.open(r_path).convert("RGB")
-        comp = Image.new("RGB", (im_s.width + im_f.width + im_r.width, im_f.height))
-        comp.paste(im_s, (0, 0))
-        comp.paste(im_f, (im_s.width, 0))
-        comp.paste(im_r, (im_s.width + im_f.width, 0))
+        im_f = Image.open(f_path).convert("RGB")
+        im_s = Image.open(s_path).convert("RGB")
+
+        if cam_right is not None:
+            r_path = scratch_dir / f"_tmp_right_{pid}.jpg"
+            scene.camera = cam_right
+            scene.render.filepath = str(r_path)
+            bpy.ops.render.render(write_still=True)
+            im_r = Image.open(r_path).convert("RGB")
+            comp = Image.new("RGB", (im_s.width + im_f.width + im_r.width, im_f.height))
+            comp.paste(im_s, (0, 0))
+            comp.paste(im_f, (im_s.width, 0))
+            comp.paste(im_r, (im_s.width + im_f.width, 0))
+            comp.save(out_png_path)
+            return
+
+        comp = Image.new("RGB", (im_f.width + im_s.width, im_f.height))
+        comp.paste(im_f, (0, 0))
+        comp.paste(im_s, (im_f.width, 0))
         comp.save(out_png_path)
-        return
+    except ImportError:
+        def _load_rgba_array(img_path: Path) -> tuple[np.ndarray, int, int]:
+            loaded = bpy.data.images.load(str(img_path), check_existing=False)
+            w, h = int(loaded.size[0]), int(loaded.size[1])
+            buf = np.empty(w * h * 4, dtype=np.float32)
+            loaded.pixels.foreach_get(buf)
+            bpy.data.images.remove(loaded)
+            return buf.reshape(h, w, 4), w, h
 
-    comp = Image.new("RGB", (im_f.width + im_s.width, im_f.height))
-    comp.paste(im_f, (0, 0))
-    comp.paste(im_s, (im_f.width, 0))
-    comp.save(out_png_path)
+        arr_f, wf, hf = _load_rgba_array(f_path)
+        arr_s, ws, _ = _load_rgba_array(s_path)
+        if cam_right is not None:
+            r_path = scratch_dir / f"_tmp_right_{pid}.jpg"
+            scene.camera = cam_right
+            scene.render.filepath = str(r_path)
+            bpy.ops.render.render(write_still=True)
+            arr_r, wr, _ = _load_rgba_array(r_path)
+            merged = np.concatenate([arr_s, arr_f, arr_r], axis=1)
+            total_w = ws + wf + wr
+        else:
+            merged = np.concatenate([arr_f, arr_s], axis=1)
+            total_w = wf + ws
+        out_img = bpy.data.images.new("Studio_Split_Frame", width=total_w, height=hf, alpha=True)
+        out_img.pixels.foreach_set(merged.ravel())
+        out_img.filepath_raw = str(out_png_path)
+        out_img.file_format = "PNG" if out_png_path.suffix.lower() == ".png" else "JPEG"
+        out_img.save()
+        bpy.data.images.remove(out_img)
 
 
 # ==============================================================================
@@ -2007,60 +2040,867 @@ def verify_exam_glb_roundtrip(
     return report
 
 
-def sop_preflight_check(input_glb: str, out_dir: str, monster_id: str = "monster") -> dict[str, Any]:
-    """SOP Stage 1: Headless Blender 7-point model preflight and decoration separation check."""
+def _preflight_mesh_metrics(meshes: list[Any]) -> list[dict[str, Any]]:
+    """Measure topology without deleting intentional openings or altering the source."""
+    import bmesh
+
+    results = []
+    for obj in meshes:
+        bm = bmesh.new()
+        try:
+            bm.from_mesh(obj.data)
+            # glTF splits vertices at UV/normal seams; audit coincident positions on a copy.
+            raw_vertices = len(bm.verts)
+            bmesh.ops.remove_doubles(bm, verts=list(bm.verts), dist=1e-7)
+            bm.verts.ensure_lookup_table()
+            for index, vertex in enumerate(bm.verts):
+                vertex.index = index
+            seen, duplicate_faces = set(), 0
+            for face in bm.faces:
+                key = tuple(sorted(v.index for v in face.verts))
+                duplicate_faces += int(key in seen)
+                seen.add(key)
+            components, visited = 0, set()
+            for vertex in bm.verts:
+                if vertex.index in visited:
+                    continue
+                components += 1
+                stack = [vertex]
+                visited.add(vertex.index)
+                while stack:
+                    v = stack.pop()
+                    for edge in v.link_edges:
+                        other = edge.other_vert(v)
+                        if other.index not in visited:
+                            visited.add(other.index)
+                            stack.append(other)
+            results.append({
+                "name": obj.name, "vertices": len(bm.verts), "raw_gltf_vertices": raw_vertices,
+                "topology_position_weld_tolerance": 1e-7, "faces": len(bm.faces),
+                "connected_components": components,
+                "boundary_edges": sum(e.is_boundary for e in bm.edges),
+                "non_manifold_junctions": sum(len(e.link_faces) > 2 for e in bm.edges),
+                "inconsistent_winding_edges": sum(e.is_manifold and not e.is_contiguous for e in bm.edges),
+                "loose_vertices": sum(not v.link_edges for v in bm.verts),
+                "wire_edges": sum(e.is_wire for e in bm.edges),
+                "degenerate_faces": sum(f.calc_area() <= 1e-12 for f in bm.faces),
+                "duplicate_faces": duplicate_faces,
+            })
+        finally:
+            bm.free()
+    return results
+
+
+def _preflight_bounds(meshes: list[Any]) -> tuple[np.ndarray, np.ndarray]:
+    points = np.array([list(obj.matrix_world @ v.co) for obj in meshes for v in obj.data.vertices], dtype=np.float64)
+    if not len(points) or not np.isfinite(points).all():
+        raise ValueError("Preflight requires nonempty, finite mesh geometry")
+    return points.min(axis=0), points.max(axis=0)
+
+
+def _render_preflight_views(bmin: np.ndarray, bmax: np.ndarray, output: Path) -> None:
+    """Render real geometry with Blender only; no Pillow dependency or placeholder images."""
+    scene = bpy.context.scene
+    # Workbench is available in background Blender on CPU-only desktops as well as Colab.
+    scene.render.engine = "BLENDER_WORKBENCH"
+    scene.display.shading.light = "STUDIO"
+    scene.display.shading.color_type = "TEXTURE"
+    scene.display.shading.show_shadows = True
+    scene.display.shading.show_cavity = True
+    scene.display.shading.background_type = "WORLD"
+    world = bpy.data.worlds.new("PreflightWorld")
+    world.color = (0.035, 0.04, 0.055)
+    scene.world = world
+    width, height = 672, 768
+    scene.render.resolution_x, scene.render.resolution_y = width, height
+    scene.render.resolution_percentage = 100
+    scene.render.image_settings.file_format = "PNG"
+    center = (bmin + bmax) * 0.5
+    scale = max(float(bmax[2] - bmin[2]), float(max(bmax[:2] - bmin[:2])) * height / width) * 1.2
+    distance = max(scale * 3.0, 1.0)
+    panels = []
+    for name, offset in [("front", (0.0, -distance, 0.0)), ("side", (distance, 0.0, 0.0))]:
+        data = bpy.data.cameras.new("Preflight_" + name)
+        data.type, data.ortho_scale = "ORTHO", scale
+        data.sensor_fit, data.clip_start, data.clip_end = "VERTICAL", 0.001, distance * 4
+        camera = bpy.data.objects.new(data.name, data)
+        bpy.context.collection.objects.link(camera)
+        camera.location = Vector(center) + Vector(offset)
+        camera.rotation_euler = (Vector(center) - camera.location).to_track_quat("-Z", "Y").to_euler()
+        scene.camera = camera
+        scene.render.filepath = str(output.parent / ("preflight_" + name + ".png"))
+        bpy.ops.render.render(write_still=True)
+        loaded = bpy.data.images.load(scene.render.filepath, check_existing=False)
+        pixels = np.empty(width * height * 4, dtype=np.float32)
+        loaded.pixels.foreach_get(pixels)
+        panels.append(pixels.reshape(height, width, 4))
+        bpy.data.images.remove(loaded)
+    image = bpy.data.images.new("Preflight_Front_Side", width=width * 2, height=height, alpha=True)
+    image.pixels.foreach_set(np.concatenate(panels, axis=1).ravel())
+    image.filepath_raw, image.file_format = str(output), "PNG"
+    image.save()
+    bpy.data.images.remove(image)
+
+
+def _preflight_scene_meshes() -> list[Any]:
+    # glTF imports hidden bone display meshes into the scene. They are not model geometry.
+    shapes = {pb.custom_shape for arm in bpy.context.scene.objects if arm.type == "ARMATURE"
+              for pb in arm.pose.bones if pb.custom_shape is not None}
+    return [obj for obj in bpy.context.scene.objects if obj.type == "MESH"
+            and obj not in shapes and not obj.hide_render]
+
+
+def sop_preflight_check(
+    input_glb: str, out_dir: str, monster_id: str = "monster", *,
+    out_glb: str | None = None, out_report: str | None = None,
+    yaw_deg: float = 0.0, canonicalize_existing_rig: bool = True,
+) -> dict[str, Any]:
+    """Export, reimport, measure and render the actual prepared input before U1."""
     require_bpy()
-    clean_scene()
+    clear_scene()
+    out_p = Path(out_dir)
+    out_p.mkdir(parents=True, exist_ok=True)
+    export_path = Path(out_glb or out_p / "rig_input_variant.glb")
+    report_path = Path(out_report or out_p / "bpy_preflight.json")
     bpy.ops.import_scene.gltf(filepath=str(input_glb))
     bpy.context.view_layer.update()
+    meshes = _preflight_scene_meshes()
+    arms = [o for o in bpy.context.scene.objects if o.type == "ARMATURE"]
+    if not meshes:
+        raise ValueError("No MESH objects found in preflight input")
+    # A complete, packed source backup precedes normalization and any bone renaming.
+    bpy.ops.file.pack_all()
+    bpy.ops.wm.save_as_mainfile(filepath=str(out_p / "decorations_backup.blend"), compress=False)
+    decorations = [o.name for o in meshes if any(k in o.name.lower() for k in ("armor", "cape", "cloak", "pendant", "horn", "ornament", "weapon", "hair", "skirt", "ribbon"))]
+    manifest = {"monster_id": monster_id, "source_model": str(input_glb),
+                "backup": "decorations_backup.blend", "detached_decorations": [],
+                "review_candidates": decorations,
+                "note": "No semantic parts removed automatically; inspect candidates against the complete backup."}
+    (out_p / "decoration_manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    yaw = Matrix.Rotation(math.radians(yaw_deg), 4, "Z")
+    roots = [o for o in bpy.context.scene.objects if o.parent is None]
+    for root in roots:
+        root.matrix_world = yaw @ root.matrix_world
+    bpy.context.view_layer.update()
+    bmin, bmax = _preflight_bounds(meshes)
+    offset = Vector((-float((bmin[0] + bmax[0]) / 2), -float((bmin[1] + bmax[1]) / 2), -float(bmin[2])))
+    for root in roots:
+        root.matrix_world = Matrix.Translation(offset) @ root.matrix_world
+    bpy.context.view_layer.update()
+    if not arms:
+        # Freeze each world matrix before detaching parents; keep all split parts assembled.
+        transforms = [(o, o.matrix_world.copy()) for o in meshes]
+        for obj, world_matrix in transforms:
+            obj.parent = None
+            obj.data = obj.data.copy()
+            obj.data.transform(world_matrix)
+            obj.matrix_world = Matrix.Identity(4)
+            obj.data.update()
+        bpy.context.view_layer.update()
+    rig_meta = {}
+    for arm in arms:
+        _, meta = classify_anonymous_bones_and_assign_limits(meshes[0], arm, prune_digits=False, canonicalize_names=False)
+        if canonicalize_existing_rig:
+            rename = canonicalize_rig_bone_names_in_blender(arm, meshes, meta["bones"])
+            meta["canonical_rename_map"] = rename
+            meta["bones"] = {rename.get(k, k): {**v, "legacy_name": k,
+                "parent": rename.get(v.get("parent"), v.get("parent")),
+                "children": [rename.get(c, c) for c in v.get("children", [])]} for k, v in meta["bones"].items()}
+        rig_meta[arm.name] = meta
+    if arms:
+        (out_p / "studio_rig_meta.json").write_text(json.dumps({"schema_version": 2, "armatures": rig_meta}, indent=2), encoding="utf-8")
+    bmin_before, bmax_before = _preflight_bounds(meshes)
+    export_path.parent.mkdir(parents=True, exist_ok=True)
+    bpy.ops.object.select_all(action="DESELECT")
+    for obj in [*meshes, *arms]:
+        obj.select_set(True)
+        parent = obj.parent
+        while parent is not None:
+            parent.select_set(True)
+            parent = parent.parent
+    bpy.ops.export_scene.gltf(filepath=str(export_path), export_format="GLB", export_animations=True, use_selection=True)
+    # All checks and views below concern the exported input, not just the source scene.
+    clear_scene()
+    bpy.ops.import_scene.gltf(filepath=str(export_path))
+    bpy.context.view_layer.update()
+    meshes = _preflight_scene_meshes()
+    arms = [o for o in bpy.context.scene.objects if o.type == "ARMATURE"]
+    bmin, bmax = _preflight_bounds(meshes)
+    metrics = _preflight_mesh_metrics(meshes)
+    bone_names = [b.name for arm in arms for b in arm.data.bones]
+    validation = validate_canonical_rig_bone_names(bone_names) if arms else {"valid": True, "total_bones": 0, "non_canonical_bones": [], "status": "not_applicable"}
+    geometry_ok = all(m["faces"] > 0 and not any(m[k] for k in ("non_manifold_junctions", "inconsistent_winding_edges", "loose_vertices", "wire_edges", "degenerate_faces", "duplicate_faces")) for m in metrics)
+    tolerance = max(float(max(bmax - bmin)) * 1e-5, 1e-5)
+    roundtrip_ok = bool(np.allclose(bmin, bmin_before, atol=tolerance, rtol=0) and np.allclose(bmax, bmax_before, atol=tolerance, rtol=0))
+    origin_ok = bool(abs(bmin[2]) <= tolerance and np.all(np.abs((bmin[:2] + bmax[:2]) * 0.5) <= tolerance))
+    _render_preflight_views(bmin, bmax, out_p / "preflight_front_side.png")
+    checks = {"origin_and_transforms_ok": origin_ok, "glb_roundtrip_verified": roundtrip_ok,
+              "topology_independence_checked": True, "mesh_quality_checked": True, "mesh_quality_ok": geometry_ok,
+              "front_side_rendered": True, "front_side_occlusion_checked": False,
+              "pose_orientation_checked": False, "side_limb_occlusion_ratio": None,
+              "bone_naming_validation": validation}
+    report = {"schema_version": 2, "monster_id": monster_id, "mesh_count": len(meshes), "armature_count": len(arms),
+              "bone_names": bone_names, "bbox_min": bmin.tolist(), "bbox_max": bmax.tolist(),
+              "mesh_metrics": metrics, "checks": checks, "bone_naming_validation": validation,
+              "automatic_ready": geometry_ok and roundtrip_ok and origin_ok and validation["valid"],
+              "visual_review_required": True, "render_engine": "BLENDER_WORKBENCH",
+              "limitations": ["Boundary edges may be intentional; inspect the rendered mesh and source backup.",
+                              "Pose, anatomical occlusion, welded decorations and internal faces require visual inspection; no limb occlusion ratio was inferred."]}
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    return report
 
-    meshes = [o for o in bpy.data.objects if o.type == "MESH"]
-    arms = [o for o in bpy.data.objects if o.type == "ARMATURE"]
-    anims = [a.name for a in getattr(bpy.data, "actions", [])]
 
-    all_verts = []
-    uv_layers = 0
-    material_count = 0
-    decor_entries = []
-    for m_idx, m in enumerate(meshes):
-        mw = m.matrix_world
-        pts = [[float((mw @ v.co).x), float((mw @ v.co).y), float((mw @ v.co).z)] for v in m.data.vertices]
-        all_verts.extend(pts)
-        uv_layers += len(getattr(m.data, "uv_layers", []))
-        material_count += len(getattr(m.data, "materials", []))
-        if m_idx > 0:
-            decor_entries.append(
+_G1_KIND_RGBA: dict[str, tuple[float, float, float, float]] = {
+    "ROOT": (0.96, 0.62, 0.04, 1.0),
+    "RIGID": (0.66, 0.33, 0.97, 1.0),
+    "SPINE": (0.22, 0.74, 0.97, 1.0),
+    "NECK": (0.22, 0.78, 0.96, 1.0),
+    "HEAD": (0.20, 0.83, 0.60, 1.0),
+    "JAW": (0.98, 0.44, 0.52, 1.0),
+    "LIMB": (0.38, 0.65, 0.98, 1.0),
+    "ARM": (0.98, 0.36, 0.36, 1.0),
+    "LEG": (0.62, 0.45, 1.00, 1.0),
+    "FLEG": (0.98, 0.45, 0.68, 1.0),
+    "HLEG": (0.45, 0.65, 1.00, 1.0),
+    "WING": (0.51, 0.55, 0.97, 1.0),
+    "FLEX": (0.96, 0.45, 0.71, 1.0),
+    "TAIL": (0.18, 0.83, 0.75, 1.0),
+    "DIGIT": (0.98, 0.80, 0.08, 1.0),
+    "TENT": (0.85, 0.40, 0.92, 1.0),
+    "CAPE": (0.95, 0.80, 0.35, 1.0),
+    "HAIR": (0.95, 0.80, 0.35, 1.0),
+    "FIN": (0.35, 0.90, 0.82, 1.0),
+    "EAR": (0.98, 0.70, 0.40, 1.0),
+    "EXT": (0.75, 0.78, 0.84, 1.0),
+}
+
+_G1_CANDIDATE_BADGE_RGB: tuple[tuple[float, float, float], ...] = (
+    (0.24, 0.82, 0.56),
+    (0.32, 0.68, 0.98),
+    (0.98, 0.68, 0.24),
+    (0.86, 0.46, 0.98),
+)
+
+
+def _ensure_armature_modifier(mesh_obj: Any, arm_obj: Any) -> None:
+    """Ensures `mesh_obj` has an active ARMATURE modifier pointing to `arm_obj`."""
+    for mod in mesh_obj.modifiers:
+        if mod.type == "ARMATURE":
+            if mod.object is None:
+                mod.object = arm_obj
+            return
+    mod = mesh_obj.modifiers.new(name="Armature", type="ARMATURE")
+    mod.object = arm_obj
+
+
+def _evaluate_candidate_rig_geometry(
+    mesh_objs: list[Any],
+    arm_obj: Any,
+    source_path: str,
+) -> dict[str, Any]:
+    """Evaluates a candidate rig across all its scene meshes without destroying independent sub-meshes."""
+    bpy.context.view_layer.update()
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    bvhs = [(m, m.matrix_world.inverted(), BVHTree.FromObject(m, depsgraph)) for m in mesh_objs if len(m.data.polygons) > 0]
+    mw_arm = arm_obj.matrix_world
+
+    verts_w = [m.matrix_world @ v.co for m in mesh_objs for v in m.data.vertices]
+    if not verts_w:
+        return {"path": str(source_path), "valid": False, "score": -999.0, "reason": "Empty mesh vertices"}
+    zs = np.array([v.z for v in verts_w], dtype=np.float64)
+    xs = np.array([v.x for v in verts_w], dtype=np.float64)
+    ys = np.array([v.y for v in verts_w], dtype=np.float64)
+    z_min, z_max = float(zs.min()), float(zs.max())
+    height = max(1e-4, z_max - z_min)
+    surface_tol = 0.028 * height
+
+    bones = arm_obj.data.bones
+    if len(bones) < 4:
+        return {"path": str(source_path), "valid": False, "score": -999.0, "reason": "Too few bones (<4)"}
+
+    def _inside_any_mesh(pt_world: Any, tol: float) -> bool:
+        for _, mw_inv, bvh in bvhs:
+            if is_point_inside_or_near_mesh(bvh, mw_inv @ pt_world, tol):
+                return True
+        return False
+
+    total_samples = 0
+    outside_samples = 0
+    protruding_bones: list[str] = []
+    air_bridging_bones: list[str] = []
+
+    for bone in bones:
+        h_w = mw_arm @ bone.head_local
+        t_w = mw_arm @ bone.tail_local
+        b_len = float((t_w - h_w).length)
+        bone_out = 0
+        mid_out = 0
+        for idx_a, alpha in enumerate(np.linspace(0.15, 0.92, 6)):
+            pt_w = h_w.lerp(t_w, float(alpha))
+            total_samples += 1
+            if not _inside_any_mesh(pt_w, surface_tol):
+                outside_samples += 1
+                bone_out += 1
+                if 1 <= idx_a <= 4:
+                    mid_out += 1
+        head_in = _inside_any_mesh(h_w, surface_tol * 1.4)
+        tail_in = _inside_any_mesh(t_w, surface_tol * 1.4)
+        if head_in and tail_in and mid_out >= 3 and b_len > 0.18 * height:
+            air_bridging_bones.append(bone.name)
+        elif bone_out >= 4 or not tail_in:
+            protruding_bones.append(bone.name)
+
+    outside_ratio = outside_samples / max(1, total_samples)
+    y_mid = float(0.5 * (ys.min() + ys.max()))
+    bone_pts = [mw_arm @ b.tail_local for b in bones] + [mw_arm @ b.head_local for b in bones]
+
+    quadrants_covered = 0
+    for x_sign in (-1.0, 1.0):
+        for is_front in (True, False):
+            mask = (xs * x_sign > 0.04 * height) & ((ys < y_mid) if is_front else (ys >= y_mid))
+            if not np.any(mask):
+                quadrants_covered += 1
+                continue
+            q_z_min = float(zs[mask].min())
+            has_limb_bone = any(
+                (p.x * x_sign > 0.02 * height)
+                and ((p.y < y_mid + 0.08 * height) if is_front else (p.y >= y_mid - 0.08 * height))
+                and (p.z <= q_z_min + 0.25 * height)
+                for p in bone_pts
+            )
+            if has_limb_bone:
+                quadrants_covered += 1
+
+    grounded_ok = quadrants_covered >= 3
+    heads = np.array([[p.x, p.y, p.z] for p in [mw_arm @ b.head_local for b in bones]], dtype=np.float64)
+    mirrored = heads.copy()
+    mirrored[:, 0] *= -1.0
+    dists = np.linalg.norm(heads[:, None, :] - mirrored[None, :, :], axis=-1)
+    sym_chamfer = float(np.mean(np.min(dists, axis=1)) / height)
+
+    count_penalty = 0.0
+    if len(bones) < 10:
+        count_penalty = 20.0
+    elif len(bones) > 105:
+        count_penalty = 15.0
+
+    score = (
+        25.0 * quadrants_covered
+        - 120.0 * outside_ratio
+        - 45.0 * sym_chamfer
+        - 8.0 * len(air_bridging_bones)
+        - count_penalty
+    )
+    return {
+        "path": str(source_path),
+        "valid": grounded_ok and outside_ratio < 0.42 and len(bones) >= 6,
+        "score": round(score, 3),
+        "grounded_ok": grounded_ok,
+        "quadrants_covered": f"{quadrants_covered}/4",
+        "outside_ratio": round(outside_ratio, 4),
+        "sym_chamfer": round(sym_chamfer, 4),
+        "num_bones": len(bones),
+        "protruding_bones": protruding_bones,
+        "air_bridging_bones": air_bridging_bones,
+    }
+
+
+def _classify_and_canonicalize_candidate_rig(
+    mesh_objs: list[Any],
+    arm_obj: Any,
+    audit_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Classifies bones across all scene meshes and canonicalizes bone + vertex-group names across every sub-mesh."""
+    bmin, bmax = _preflight_bounds(mesh_objs)
+    _, meta = classify_anonymous_bones_and_assign_limits(
+        mesh_objs[0],
+        arm_obj,
+        prune_digits=False,
+        canonicalize_names=False,
+    )
+    meta["bbox_min"] = [round(float(x), 5) for x in bmin]
+    meta["bbox_max"] = [round(float(x), 5) for x in bmax]
+
+    bone_meta = classify_rig_bones(meta["bones"], meta["bbox_min"], meta["bbox_max"])
+    rename_map = canonicalize_rig_bone_names_in_blender(arm_obj, mesh_objs, bone_meta)
+    remapped_meta: dict[str, Any] = {}
+    for old_name, info in bone_meta.items():
+        new_name = rename_map.get(old_name, old_name)
+        info["legacy_name"] = old_name
+        info["canonical_name"] = new_name
+        if info.get("parent") in rename_map:
+            info["parent"] = rename_map[info["parent"]]
+        info["children"] = [rename_map.get(c, c) for c in info.get("children", [])]
+        remapped_meta[new_name] = info
+
+    if audit_report is not None:
+        audit_report["protruding_bones"] = [rename_map.get(b, b) for b in audit_report.get("protruding_bones", [])]
+        audit_report["air_bridging_bones"] = [rename_map.get(b, b) for b in audit_report.get("air_bridging_bones", [])]
+
+    validation = validate_canonical_rig_bone_names(remapped_meta)
+    if not validation.get("valid", False):
+        raise ValueError(
+            f"Candidate rig failed canonical bone naming validation: {validation.get('non_canonical_bones')}"
+        )
+
+    return {
+        "bone_taxonomy_schema": BONE_TAXONOMY_SCHEMA,
+        "bbox_min": meta["bbox_min"],
+        "bbox_max": meta["bbox_max"],
+        "num_active_bones": len(remapped_meta),
+        "folded_finger_bones": meta.get("folded_finger_bones", []),
+        "canonical_rename_map": rename_map,
+        "bone_naming_validation": validation,
+        "audit_report": audit_report or {},
+        "bones": remapped_meta,
+    }
+
+
+def _nearest_bone_name(arm_obj: Any, target_obj: Any) -> str:
+    """Finds the bone in `arm_obj` whose midpoint is closest to `target_obj`'s world bounding center."""
+    bmin, bmax = _preflight_bounds([target_obj])
+    center = Vector(((bmin[0] + bmax[0]) * 0.5, (bmin[1] + bmax[1]) * 0.5, (bmin[2] + bmax[2]) * 0.5))
+    mw_arm = arm_obj.matrix_world
+    best_name = arm_obj.data.bones[0].name
+    best_dist = float("inf")
+    for bone in arm_obj.data.bones:
+        mid = 0.5 * ((mw_arm @ bone.head_local) + (mw_arm @ bone.tail_local))
+        dist = float((mid - center).length)
+        if dist < best_dist:
+            best_dist = dist
+            best_name = bone.name
+    return best_name
+
+
+def _restore_detached_decorations(
+    mesh_objs: list[Any],
+    arm_obj: Any,
+    decor_manifest_path: str | None,
+) -> list[dict[str, Any]]:
+    """Restores any decorations detached prior to U1 from `decorations_backup.blend`:
+    - `rigid` decorations: bound via Bone Parent to the target or nearest canonical bone.
+    - `flex` decorations: bound as an independent sub-mesh via nearest-surface weight transfer
+      (`DATA_TRANSFER`) + `ARMATURE` modifier (never joined/welded to the body mesh).
+    """
+    if not decor_manifest_path:
+        return []
+    manifest_p = Path(decor_manifest_path)
+    if not manifest_p.is_file():
+        return []
+    try:
+        manifest = json.loads(manifest_p.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    detached = manifest.get("detached_decorations") or []
+    if not detached:
+        return []
+
+    backup_rel = manifest.get("backup") or "decorations_backup.blend"
+    backup_p = Path(backup_rel) if Path(backup_rel).is_absolute() else (manifest_p.parent / backup_rel)
+    if not backup_p.is_file():
+        raise FileNotFoundError(
+            f"decoration_manifest.json lists detached_decorations={detached}, "
+            f"but backup file '{backup_p}' does not exist."
+        )
+
+    existing_names = {o.name for o in bpy.context.scene.objects}
+    specs: list[dict[str, Any]] = []
+    for entry in detached:
+        if isinstance(entry, str):
+            specs.append({"name": entry, "mode": "flex", "target_bone": None})
+        elif isinstance(entry, dict) and entry.get("name"):
+            specs.append(
                 {
-                    "name": m.name,
-                    "vertex_count": len(pts),
-                    "matrix_world": [[float(v) for v in row] for row in mw],
+                    "name": str(entry["name"]),
+                    "mode": str(entry.get("mode", "flex")).lower(),
+                    "target_bone": entry.get("target_bone"),
                 }
             )
 
-    if all_verts:
-        arr = np.asarray(all_verts, dtype=np.float64)
-        b_min = [round(float(x), 4) for x in np.min(arr, axis=0)]
-        b_max = [round(float(x), 4) for x in np.max(arr, axis=0)]
-    else:
-        b_min, b_max = [-0.5, -0.5, 0.0], [0.5, 0.5, 1.8]
+    wanted_names = [s["name"] for s in specs if s["name"] not in existing_names]
+    if wanted_names:
+        with bpy.data.libraries.load(str(backup_p), link=False) as (data_from, data_to):
+            available = set(data_from.objects)
+            data_to.objects = [n for n in wanted_names if n in available]
+        for obj in data_to.objects:
+            if obj is not None:
+                bpy.context.collection.objects.link(obj)
+                ensure_mesh_has_visible_material(obj)
 
-    bone_names = [b.name for b in arms[0].data.bones] if arms else []
-    out_p = Path(out_dir)
-    out_p.mkdir(parents=True, exist_ok=True)
-    report = {
-        "monster_id": monster_id,
-        "mesh_count": len(meshes),
-        "armature_count": len(arms),
-        "animation_clips": anims,
-        "bone_names": bone_names,
-        "uv_layer_count": uv_layers,
-        "material_count": material_count,
-        "bbox_min": b_min,
-        "bbox_max": b_max,
-        "decorations": decor_entries,
+    bpy.context.view_layer.update()
+    restored_records: list[dict[str, Any]] = []
+    body_source = mesh_objs[0]
+
+    for spec in specs:
+        obj = bpy.context.scene.objects.get(spec["name"])
+        if obj is None or obj.type != "MESH":
+            continue
+        mode = spec["mode"] if spec["mode"] in ("rigid", "flex") else "flex"
+        target_bone = spec.get("target_bone")
+        if not target_bone or target_bone not in arm_obj.data.bones:
+            target_bone = _nearest_bone_name(arm_obj, obj)
+
+        if mode == "rigid":
+            world_mat = obj.matrix_world.copy()
+            obj.parent = arm_obj
+            obj.parent_type = "BONE"
+            obj.parent_bone = target_bone
+            obj.matrix_world = world_mat
+        else:
+            # Independent skinned sub-mesh: transfer weights from body mesh without joining vertices
+            if obj != body_source:
+                bpy.ops.object.select_all(action="DESELECT")
+                obj.select_set(True)
+                bpy.context.view_layer.objects.active = obj
+                dt_mod = obj.modifiers.new(name="DecorWeightTransfer", type="DATA_TRANSFER")
+                dt_mod.object = body_source
+                dt_mod.use_vert_data = True
+                dt_mod.data_types_verts = {"VGROUP_WEIGHTS"}
+                dt_mod.vert_mapping = "POLYINTERP_NEAREST"
+                try:
+                    bpy.ops.object.datalayout_transfer(modifier=dt_mod.name)
+                    bpy.ops.object.modifier_apply(modifier=dt_mod.name)
+                except Exception:
+                    obj.modifiers.remove(dt_mod)
+                    vg = obj.vertex_groups.get(target_bone) or obj.vertex_groups.new(name=target_bone)
+                    vg.add(list(range(len(obj.data.vertices))), 1.0, "REPLACE")
+            _ensure_armature_modifier(obj, arm_obj)
+
+        if obj not in mesh_objs:
+            mesh_objs.append(obj)
+        restored_records.append(
+            {
+                "name": obj.name,
+                "mode": mode,
+                "target_bone": target_bone,
+                "independent_submesh": True,
+            }
+        )
+
+    bpy.context.view_layer.update()
+    return restored_records
+
+
+def _build_octahedral_bone_geometry_arrays(
+    arm_obj: Any,
+    bones_meta: dict[str, Any],
+    posed: bool = False,
+) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]], list[int], list[str]]:
+    """Builds 3D Octahedral bone prism + joint octahedron vertices/faces for `arm_obj`."""
+    mw = arm_obj.matrix_world
+    verts: list[tuple[float, float, float]] = []
+    faces: list[tuple[int, int, int]] = []
+    face_mat_indices: list[int] = []
+    kind_order = list(_G1_KIND_RGBA.keys())
+    kind_to_idx = {k: i for i, k in enumerate(kind_order)}
+
+    bone_iter = arm_obj.pose.bones if posed else arm_obj.data.bones
+    for b in bone_iter:
+        b_name = b.name
+        info = bones_meta.get(b_name, {})
+        kind = str(info.get("kind") or b_name.split("_")[0]).upper()
+        mat_idx = kind_to_idx.get(kind, kind_to_idx["EXT"])
+
+        if posed:
+            h = mw @ b.head
+            t = mw @ b.tail
+        else:
+            h = mw @ b.head_local
+            t = mw @ b.tail_local
+
+        vec = t - h
+        length = float(vec.length)
+        if length < 1e-5:
+            continue
+
+        d = vec.normalized()
+        up = Vector((0.0, 1.0, 0.0)) if abs(d.y) < 0.9 else Vector((1.0, 0.0, 0.0))
+        u = d.cross(up).normalized()
+        v = d.cross(u).normalized()
+
+        radius = max(0.012, min(0.055, length * 0.13))
+        waist = h + vec * 0.22
+        base = len(verts)
+        verts.extend(
+            [
+                (float(h.x), float(h.y), float(h.z)),
+                (float((waist + u * radius).x), float((waist + u * radius).y), float((waist + u * radius).z)),
+                (float((waist + v * radius).x), float((waist + v * radius).y), float((waist + v * radius).z)),
+                (float((waist - u * radius).x), float((waist - u * radius).y), float((waist - u * radius).z)),
+                (float((waist - v * radius).x), float((waist - v * radius).y), float((waist - v * radius).z)),
+                (float(t.x), float(t.y), float(t.z)),
+            ]
+        )
+        oct_faces = [
+            (base + 0, base + 1, base + 2),
+            (base + 0, base + 2, base + 3),
+            (base + 0, base + 3, base + 4),
+            (base + 0, base + 4, base + 1),
+            (base + 5, base + 2, base + 1),
+            (base + 5, base + 3, base + 2),
+            (base + 5, base + 4, base + 3),
+            (base + 5, base + 1, base + 4),
+        ]
+        faces.extend(oct_faces)
+        face_mat_indices.extend([mat_idx] * 8)
+
+    return verts, faces, face_mat_indices, kind_order
+
+
+def _create_octahedral_overlay_mesh_obj(
+    arm_obj: Any,
+    bones_meta: dict[str, Any],
+    posed: bool = False,
+) -> Any:
+    """Creates a 3D mesh object representing Blender's Octahedral armature colored by canonical KIND."""
+    verts, faces, face_mat_indices, kind_order = _build_octahedral_bone_geometry_arrays(
+        arm_obj, bones_meta, posed=posed
+    )
+    mesh_data = bpy.data.meshes.new("G1_OctahedralOverlayMesh")
+    if verts and faces:
+        mesh_data.from_pydata(verts, [], faces)
+    mesh_data.update()
+
+    for kind in kind_order:
+        mat_name = f"G1_OctBone_{kind}"
+        mat = bpy.data.materials.get(mat_name)
+        if mat is None:
+            mat = bpy.data.materials.new(mat_name)
+        mat.diffuse_color = _G1_KIND_RGBA[kind]
+        mesh_data.materials.append(mat)
+
+    for poly, m_idx in zip(mesh_data.polygons, face_mat_indices):
+        poly.material_index = m_idx
+
+    overlay_obj = bpy.data.objects.new("G1_OctahedralOverlayObj", mesh_data)
+    bpy.context.collection.objects.link(overlay_obj)
+    return overlay_obj
+
+
+def _update_octahedral_overlay_mesh_obj(
+    overlay_obj: Any,
+    arm_obj: Any,
+    bones_meta: dict[str, Any],
+    posed: bool = True,
+) -> None:
+    """Updates vertex positions of `overlay_obj` in-place to match the current armature pose."""
+    verts, _, _, _ = _build_octahedral_bone_geometry_arrays(arm_obj, bones_meta, posed=posed)
+    if len(verts) == len(overlay_obj.data.vertices) and verts:
+        flat = np.array(verts, dtype=np.float32).ravel()
+        overlay_obj.data.vertices.foreach_set("co", flat)
+        overlay_obj.data.update()
+
+
+def _create_g1_cameras(
+    shared_bmin: np.ndarray,
+    shared_bmax: np.ndarray,
+    width: int,
+    height: int,
+    padding: float = 1.38,
+) -> dict[str, Any]:
+    """Creates calibrated orthographic cameras for `front`, `side`, `back`, and `three_quarter` views."""
+    center = 0.5 * (shared_bmin + shared_bmax)
+    span = np.maximum(shared_bmax - shared_bmin, 1e-3)
+    aspect = float(width) / float(max(1, height))
+    horiz_span = float(max(span[0], span[1]) * 1.15)
+    vert_span = float(span[2])
+    # In Blender ORTHO camera, ortho_scale is the largest dimension (width when width >= height).
+    if aspect >= 1.0:
+        ortho_scale = max(horiz_span, vert_span * aspect) * padding
+    else:
+        ortho_scale = max(vert_span, horiz_span / max(1e-3, aspect)) * padding
+    dist = max(float(np.max(span)) * 4.0, 3.0)
+
+    view_specs = {
+        "front": (
+            (float(center[0]), float(center[1] - dist), float(center[2])),
+            (math.radians(90.0), 0.0, 0.0),
+        ),
+        "side": (
+            (float(center[0] + dist), float(center[1]), float(center[2])),
+            (math.radians(90.0), 0.0, math.radians(90.0)),
+        ),
+        "back": (
+            (float(center[0]), float(center[1] + dist), float(center[2])),
+            (math.radians(90.0), 0.0, math.radians(180.0)),
+        ),
+        "three_quarter": (
+            (
+                float(center[0] + dist * 0.68),
+                float(center[1] - dist * 0.68),
+                float(center[2] + dist * 0.30),
+            ),
+            (math.radians(72.0), 0.0, math.radians(45.0)),
+        ),
     }
-    (out_p / "bpy_preflight.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
-    return report
+
+    cams: dict[str, Any] = {}
+    for view_name, (loc, rot) in view_specs.items():
+        cam_data = bpy.data.cameras.new(f"G1_Cam_{view_name}")
+        cam_data.type = "ORTHO"
+        cam_data.ortho_scale = float(ortho_scale)
+        cam_obj = bpy.data.objects.new(f"G1_Cam_{view_name}", cam_data)
+        cam_obj.location = loc
+        cam_obj.rotation_euler = rot
+        bpy.context.collection.objects.link(cam_obj)
+        cams[view_name] = cam_obj
+
+    bpy.context.view_layer.update()
+    return cams
+
+
+def _render_mesh_with_octahedral_overlay_array(
+    scene: Any,
+    cam_obj: Any,
+    mesh_objs: list[Any],
+    overlay_obj: Any,
+    width: int,
+    height: int,
+    tmp_dir: Path,
+    tag: str,
+) -> np.ndarray:
+    """Renders two `BLENDER_WORKBENCH` passes (`mesh_objs` studio pass + `overlay_obj` X-ray bone pass)
+    and returns the alpha-composited `(height, width, 4)` float32 RGBA buffer.
+    """
+    scene.render.engine = "BLENDER_WORKBENCH"
+    scene.render.resolution_x = width
+    scene.render.resolution_y = height
+    scene.render.resolution_percentage = 100
+    scene.render.image_settings.file_format = "PNG"
+    scene.render.image_settings.color_mode = "RGBA"
+    scene.camera = cam_obj
+
+    if not scene.world:
+        scene.world = bpy.data.worlds.new("G1_StudioWorld")
+    scene.world.color = (0.09, 0.11, 0.14)
+
+    mesh_pass_path = tmp_dir / f"_g1_mesh_{tag}.png"
+    bone_pass_path = tmp_dir / f"_g1_bone_{tag}.png"
+
+    # Pass 1: 3D character mesh with Studio lighting (texture / material surface)
+    for m in mesh_objs:
+        m.hide_render = False
+    overlay_obj.hide_render = True
+    scene.render.film_transparent = False
+    scene.display.shading.light = "STUDIO"
+    has_textures = any(
+        m.data.materials
+        and any(
+            mat and mat.use_nodes and any(n.type == "TEX_IMAGE" for n in mat.node_tree.nodes)
+            for mat in m.data.materials
+        )
+        for m in mesh_objs
+    )
+    scene.display.shading.color_type = "TEXTURE" if has_textures else "MATERIAL"
+    scene.display.shading.show_backface_culling = False
+    scene.render.filepath = str(mesh_pass_path)
+    bpy.ops.render.render(write_still=True)
+
+    # Pass 2: 3D Octahedral bone overlay (X-ray in-front layer)
+    for m in mesh_objs:
+        m.hide_render = True
+    overlay_obj.hide_render = False
+    scene.render.film_transparent = True
+    scene.display.shading.light = "STUDIO"
+    scene.display.shading.color_type = "MATERIAL"
+    scene.render.filepath = str(bone_pass_path)
+    bpy.ops.render.render(write_still=True)
+
+    for m in mesh_objs:
+        m.hide_render = False
+    overlay_obj.hide_render = True
+
+    img_m = bpy.data.images.load(str(mesh_pass_path), check_existing=False)
+    img_b = bpy.data.images.load(str(bone_pass_path), check_existing=False)
+    buf_m = np.empty(width * height * 4, dtype=np.float32)
+    buf_b = np.empty(width * height * 4, dtype=np.float32)
+    img_m.pixels.foreach_get(buf_m)
+    img_b.pixels.foreach_get(buf_b)
+    bpy.data.images.remove(img_m)
+    bpy.data.images.remove(img_b)
+
+    arr_m = buf_m.reshape(height, width, 4)
+    arr_b = buf_b.reshape(height, width, 4)
+    alpha = arr_b[:, :, 3:4] * 0.80
+    out_rgb = arr_m[:, :, :3] * (1.0 - alpha) + arr_b[:, :, :3] * alpha
+    out_rgba = np.concatenate([np.clip(out_rgb, 0.0, 1.0), np.ones((height, width, 1), dtype=np.float32)], axis=-1)
+    return out_rgba
+
+
+def _save_rgba_buffer_png(rgba: np.ndarray, out_path: Path, reusable_img: Any = None) -> None:
+    """Writes a `(H, W, 4)` float32 RGBA numpy array to `out_path` via `bpy.data.images`."""
+    height, width = int(rgba.shape[0]), int(rgba.shape[1])
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    img = reusable_img or bpy.data.images.new("G1_OutPNG", width=width, height=height, alpha=True)
+    img.pixels.foreach_set(rgba.ravel())
+    img.filepath_raw = str(out_path)
+    img.file_format = "PNG"
+    img.save()
+    if reusable_img is None:
+        bpy.data.images.remove(img)
+
+
+def _extract_deformed_world_vertices_and_triangles(
+    mesh_objs: list[Any],
+    collect_triangles: bool = False,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Extracts deformed world-space vertex positions (after Armature evaluation) across all `mesh_objs`."""
+    bpy.context.view_layer.update()
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    all_verts: list[np.ndarray] = []
+    all_tris: list[np.ndarray] = []
+    v_offset = 0
+
+    for m_obj in mesh_objs:
+        eval_obj = m_obj.evaluated_get(depsgraph)
+        eval_mesh = eval_obj.to_mesh()
+        try:
+            n_v = len(eval_mesh.vertices)
+            if n_v == 0:
+                continue
+            co_local = np.empty(n_v * 3, dtype=np.float64)
+            eval_mesh.vertices.foreach_get("co", co_local)
+            pts_local = co_local.reshape(n_v, 3)
+            mw = np.array(eval_obj.matrix_world, dtype=np.float64)
+            pts_world = pts_local @ mw[:3, :3].T + mw[:3, 3]
+            all_verts.append(pts_world)
+
+            if collect_triangles:
+                eval_mesh.calc_loop_triangles()
+                n_t = len(eval_mesh.loop_triangles)
+                if n_t > 0:
+                    tris = np.empty(n_t * 3, dtype=np.int64)
+                    eval_mesh.loop_triangles.foreach_get("vertices", tris)
+                    all_tris.append(tris.reshape(n_t, 3) + v_offset)
+            v_offset += n_v
+        finally:
+            eval_obj.to_mesh_clear()
+
+    verts_arr = np.concatenate(all_verts, axis=0) if all_verts else np.zeros((0, 3), dtype=np.float64)
+    if not collect_triangles:
+        return verts_arr, None
+    tris_arr = np.concatenate(all_tris, axis=0) if all_tris else np.zeros((0, 3), dtype=np.int64)
+    return verts_arr, tris_arr
+
+
+def _count_unweighted_vertices(mesh_objs: list[Any], arm_obj: Any) -> tuple[int, int]:
+    """Counts total vertices and vertices with zero skin weight on `arm_obj` bones."""
+    bone_names = {b.name for b in arm_obj.data.bones}
+    total_verts = 0
+    unweighted = 0
+    for m_obj in mesh_objs:
+        if m_obj.parent == arm_obj and m_obj.parent_type == "BONE" and m_obj.parent_bone in bone_names:
+            total_verts += len(m_obj.data.vertices)
+            continue
+        valid_group_indices = {vg.index for vg in m_obj.vertex_groups if vg.name in bone_names}
+        for v in m_obj.data.vertices:
+            total_verts += 1
+            w_sum = sum(g.weight for g in v.groups if g.group in valid_group_indices)
+            if w_sum <= 1e-4:
+                unweighted += 1
+    return total_verts, unweighted
 
 
 def sop_prepare_g1_candidates(
@@ -2069,30 +2909,306 @@ def sop_prepare_g1_candidates(
     decor_manifest: str | None = None,
     archetype: str = "humanoid",
 ) -> dict[str, Any]:
-    """SOP Stage 2: Headless Blender 4-candidate canonical bone naming & Octahedral bone view render."""
+    """SOP Stage 2: Headless Blender 4-candidate preparation, canonical bone naming,
+    decoration restoration, 16-view 3D Octahedral bone renders, real mesh deformation audit,
+    and 2x2 synchronized motion comparison frame rendering.
+    """
     require_bpy()
+    if len(candidates) < 4:
+        raise ValueError(f"G1 requires 4 candidate GLB files, got {len(candidates)}: {candidates}")
+    for c_path in candidates[:4]:
+        if not Path(c_path).is_file():
+            raise FileNotFoundError(f"G1 candidate GLB not found: {c_path}")
+
     out_p = Path(out_dir)
     out_p.mkdir(parents=True, exist_ok=True)
-    results = []
+    tmp_p = out_p / "_tmp_render"
+    tmp_p.mkdir(parents=True, exist_ok=True)
+
+    spec = ARCHETYPE_SPECS.get(archetype, ARCHETYPE_SPECS["humanoid"])
+    total_frames = int(spec["frames"])
+    fps = int(spec["fps"])
+
+    results: list[dict[str, Any]] = []
+    all_bmins: list[np.ndarray] = []
+    all_bmaxs: list[np.ndarray] = []
+
+    # Step 1: Import each candidate GLB, preserve independent sub-meshes, evaluate rig geometry,
+    # canonicalize bone names across all meshes, restore detached decorations, and save uncompressed .blend.
     for idx, c_path in enumerate(candidates[:4]):
-        mesh_obj, arm_obj = load_glb_and_find_rig(c_path)
+        cid = f"candidate_{idx}"
+        clear_scene()
+        bpy.ops.import_scene.gltf(filepath=str(c_path))
+        bpy.context.view_layer.update()
+
+        mesh_objs = _preflight_scene_meshes()
+        arm_objs = [o for o in bpy.context.scene.objects if o.type == "ARMATURE"]
+        if not mesh_objs or not arm_objs:
+            raise ValueError(f"Candidate {cid} ({c_path}) is missing MESH or ARMATURE objects.")
+        arm_obj = arm_objs[0]
+        for m_obj in mesh_objs:
+            ensure_mesh_has_visible_material(m_obj)
+            _ensure_armature_modifier(m_obj, arm_obj)
+
+        audit_rep = _evaluate_candidate_rig_geometry(mesh_objs, arm_obj, str(c_path))
+        rig_meta = _classify_and_canonicalize_candidate_rig(mesh_objs, arm_obj, audit_report=audit_rep)
+        restored_decor = _restore_detached_decorations(mesh_objs, arm_obj, decor_manifest)
+        rig_meta["restored_decorations"] = restored_decor
+
+        bmin, bmax = _preflight_bounds(mesh_objs)
+        all_bmins.append(bmin)
+        all_bmaxs.append(bmax)
+        rig_meta["bbox_min"] = [round(float(x), 5) for x in bmin]
+        rig_meta["bbox_max"] = [round(float(x), 5) for x in bmax]
+
         arm_obj.data.display_type = "OCTAHEDRAL"
         arm_obj.show_in_front = True
-        _, rig_meta = classify_anonymous_bones_and_assign_limits(mesh_obj, arm_obj)
-        c_dir = out_p / f"candidate_{idx}"
+
+        c_dir = out_p / cid
         c_dir.mkdir(parents=True, exist_ok=True)
         c_meta_path = c_dir / "studio_rig_meta.json"
-        c_meta_path.write_text(json.dumps(rig_meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        top_meta_path = out_p / f"{cid}_rig_meta.json"
+        meta_json = json.dumps(rig_meta, indent=2, ensure_ascii=False)
+        c_meta_path.write_text(meta_json, encoding="utf-8")
+        top_meta_path.write_text(meta_json, encoding="utf-8")
+
+        blend_path = out_p / f"{cid}_full.blend"
+        full_glb_path = out_p / f"{cid}_full.glb"
+        bpy.ops.wm.save_as_mainfile(filepath=str(blend_path), compress=False)
+
+        bpy.ops.object.select_all(action="DESELECT")
+        for obj in [*mesh_objs, arm_obj]:
+            obj.select_set(True)
+            parent = obj.parent
+            while parent is not None:
+                parent.select_set(True)
+                parent = parent.parent
+        bpy.ops.export_scene.gltf(
+            filepath=str(full_glb_path),
+            export_format="GLB",
+            export_animations=False,
+            use_selection=True,
+        )
+
         results.append(
             {
-                "candidate_id": f"candidate_{idx}",
+                "candidate_id": cid,
                 "path": str(c_path),
-                "meta_path": str(c_meta_path),
+                "blend_path": str(blend_path),
+                "full_glb_path": str(full_glb_path),
+                "meta_path": str(top_meta_path),
                 "bones": sorted(rig_meta.get("bones", {}).keys()),
+                "num_bones": len(rig_meta.get("bones", {})),
+                "audit_report": audit_rep,
+                "restored_decorations": restored_decor,
                 "archetype": archetype,
             }
         )
-    summary = {"candidates": results, "decor_manifest": decor_manifest, "archetype": archetype}
+
+    shared_bmin = np.min(np.stack(all_bmins, axis=0), axis=0)
+    shared_bmax = np.max(np.stack(all_bmaxs, axis=0), axis=0)
+    shared_height = float(max(1e-4, shared_bmax[2] - shared_bmin[2]))
+
+    # Step 2: Render the 16 static views (`cand_{0..3}_{front,side,back,three_quarter}_octahedral.png`)
+    # and the per-candidate posed motion panels (`640x360`) + real mesh deformation metrics in a single
+    # `.blend` open per candidate!
+    static_w, static_h = 640, 640
+    panel_w, panel_h = 640, 360
+
+    # panel_cache[(view, frame_idx)][cand_idx] -> uint8 (panel_h, panel_w, 4)
+    panel_cache: dict[tuple[str, int], dict[int, np.ndarray]] = {
+        (v, f_idx): {} for v in G1_SYNC_VIEWS for f_idx in range(total_frames)
+    }
+    follow_through_issues: dict[str, Any] = {}
+    static_views_rendered: list[str] = []
+
+    for idx, c_info in enumerate(results):
+        cid = c_info["candidate_id"]
+        blend_path = Path(c_info["blend_path"])
+        rig_meta = json.loads(Path(c_info["meta_path"]).read_text(encoding="utf-8"))
+        bones_meta = rig_meta.get("bones", {})
+
+        bpy.ops.wm.open_mainfile(filepath=str(blend_path))
+        bpy.context.view_layer.update()
+        scene = bpy.context.scene
+        mesh_objs = _preflight_scene_meshes()
+        arm_obj = [o for o in scene.objects if o.type == "ARMATURE"][0]
+
+        # Reset pose to Rest Pose before static views & rest-pose reference extraction
+        for pb in arm_obj.pose.bones:
+            pb.rotation_mode = "XYZ"
+            pb.rotation_euler = (0.0, 0.0, 0.0)
+            pb.location = (0.0, 0.0, 0.0)
+            pb.scale = (1.0, 1.0, 1.0)
+        bpy.context.view_layer.update()
+
+        overlay_obj = _create_octahedral_overlay_mesh_obj(arm_obj, bones_meta, posed=False)
+        static_cams = _create_g1_cameras(shared_bmin, shared_bmax, static_w, static_h, padding=1.35)
+
+        for view_name in G1_VIEWS:
+            rgba = _render_mesh_with_octahedral_overlay_array(
+                scene,
+                static_cams[view_name],
+                mesh_objs,
+                overlay_obj,
+                static_w,
+                static_h,
+                tmp_p,
+                tag=f"{cid}_static_{view_name}",
+            )
+            out_png = out_p / f"cand_{idx}_{view_name}_octahedral.png"
+            _save_rgba_buffer_png(rgba, out_png)
+            static_views_rendered.append(out_png.name)
+
+        # Now evaluate real mesh deformation across the archetype motion timeline and render sync panels
+        sync_cams = _create_g1_cameras(shared_bmin, shared_bmax, panel_w, panel_h, padding=1.46)
+        rest_verts, triangles = _extract_deformed_world_vertices_and_triangles(mesh_objs, collect_triangles=True)
+        total_verts, unweighted_verts = _count_unweighted_vertices(mesh_objs, arm_obj)
+
+        max_disp_m = 0.0
+        max_stretch_ratio = 1.0
+        max_bad_edge_ratio = 0.0
+        max_step_delta = 0.0
+        prev_eulers: dict[str, tuple[float, float, float]] | None = None
+        exercised_bones: set[str] = set()
+        badge_rgb = np.array(_G1_CANDIDATE_BADGE_RGB[idx % len(_G1_CANDIDATE_BADGE_RGB)], dtype=np.float32)
+
+        for f_idx in range(total_frames):
+            eulers = synthesize_archetype_pose_eulers(bones_meta, archetype, f_idx, total_frames)
+            for b_name, vals in eulers.items():
+                if abs(vals[0]) + abs(vals[1]) + abs(vals[2]) > 1e-3:
+                    exercised_bones.add(b_name)
+                pb = arm_obj.pose.bones.get(b_name)
+                if pb is not None:
+                    pb.rotation_mode = "XYZ"
+                    pb.rotation_euler = Euler((float(vals[0]), float(vals[1]), float(vals[2])), "XYZ")
+
+            if prev_eulers is not None:
+                for b_name, vals in eulers.items():
+                    pv = prev_eulers.get(b_name, (0.0, 0.0, 0.0))
+                    step = max(abs(vals[i] - pv[i]) for i in range(3))
+                    if step > max_step_delta:
+                        max_step_delta = step
+            prev_eulers = eulers
+
+            posed_verts, _ = _extract_deformed_world_vertices_and_triangles(mesh_objs, collect_triangles=False)
+            if len(posed_verts) == len(rest_verts) and len(rest_verts) > 0:
+                disp = float(np.max(np.linalg.norm(posed_verts - rest_verts, axis=1)))
+                if disp > max_disp_m:
+                    max_disp_m = disp
+                if triangles is not None and len(triangles) > 0:
+                    stretch = compute_mesh_edge_stretch_metric(rest_verts, posed_verts, triangles)
+                    max_stretch_ratio = max(max_stretch_ratio, float(stretch["max_stretch_ratio"]))
+                    max_bad_edge_ratio = max(max_bad_edge_ratio, float(stretch["bad_edge_ratio"]))
+
+            _update_octahedral_overlay_mesh_obj(overlay_obj, arm_obj, bones_meta, posed=True)
+            for view_name in G1_SYNC_VIEWS:
+                panel_rgba = _render_mesh_with_octahedral_overlay_array(
+                    scene,
+                    sync_cams[view_name],
+                    mesh_objs,
+                    overlay_obj,
+                    panel_w,
+                    panel_h,
+                    tmp_p,
+                    tag=f"{cid}_{view_name}_f{f_idx:04d}",
+                )
+                # Stamp a top-left candidate color indicator bar (rows panel_h-10:panel_h-4, cols 8:56)
+                panel_rgba[panel_h - 12 : panel_h - 4, 8 : 56, :3] = badge_rgb
+                panel_cache[(view_name, f_idx)][idx] = (np.clip(panel_rgba, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+
+        norm_disp = max_disp_m / shared_height
+        audit_rep = c_info["audit_report"]
+        issues: list[str] = []
+        blocking_issues: list[str] = []
+        if norm_disp < 0.005:
+            blocking_issues.append("mesh_not_deforming_with_armature")
+            issues.append("mesh_not_deforming_with_armature")
+        if total_verts > 0 and (unweighted_verts / float(total_verts)) > 0.10:
+            issues.append(f"unweighted_vertices_ratio={round(unweighted_verts / float(total_verts), 4)}")
+        if max_bad_edge_ratio > 0.15 or max_stretch_ratio > 6.0:
+            blocking_issues.append("severe_skin_stretch_or_tearing")
+            issues.append("severe_skin_stretch_or_tearing")
+        if max_step_delta > 0.65:
+            blocking_issues.append("excessive_inter_frame_pop")
+            issues.append("excessive_inter_frame_pop")
+        if audit_rep.get("protruding_bones"):
+            issues.append(f"protruding_bones={len(audit_rep['protruding_bones'])}")
+        if audit_rep.get("air_bridging_bones"):
+            issues.append(f"air_bridging_bones={len(audit_rep['air_bridging_bones'])}")
+
+        status = "FAIL" if blocking_issues else ("WARN" if issues else "PASS")
+        follow_through_issues[cid] = {
+            "archetype": archetype,
+            "action": spec["action"],
+            "frames": total_frames,
+            "fps": fps,
+            "active_bones_exercised": len(exercised_bones),
+            "total_vertices": total_verts,
+            "unweighted_vertices": unweighted_verts,
+            "max_vertex_displacement_m": round(max_disp_m, 5),
+            "max_vertex_displacement_norm": round(norm_disp, 5),
+            "max_edge_stretch_ratio": round(max_stretch_ratio, 4),
+            "max_bad_edge_ratio": round(max_bad_edge_ratio, 4),
+            "max_step_delta_rad": round(max_step_delta, 4),
+            "geometric_score": audit_rep.get("score"),
+            "outside_ratio": audit_rep.get("outside_ratio"),
+            "quadrants_covered": audit_rep.get("quadrants_covered"),
+            "restored_decorations": c_info["restored_decorations"],
+            "issues": issues,
+            "blocking_issues": blocking_issues,
+            "status": status,
+        }
+
+    # Step 3: Assemble 2x2 synchronized comparison frames (`1280x720`) for `front`, `side`, `three_quarter`
+    comp_w, comp_h = panel_w * 2, panel_h * 2
+    comp_img = bpy.data.images.new("G1_SyncComposite", width=comp_w, height=comp_h, alpha=True)
+    sync_frame_counts: dict[str, int] = {}
+
+    for view_name in G1_SYNC_VIEWS:
+        view_dir = out_p / "sync_frames" / view_name
+        view_dir.mkdir(parents=True, exist_ok=True)
+        for f_idx in range(total_frames):
+            panels = panel_cache[(view_name, f_idx)]
+            # Blender image buffer row 0 is bottom, row comp_h-1 is top:
+            # Top row (rows panel_h..2*panel_h): [cand_0 | cand_1]
+            # Bottom row (rows 0..panel_h): [cand_2 | cand_3]
+            top_row = np.concatenate([panels[0], panels[1]], axis=1)
+            bot_row = np.concatenate([panels[2], panels[3]], axis=1)
+            grid_u8 = np.concatenate([bot_row, top_row], axis=0)
+            grid_f32 = grid_u8.astype(np.float32) / 255.0
+            # Draw subtle 2px center crosshairs dividing the 4 quadrants
+            grid_f32[panel_h - 1 : panel_h + 1, :, :3] = 0.22
+            grid_f32[:, panel_w - 1 : panel_w + 1, :3] = 0.22
+            out_frame_path = view_dir / f"sync_frame_{f_idx:04d}.png"
+            _save_rgba_buffer_png(grid_f32, out_frame_path, reusable_img=comp_img)
+        sync_frame_counts[view_name] = total_frames
+
+    for tmp_file in tmp_p.glob("*.png"):
+        try:
+            tmp_file.unlink()
+        except OSError:
+            pass
+    try:
+        tmp_p.rmdir()
+    except OSError:
+        pass
+
+    summary = {
+        "schema_version": 2,
+        "render_engine": "BLENDER_WORKBENCH",
+        "archetype": archetype,
+        "action": spec["action"],
+        "frames": total_frames,
+        "fps": fps,
+        "shared_bbox_min": [round(float(x), 5) for x in shared_bmin],
+        "shared_bbox_max": [round(float(x), 5) for x in shared_bmax],
+        "candidates": results,
+        "static_views_rendered": static_views_rendered,
+        "sync_frame_counts": sync_frame_counts,
+        "follow_through_issues": follow_through_issues,
+        "decor_manifest": decor_manifest,
+    }
     (out_p / "bpy_g1_summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     return summary
 
@@ -2100,7 +3216,7 @@ def sop_prepare_g1_candidates(
 def sop_verify_delivery_glb(glb_path: str, is_loop: bool = False, out_report: str | None = None) -> dict[str, Any]:
     """SOP Stage 5: Headless Blender GLB round-trip & loop seam verification."""
     require_bpy()
-    clean_scene()
+    clear_scene()
     bpy.ops.import_scene.gltf(filepath=str(glb_path))
     bpy.context.view_layer.update()
     arms = [o for o in bpy.data.objects if o.type == "ARMATURE"]
@@ -2157,6 +3273,7 @@ def main() -> None:
     )
     parser.add_argument("--input_glb", help="Raw input GLB for sanitize_input or preflight_check mode")
     parser.add_argument("--monster_id", default="monster", help="Monster ID for SOP modes")
+    parser.add_argument("--canonicalize_existing_rig", type=int, default=1, choices=[0, 1])
     parser.add_argument("--yaw_deg", type=float, default=0.0, help="Optional Z-axis rotation in degrees")
     parser.add_argument("--candidates", nargs="*", help="Candidate GLB files for Stage 1 audit or G1 pack")
     parser.add_argument("--decor_manifest", help="Path to decorations_manifest.json for G1 restoration")
@@ -2173,13 +3290,20 @@ def main() -> None:
     parser.add_argument("--num_samples", type=int, default=DEFAULT_SYNTH_SAMPLES)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--exam_frames", type=int, default=96)
-    args = parser.parse_args()
+    import sys as _sys
+
+    raw_argv = _sys.argv[1:]
+    if "--" in raw_argv:
+        raw_argv = raw_argv[raw_argv.index("--") + 1 :]
+    args = parser.parse_args(raw_argv)
 
     if args.mode == "sanitize_input":
         sanitize_input_mesh_for_skintokens(args.input_glb, args.out_glb, yaw_deg=args.yaw_deg)
 
     elif args.mode == "preflight_check":
-        sop_preflight_check(args.input_glb, args.out_dir, monster_id=args.monster_id)
+        sop_preflight_check(args.input_glb, args.out_dir, monster_id=args.monster_id,
+                            out_glb=args.out_glb, out_report=args.out_report, yaw_deg=args.yaw_deg,
+                            canonicalize_existing_rig=bool(args.canonicalize_existing_rig))
 
     elif args.mode == "prepare_g1_candidates":
         sop_prepare_g1_candidates(
@@ -2208,7 +3332,7 @@ def main() -> None:
         rig_meta["contact_sheet_path"] = str(contact_path)
 
         Path(args.blend_path).parent.mkdir(parents=True, exist_ok=True)
-        bpy.ops.wm.save_as_mainfile(filepath=str(args.blend_path))
+        bpy.ops.wm.save_as_mainfile(filepath=str(args.blend_path), compress=False)
         with open(args.meta_path, "w", encoding="utf-8") as f:
             json.dump(rig_meta, f, indent=2, ensure_ascii=False)
         print(f"[Stage 1 Audit Complete] Best candidate: {best['path']} (score={best['score']})")

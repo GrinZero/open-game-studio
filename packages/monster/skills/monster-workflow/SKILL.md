@@ -5,7 +5,7 @@ description: 将静态怪物模型推进到绑定、姿态训练和动作交付�
 
 # Monster 工作流
 
-以 [MonsterStudio 完整流程与用户审计规范](references/workflow-and-audit.md) 为制作依据。先读 [当前实现与操作入口](references/runtime.md)，确认正在使用的版本、能力与固化脚本入口。本技能已将全流程 SOP 执行层固化为统一 CLI 调度器 [monster_sop.py](scripts/monster_sop.py) 及 7 个标准子模块（[sop_gate.py](scripts/sop_gate.py)、[sop_preflight.py](scripts/sop_preflight.py)、[sop_g1_pack.py](scripts/sop_g1_pack.py)、[sop_g2_pack.py](scripts/sop_g2_pack.py)、[sop_g3_exam.py](scripts/sop_g3_exam.py)、[sop_delivery.py](scripts/sop_delivery.py)、[sop_colab_guard.py](scripts/sop_colab_guard.py)）；**执行任意阶段前优先直接调用固化脚本，严禁 Agent 临时手写重复的 Python / Blender / FFmpeg / JSON 拼装代码**。本技能不替代普通项目整理，也不因编写文档或检查代码而启动 GPU。
+以 [MonsterStudio 完整流程与用户审计规范](references/workflow-and-audit.md) 为制作依据。先读 [当前实现与操作入口](references/runtime.md)，确认正在使用的版本、能力与固化脚本入口。本技能已将全流程 SOP 执行层固化为统一 CLI 调度器 [monster_sop.py](scripts/monster_sop.py) 及 7 个标准子模块（[sop_gate.py](scripts/sop_gate.py)、[sop_preflight.py](scripts/sop_preflight.py)、[sop_g1_pack.py](scripts/sop_g1_pack.py)、[sop_g2_pack.py](scripts/sop_g2_pack.py)、[sop_g3_exam.py](scripts/sop_g3_exam.py)、[sop_delivery.py](scripts/sop_delivery.py)、[sop_colab_guard.py](scripts/sop_colab_guard.py)）；**优先复用现有脚本，尽量减少重复编写 Python / Blender / FFmpeg / JSON 处理代码；现有脚本不能满足需求时，可按需补充或编写临时代码**。本技能不替代普通项目整理，也不因编写文档或检查代码而启动 GPU。
 
 ## 定位与恢复
 
@@ -29,7 +29,7 @@ npm run monster:sop -- gate --monster-id <id> --project-root . --drive-root "$MO
 
 ## 按阶段执行
 
-只读取和执行本次任务需要的 SOP 章节；不要把整条生产流程套到局部检查任务上。每个阶段均直接调用 `monster_sop.py`（或 `npm run monster:sop --`）对应子命令：
+只读取和执行本次任务需要的 SOP 章节；不要把整条生产流程套到局部检查任务上。各阶段优先使用 `monster_sop.py`（或 `npm run monster:sop --`）对应子命令：
 
 1. **预检与 U1（SOP §2，含工作区红线守卫与强制骨骼规范命名，调用 [sop_preflight.py](scripts/sop_preflight.py)）**：
    ```sh

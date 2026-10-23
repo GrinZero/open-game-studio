@@ -401,7 +401,8 @@ def mark_awaiting_review(
 
     if gate == "G1":
         # G1 requires canonical bone naming verification on all candidate rigs or the target rig_meta
-        meta_p = (materials or {}).get("rig_meta_path")
+        mats = materials or {}
+        meta_p = mats.get("rig_meta_path")
         if meta_p:
             bone_check = verify_rig_meta_canonical_bones(meta_p)
             if not bone_check.get("valid"):
@@ -409,6 +410,17 @@ def mark_awaiting_review(
                     f"G1 硬门禁阻断：存在未规范命名的匿名骨骼 {bone_check.get('non_canonical_bones')}，"
                     "必须先完成 <KIND>_<SIDE>_<GROUP>_<INDEX> 强制重命名并通过 validate_canonical_rig_bone_names！"
                 )
+        for blend_p in mats.get("candidate_blends") or []:
+            bp = Path(blend_p)
+            if not bp.is_file() or bp.stat().st_size < 1024:
+                raise ValueError(f"G1 硬门禁阻断：候选 .blend 不存在或为占位文件: {bp}")
+            hdr = bp.read_bytes()[:32]
+            if not hdr.startswith(b"BLENDER") or b"G1-CANDIDATE-" in hdr:
+                raise ValueError(f"G1 硬门禁阻断：候选 .blend 非真实未压缩 Blender 文件: {bp}")
+        for vid_p in (mats.get("sync_videos") or {}).values():
+            vp = Path(vid_p)
+            if not vp.is_file() or vp.stat().st_size < 256:
+                raise ValueError(f"G1 硬门禁阻断：同步对比视频不存在或为 24 字节占位文件: {vp}")
     if gate in ("G2", "G3", "final_batch"):
         assert_gate(ledger, "G1")
     if gate in ("G3", "final_batch"):
@@ -468,6 +480,17 @@ def record_user_decision(
             ginfo["selected_candidate_id"] = str(cand_id)
             ginfo["bone_naming_validation"] = bone_check
             ledger.setdefault("fingerprints", {})["rig_meta_sha256"] = bone_check["rig_meta_sha256"]
+            mats = ginfo.get("materials") or {}
+            cand_blends = mats.get("candidate_blends") or []
+            if str(cand_id).isdigit() and 0 <= int(str(cand_id)) < len(cand_blends):
+                sel_blend = Path(cand_blends[int(str(cand_id))])
+                if not sel_blend.is_file() or sel_blend.stat().st_size < 1024:
+                    raise ValueError(f"G1 通过被阻断：选定候选 .blend 为空或占位文件: {sel_blend}")
+                ledger["fingerprints"]["selected_candidate_blend_sha256"] = sha256_file(sel_blend)
+            for vid_p in (mats.get("sync_videos") or {}).values():
+                vp = Path(vid_p)
+                if not vp.is_file() or vp.stat().st_size < 256:
+                    raise ValueError(f"G1 通过被阻断：同步对比视频不存在或为 24 字节占位文件: {vp}")
 
         elif gate == "G2":
             assert_gate(ledger, "G1")

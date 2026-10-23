@@ -44,7 +44,7 @@ from sop_gate import (  # noqa: E402
 )
 import numpy as np  # noqa: E402
 from sop_preflight import (  # noqa: E402
-    _find_bpy_python,
+    _worker_command,
     resolve_scratch_dirs,
 )
 
@@ -163,25 +163,24 @@ def verify_animated_glb_and_loop_seam(
         "seam_ok": True,
     }
 
-    bpy_py = _find_bpy_python()
-    bpy_worker = WORKER_DIR / "studio_bpy_worker.py"
     bpy_verified = False
-    if bpy_py and bpy_worker.is_file() and has_json_chunk:
+    if has_json_chunk:
         report_tmp = glb_path.parent / f"{glb_path.stem}_delivery_check.json"
-        res = subprocess.run(
+        worker_cmd = _worker_command(
             [
-                bpy_py,
-                str(bpy_worker),
                 "--mode",
                 "verify_delivery_glb",
-                "--out_glb",
+                "--glb_path",
                 str(glb_path),
+                "--is_loop",
+                "1" if is_loop else "0",
                 "--out_report",
                 str(report_tmp),
-            ],
-            check=False,
+            ]
         )
-        bpy_verified = res.returncode == 0 and report_tmp.is_file()
+        if worker_cmd:
+            res = subprocess.run(worker_cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            bpy_verified = res.returncode == 0 and report_tmp.is_file()
 
     return {
         "glb_file": str(glb_path.resolve()),

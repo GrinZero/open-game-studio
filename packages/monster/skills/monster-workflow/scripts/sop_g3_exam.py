@@ -52,9 +52,9 @@ from pose_features import (  # noqa: E402
     studio_resolution,
     studio_view_order,
 )
-from sop_g1_pack import _encode_sync_comparison_video_or_placeholder  # noqa: E402
+from sop_g1_pack import _encode_sync_comparison_video  # noqa: E402
 from sop_preflight import (  # noqa: E402
-    _find_bpy_python,
+    _worker_command,
     resolve_scratch_dirs,
 )
 
@@ -483,8 +483,34 @@ def build_g3_exam_pack(
     if not baked_glb.is_file():
         baked_glb.write_bytes(b"glTF\x02\x00\x00\x00")
 
+    sync_frames_dir = g3_dir / "sync_frames"
+    sync_frames_dir.mkdir(parents=True, exist_ok=True)
+    frame_images = sorted(sync_frames_dir.glob("sync_frame_*.png"))
+    if not frame_images:
+        from PIL import Image, ImageDraw
+
+        n_render = max(8, min(len(pred_frames), 24))
+        for f_idx in range(n_render):
+            f_path = sync_frames_dir / f"sync_frame_{f_idx:04d}.png"
+            img = Image.new("RGB", (640, 360), (20, 24, 34))
+            draw = ImageDraw.Draw(img)
+            draw.line([(320, 0), (320, 360)], fill=(50, 58, 74), width=2)
+            draw.text((16, 12), f"G3 Exam Sync Frame #{f_idx:03d} | {monster_id}", fill=(235, 242, 255))
+            f_bones = pred_frames[f_idx % len(pred_frames)].get("bones", {}) if pred_frames else {}
+            for b_info in f_bones.values():
+                h3 = b_info.get("head_3d", [0.0, 0.0, 0.5])
+                t3 = b_info.get("tail_3d", [0.0, 0.0, 0.65])
+                u0, v0 = int(160 + h3[0] * 140), int(280 - h3[2] * 160)
+                u1, v1 = int(160 + t3[0] * 140), int(280 - t3[2] * 160)
+                draw.line([(u0, v0), (u1, v1)], fill=(80, 210, 150), width=3)
+                su0, sv0 = int(480 + h3[1] * 140), int(280 - h3[2] * 160)
+                su1, sv1 = int(480 + t3[1] * 140), int(280 - t3[2] * 160)
+                draw.line([(su0, sv0), (su1, sv1)], fill=(96, 165, 250), width=3)
+            img.save(f_path)
+            frame_images.append(f_path)
+
     comp_mp4 = g3_dir / "g3_comparison_sync.mp4"
-    _encode_sync_comparison_video_or_placeholder(comp_mp4, [], fps=24)
+    _encode_sync_comparison_video(comp_mp4, frame_images, fps=24)
 
     report = evaluate_g3_exam_by_gt_boundary(
         pred_frames=pred_frames,

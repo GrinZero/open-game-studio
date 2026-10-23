@@ -16,7 +16,7 @@ npm run monster:package
 npm run monster:sop -- --help
 ```
 
-全流程 SOP 的本地执行层已固化在 [monster_sop.py](../scripts/monster_sop.py)，包含 7 个标准子命令，Agent 应直接调用这些固定脚本而非临时手写 Python/Blender/FFmpeg 代码：
+全流程 SOP 的本地执行层已固化在 [monster_sop.py](../scripts/monster_sop.py)，包含 7 个标准子命令，各子命令与能力如下；脚本复用与按需补充原则见 [Monster 工作流](../SKILL.md)：
 
 | 子命令 | 固化脚本 | 覆盖 SOP 阶段与核心职责 |
 | --- | --- | --- |
@@ -27,6 +27,23 @@ npm run monster:sop -- --help
 | `g3-exam` | [sop_g3_exam.py](../scripts/sop_g3_exam.py) | 阶段四自动校验 G1+G2 硬门禁、U2 增量持久化同步（比对 SHA-256 跳过未改动 `.blend`）、严格区分 `3d_gt` / `2d_only` / `unlabeled_video` 三类边界（绝不编造 MPJPE/SO(3)）、生成并排对照视频与 `g3_review.html` |
 | `deliver` | [sop_delivery.py](../scripts/sop_delivery.py) | 阶段五自动校验 G3 硬门禁、3 次重试极线同步失败硬终止阻断、当批独立清单 `batch_manifest.json` 过滤、本地 GLB 回读与 `:loop` 首尾接缝跳变检测（`compute_loop_seam_metrics`）及 `delivery_review.html` |
 | `colab-guard` | [sop_colab_guard.py](../scripts/sop_colab_guard.py) | 阶段六跨会话租约表 `active_sessions.json`、阶段前置释放校验（仅允许在 `stage1_candidates_fetched` 或 `final_batch_approved` 释放，视频审阅/迭代期间硬阻断释放）与安全下线核验 |
+
+### 本地预检与真实证据
+
+`preflight` 优先使用可导入 `bpy` 的 Python；本机也会发现已安装的 Blender。可用 `MONSTER_BPY_PYTHON` 或 `MONSTER_BLENDER` 指定路径。没有可用后端、Worker 报错或产物缺失时必须失败，不生成占位图或有效 U1 输入；旧成功报告在每次执行前立即失效。
+
+预检保存完整装饰备份、保留分件装配位置的 GLB、导出重导入检查、几何统计和真实 `1344×768` 正/侧视图。几何统计会在副本中合并 glTF UV/法线缝处的重合顶点，不修改源模型；边界、接触面和装饰语义仍需实际检查。不会推测固定的肢体遮挡率。
+
+自动检查通过后，首次执行仍返回 `status=awaiting_preflight_review`、`passed=false`（CLI 退出码 2）。执行者查看报告、正侧视图及必要的备份工程后，记录实际姿态、朝向、遮挡、装饰与开口判断；此记录是预检检查证据，不替代 G1/G2/G3 用户关卡，也不能绕过自动检查发现的几何错误：
+
+```sh
+npm run monster:sop -- preflight --monster-id <id> --input <source.glb> --project-root <project>
+npm run monster:sop -- preflight --monster-id <id> --project-root <project> --review-visual --review-note '<实际观察结论>'
+```
+
+`--review-visual` 只登记已查看的当前证据，不重新运行 Blender；可在该命令添加 `--sync-u1 --drive-root <MonsterStudio目录>` 完成持久同步。U1 校验源模型、输入 GLB、检查图、装饰清单和完整备份的 SHA-256；任何证据改变、遗失或旧版 `passed=true` 报告均要求重新预检。
+
+`g1-pack` 同样复用 `_worker_command` 调用本机 Blender 或 `bpy` 环境执行 `--mode prepare_g1_candidates`，要求 4 套真实候选 GLB（`candidate_0..3.glb`）与 `ffmpeg` 均可用：在 Blender 中完成分件保持、装饰恢复（`rigid` 绑骨 / `flex` 独立蒙皮子网格）、全网格 `<KIND>_<SIDE>_<GROUP>_<INDEX>` 规范重命名、未压缩 `.blend` 保存（`compress=False`，兼容 Blender 5.x 与工作台回读）、16 张真实 3D 网格＋3D 八面体骨骼叠加图（`BLENDER_WORKBENCH`）、按形态模板驱动的真实变形拉伸指标审计（`follow_through_issues.json`）以及 `front`/`side`/`three_quarter` 三视角 2×2 四候选同步对比视频编码（校验 MP4 `ftyp`、`moov` 与非空 `mdat` 盒子），并写入 `g1_report.json` 记录全部 SHA-256 证据，绝不回退模板火柴人图或 24 字节占位 MP4。
 
 日常可直接通过 GitHub 的 **Open in Colab** 打开 `packages/monster/notebooks/colab.ipynb` 启动云端 Worker，无需手动打包或上传 `.tar.gz`。如需测试本地未提交改动，再使用 `packages/monster/dist/` 下的打包归档。同步本机插件运行目录不会切换已有 Colab 实例。任务忙碌时不可切换代码版本。
 

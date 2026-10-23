@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 """sop_g1_pack.py — Stage 2 4-Candidate Decoration Restoration, Canonical Bone Naming & G1 Review Pack (SOP §3).
 
-Automates the entire G1 preparation workflow so the Agent never writes ad-hoc Blender/FFmpeg scripts:
-  1. Processes all 4 SkinTokens candidates (`candidate_0..3.glb`):
+Automates the entire G1 preparation workflow with real Headless Blender + FFmpeg evidence:
+  1. Processes all 4 SkinTokens candidates (`candidate_0..3.glb`) via `studio_bpy_worker.py`:
      - Restores detached decorations (`rigid` -> Bone Parent; `flex` -> independent skinned sub-mesh)
      - Enforces mandatory `<KIND>_<SIDE>_<GROUP>_<INDEX>` bone renaming (`canonicalize_rig_bone_names_in_blender`)
      - Hard-gates on `validate_canonical_rig_bone_names` (`valid == True`, zero `bone_0..N` anonymous bones)
-  2. Generates the 16 Standard Octahedral Bone Views (SOP §3.2):
-     - 4 candidates × 4 views (`front`, `side`, `back`, `three_quarter`) with Material Preview +
-       Octahedral (`OCTAHEDRAL`) deforming bone overlay (`cand_{0..3}_{view}_octahedral.png`, 16 images total)
+     - Saves uncompressed `candidate_{0..3}_full.blend` (`compress=False`) and `candidate_{0..3}_rig_meta.json`
+  2. Generates the 16 Standard Octahedral Bone Views (SOP §3.2) in real Blender (`BLENDER_WORKBENCH`):
+     - 4 candidates × 4 views (`front`, `side`, `back`, `three_quarter`) with 3D candidate mesh +
+       3D Octahedral bone overlay (`cand_{0..3}_{view}_octahedral.png`, 16 images total, `640x640`)
   3. Drives all 4 candidates with the same SOP §3.3 Archetype Test Motion (`winged`, `humanoid`,
-     `quadruped`, `aberrant`) on an identical timeline (6–12s @ 24 FPS), phase, camera, and lighting:
-     - Renders synchronized `front`, `side`, and `three_quarter` comparison videos
-     - Evaluates decoration follow-through and skinning stretch issues (`follow_through_issues.json`)
-  4. Builds self-contained `g1_review.html` and updates the SOP ledger to `awaiting_rig_review`.
+     `quadruped`, `aberrant`) on an identical timeline, phase, camera, and lighting in Blender:
+     - Evaluates real deformed mesh displacement, edge stretch ratios, and unweighted vertices (`follow_through_issues.json`)
+     - Renders synchronized `front`, `side`, and `three_quarter` 2x2 comparison frame sequences (`1280x720`)
+     - Encodes real H.264/MP4 videos via `ffmpeg` and verifies `ftyp` + `moov` + non-empty `mdat` atoms
+  4. Writes `g1_report.json` with SHA-256 evidence fingerprints, builds `g1_review.html`, and updates
+     the SOP ledger to `awaiting_rig_review`. Never falls back to template stick figures or 24-byte MP4 stubs.
 """
 
 from __future__ import annotations
@@ -21,11 +24,12 @@ from __future__ import annotations
 import argparse
 import html
 import json
-import math
 import os
 import shutil
+import struct
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -36,351 +40,229 @@ if str(SCRIPT_DIR) not in sys.path:
 from sop_gate import (  # noqa: E402
     MONSTER_ROOT,
     WORKER_DIR,
+    derive_invalidations,
     load_ledger,
     mark_awaiting_review,
     now_taipei_iso,
     save_ledger,
     sha256_file,
 )
-import numpy as np  # noqa: E402
 from bone_taxonomy import (  # noqa: E402
+    ARCHETYPE_SPECS,
     BONE_TAXONOMY_SCHEMA,
-    classify_rig_bones,
-    euler_xyz_to_matrix_numpy,
+    G1_SYNC_VIEWS,
+    G1_VIEWS,
+    synthesize_archetype_pose_eulers,
     validate_canonical_rig_bone_names,
 )
 from sop_preflight import (  # noqa: E402
-    _find_bpy_python,
-    inspect_glb_binary_preflight,
+    _worker_command,
+    _write_report,
     resolve_scratch_dirs,
 )
 
-ARCHETYPE_SPECS: dict[str, dict[str, Any]] = {
-    "winged": {
-        "title": "带翼类 · 展翅拍翼与收翼周期 (Wing Spread, Flap & Fold)",
-        "sop_clause": "SOP §3.3 带翼类",
-        "focus_checks": "翼根/翼中/翼尖联动、羽片或翼膜折叠间隙、躯干与尾羽随动、是否卷束穿体",
-    },
-    "humanoid": {
-        "title": "人形类 · 握拳半蹲至双手举顶站立 (Fist Squat to Overhead Reach)",
-        "sop_clause": "SOP §3.3 人形类",
-        "focus_checks": "肩/肘/前臂扭转/腕/指闭合、髋/膝/踝/趾配合、腋下与胯部体积挤压、衣摆随动",
-    },
-    "quadruped": {
-        "title": "四足/多足兽 · 重心转移、走跑与下颌撕咬 (Weight Shift, Gait & Jaw Bite)",
-        "sop_clause": "SOP §3.3 四足/多足兽",
-        "focus_checks": "前后左右腿交替支撑与相位、肩髋深屈曲、脊柱/颈/尾联动、下颌独立开合（非整头伪装张嘴）",
-    },
-    "aberrant": {
-        "title": "异形怪物 · 多肢交替抓取与长尾/触手异步盘绕 (Multi-Limb Grasp & Async Coil)",
-        "sop_clause": "SOP §3.3 异形怪物",
-        "focus_checks": "多节链条扭转累积、软肢局部塌陷、铰接轴心准确度与刚柔部件边界",
-    },
-}
 
-G1_VIEWS = ("front", "side", "back", "three_quarter")
+def _find_ffmpeg_binary() -> str | None:
+    """Finds an installed `ffmpeg` executable, or returns None if unavailable."""
+    candidates = [
+        os.environ.get("MONSTER_FFMPEG"),
+        shutil.which("ffmpeg"),
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/usr/bin/ffmpeg",
+    ]
+    for cand in candidates:
+        if cand and Path(cand).is_file() and os.access(cand, os.X_OK):
+            return str(Path(cand))
+    return None
 
 
-def synthesize_archetype_pose_eulers(
-    classified_bones: dict[str, dict[str, Any]],
-    archetype: str,
-    phase_rad: float,
-) -> dict[str, list[float]]:
-    """Computes synchronized local Euler (rx, ry, rz) angles in radians at phase `phase_rad` (0..2pi)
-    for any canonicalized rig (`<KIND>_<SIDE>_<GROUP>_<INDEX>`), guaranteeing identical motion intent
-    across all 4 candidates regardless of minor bone count differences.
-    """
-    if archetype not in ARCHETYPE_SPECS:
-        raise ValueError(f"Unsupported archetype: {archetype!r}; choose from {tuple(ARCHETYPE_SPECS)}")
-
-    s1 = math.sin(phase_rad)
-    c1 = math.cos(phase_rad)
-    s2 = math.sin(2.0 * phase_rad)
-    deg = math.radians
-    eulers: dict[str, list[float]] = {}
-
-    for b_name, info in classified_bones.items():
-        kind = str(info.get("kind", "limb")).lower()
-        sub_role = str(info.get("sub_role", "")).lower()
-        side = str(info.get("side", "C")).upper()
-        chain_idx = int(info.get("chain_index", 1))
-        group_num = int(str(info.get("group_id", "01")) or 1)
-        side_sign = 1.0 if side == "L" else (-1.0 if side == "R" else 0.0)
-        alt_phase = phase_rad + (0.0 if (group_num % 2 == 1) else math.pi) + (0.0 if side != "R" else math.pi)
-
-        if kind == "rigid" or info.get("fixed_local"):
-            eulers[b_name] = [0.0, 0.0, 0.0]
-        elif kind == "root":
-            eulers[b_name] = [deg(4.0) * s1, 0.0, deg(5.0) * c1]
-        elif kind == "spine":
-            eulers[b_name] = [deg(8.0) * s1, deg(3.0) * c1, deg(6.0) * s2]
-        elif kind == "head":
-            eulers[b_name] = [deg(10.0) * c1, deg(5.0) * s1, deg(8.0) * s1]
-        elif kind == "jaw":
-            # Independent jaw hinge opening (never faked via head pitch)
-            open_ratio = max(0.0, math.sin(phase_rad * 1.5))
-            eulers[b_name] = [deg(26.0) * open_ratio, 0.0, 0.0]
-        elif kind == "wing":
-            flap = math.sin(phase_rad - 0.35 * chain_idx)
-            fold = 0.5 * (1.0 - math.cos(phase_rad * 0.5))
-            eulers[b_name] = [
-                deg(38.0) * flap,
-                deg(10.0) * side_sign * fold,
-                deg(28.0) * side_sign * (0.6 * flap - 0.4 * fold),
-            ]
-        elif kind == "limb":
-            if archetype == "humanoid":
-                reach = math.sin(phase_rad)
-                if sub_role == "clavicle_socket":
-                    eulers[b_name] = [deg(15.0) * reach, 0.0, deg(12.0) * side_sign * reach]
-                elif sub_role in ("upper_limb", "ball_socket"):
-                    eulers[b_name] = [deg(55.0) * reach, deg(10.0) * side_sign, deg(22.0) * side_sign * reach]
-                elif sub_role == "forearm_hinge":
-                    eulers[b_name] = [deg(45.0) * max(0.0, -reach), deg(18.0) * s1, 0.0]
-                else:
-                    eulers[b_name] = [deg(18.0) * s1, 0.0, deg(10.0) * c1]
-            elif archetype == "quadruped":
-                gait = math.sin(alt_phase)
-                if sub_role in ("upper_limb", "ball_socket"):
-                    eulers[b_name] = [deg(34.0) * gait, 0.0, deg(6.0) * side_sign * c1]
-                elif sub_role == "forearm_hinge":
-                    eulers[b_name] = [deg(42.0) * max(0.0, -gait), 0.0, 0.0]
-                else:
-                    eulers[b_name] = [deg(20.0) * gait, 0.0, 0.0]
-            else:
-                wave = math.sin(alt_phase - 0.3 * chain_idx)
-                eulers[b_name] = [deg(30.0) * wave, deg(8.0) * c1, deg(16.0) * side_sign * wave]
-        elif kind == "digit":
-            curl = 0.5 * (1.0 + math.sin(phase_rad))
-            eulers[b_name] = [deg(32.0) * curl, 0.0, 0.0]
-        elif kind in ("tail", "flex"):
-            travel = math.sin(phase_rad * 1.5 - 0.45 * chain_idx)
-            eulers[b_name] = [deg(16.0) * travel, deg(4.0) * c1, deg(22.0) * travel]
-        else:
-            eulers[b_name] = [deg(10.0) * s1, 0.0, deg(10.0) * c1]
-
-    return eulers
-
-
-def _project_point_view(pt: np.ndarray, center: np.ndarray, scale: float, view: str, w: int, h: int) -> tuple[float, float]:
-    rel = (pt - center) / max(1e-5, scale)
-    if view == "front":
-        u_norm, v_norm = rel[0], rel[2]
-    elif view == "side":
-        u_norm, v_norm = rel[1], rel[2]
-    elif view == "back":
-        u_norm, v_norm = -rel[0], rel[2]
-    else:  # three_quarter
-        ang = math.radians(38.0)
-        u_norm = rel[0] * math.cos(ang) + rel[1] * math.sin(ang)
-        v_norm = rel[2] - 0.18 * (-rel[0] * math.sin(ang) + rel[1] * math.cos(ang))
-    u = float(0.5 * w + u_norm * h * 0.78)
-    v = float(0.5 * h - v_norm * h * 0.78)
-    return u, v
-
-
-def _draw_octahedral_bone_2d(
-    draw: Any,
-    uh: float,
-    vh: float,
-    ut: float,
-    vt: float,
-    fill_rgba: tuple[int, int, int],
-    outline_rgba: tuple[int, int, int] = (240, 248, 255),
-) -> None:
-    """Draws a standard Blender Octahedral bone silhouette from `head (uh, vh)` to `tail (ut, vt)`."""
-    dx = ut - uh
-    dy = vt - vh
-    length = math.hypot(dx, dy)
-    if length < 2.0:
-        draw.ellipse([uh - 3, vh - 3, uh + 3, vh + 3], fill=fill_rgba, outline=outline_rgba)
-        return
-    nx = -dy / length
-    ny = dx / length
-    half_w = max(3.0, min(14.0, 0.14 * length))
-    mid_x = uh + 0.22 * dx
-    mid_y = vh + 0.22 * dy
-    p_left = (mid_x + nx * half_w, mid_y + ny * half_w)
-    p_right = (mid_x - nx * half_w, mid_y - ny * half_w)
-    draw.polygon([(uh, vh), p_left, (ut, vt), p_right], fill=fill_rgba, outline=outline_rgba)
-    draw.line([(uh, vh), (ut, vt)], fill=outline_rgba, width=1)
-    draw.ellipse([uh - 3, vh - 3, uh + 3, vh + 3], fill=(255, 220, 100), outline=(30, 35, 45))
-    draw.ellipse([ut - 2, vt - 2, ut + 2, vt + 2], fill=(255, 255, 255))
-
-
-def render_octahedral_view_png(
-    rig_meta: dict[str, Any],
-    cand_idx: int,
-    view: str,
-    out_png: Path,
-    width: int = 640,
-    height: int = 640,
-) -> Path:
-    """Renders a high-clarity Material Clay silhouette + Standard Octahedral Bone Overlay for `(cand_idx, view)`."""
-    from PIL import Image, ImageDraw
-
-    canvas = Image.new("RGB", (width, height), (24, 28, 38))
-    draw = ImageDraw.Draw(canvas)
-
-    bones = rig_meta.get("bones", {})
-    bmin = np.asarray(rig_meta.get("bbox_min", [-0.5, -0.5, 0.0]), dtype=np.float64)
-    bmax = np.asarray(rig_meta.get("bbox_max", [0.5, 0.5, 1.5]), dtype=np.float64)
-    center = 0.5 * (bmin + bmax)
-    scale = float(max(1e-3, np.max(bmax - bmin)))
-
-    # Draw subtle studio floor grid and clay mesh hull envelope
-    for g in range(-4, 5):
-        p0 = _project_point_view(np.array([center[0] + g * 0.15 * scale, center[1] - 0.5 * scale, bmin[2]]), center, scale, view, width, height)
-        p1 = _project_point_view(np.array([center[0] + g * 0.15 * scale, center[1] + 0.5 * scale, bmin[2]]), center, scale, view, width, height)
-        draw.line([p0, p1], fill=(42, 49, 64), width=1)
-
-    kind_colors = {
-        "root": (245, 158, 11),
-        "rigid": (168, 85, 247),
-        "spine": (56, 189, 248),
-        "head": (52, 211, 153),
-        "jaw": (251, 113, 133),
-        "limb": (96, 165, 250),
-        "wing": (129, 140, 248),
-        "flex": (244, 114, 182),
-        "tail": (45, 212, 191),
-        "digit": (250, 204, 21),
-    }
-
-    # Draw clay capsules behind octahedral bones to represent Material Preview surface volume
-    for b_name, binfo in bones.items():
-        h3 = np.asarray(binfo.get("rest_head_world", [0.0, 0.0, 0.5]), dtype=np.float64)
-        t3 = np.asarray(binfo.get("rest_tail_world", [0.0, 0.0, 0.6]), dtype=np.float64)
-        uh, vh = _project_point_view(h3, center, scale, view, width, height)
-        ut, vt = _project_point_view(t3, center, scale, view, width, height)
-        seg_len = math.hypot(ut - uh, vt - vh)
-        clay_w = max(8, int(0.32 * seg_len))
-        draw.line([(uh, vh), (ut, vt)], fill=(118, 114, 108), width=clay_w)
-
-    # Overlay standard Octahedral bones in topological order
-    sorted_bones = sorted(bones.items(), key=lambda kv: int(kv[1].get("depth", 0)))
-    for b_name, binfo in sorted_bones:
-        h3 = np.asarray(binfo.get("rest_head_world", [0.0, 0.0, 0.5]), dtype=np.float64)
-        t3 = np.asarray(binfo.get("rest_tail_world", [0.0, 0.0, 0.6]), dtype=np.float64)
-        uh, vh = _project_point_view(h3, center, scale, view, width, height)
-        ut, vt = _project_point_view(t3, center, scale, view, width, height)
-        k_color = kind_colors.get(str(binfo.get("kind", "limb")).lower(), (96, 165, 250))
-        _draw_octahedral_bone_2d(draw, uh, vh, ut, vt, fill_rgba=k_color)
-
-    draw.rectangle([0, 0, width, 44], fill=(12, 16, 24))
-    draw.text(
-        (12, 12),
-        f"Candidate #{cand_idx} | View: {view.upper()} | Material + Octahedral Bones ({len(bones)})",
-        fill=(240, 246, 255),
-    )
-    out_png.parent.mkdir(parents=True, exist_ok=True)
-    canvas.save(out_png)
-    return out_png
-
-
-def _build_default_candidate_meta(cand_idx: int, cand_glb: Path | None, decor_manifest: dict[str, Any]) -> dict[str, Any]:
-    """Builds or canonicalizes a candidate's `studio_rig_meta.json`, guaranteeing `<KIND>_<SIDE>_<GROUP>_<INDEX>`."""
-    raw_bones: dict[str, Any] = {}
-    if cand_glb and cand_glb.is_file():
-        try:
-            glb_info = inspect_glb_binary_preflight(cand_glb)
-            if glb_info.get("classified_bones_preview"):
-                for old_n, binfo in glb_info["classified_bones_preview"].items():
-                    raw_bones[old_n] = {
-                        "parent": None,
-                        "rest_head_world": [0.0, 0.0, 0.5],
-                        "rest_tail_world": [0.0, 0.0, 0.65],
-                        "rest_length": 0.15,
-                    }
-        except Exception:
-            pass
-
-    if not raw_bones:
-        # Standard canonical rig template when inspecting without raw SkinTokens GLBs
-        raw_bones = {
-            "bone_0": {"parent": None, "rest_head_world": [0.0, 0.0, 0.50], "rest_tail_world": [0.0, 0.0, 0.65], "rest_length": 0.15},
-            "bone_1": {"parent": "bone_0", "rest_head_world": [0.0, 0.0, 0.65], "rest_tail_world": [0.0, 0.0, 0.85], "rest_length": 0.20},
-            "bone_2": {"parent": "bone_1", "rest_head_world": [0.0, 0.0, 0.85], "rest_tail_world": [0.0, -0.08, 1.02], "rest_length": 0.19},
-            "bone_3": {"parent": "bone_1", "rest_head_world": [0.08, 0.0, 0.80], "rest_tail_world": [0.24, 0.0, 0.68], "rest_length": 0.20},
-            "bone_4": {"parent": "bone_3", "rest_head_world": [0.24, 0.0, 0.68], "rest_tail_world": [0.38, -0.04, 0.52], "rest_length": 0.21},
-            "bone_5": {"parent": "bone_1", "rest_head_world": [-0.08, 0.0, 0.80], "rest_tail_world": [-0.24, 0.0, 0.68], "rest_length": 0.20},
-            "bone_6": {"parent": "bone_5", "rest_head_world": [-0.24, 0.0, 0.68], "rest_tail_world": [-0.38, -0.04, 0.52], "rest_length": 0.21},
-            "bone_7": {"parent": "bone_0", "rest_head_world": [0.0, 0.08, 0.48], "rest_tail_world": [0.0, 0.32, 0.35], "rest_length": 0.27},
-        }
-
-    classified = classify_rig_bones(raw_bones, bbox_min=[-0.45, -0.35, 0.0], bbox_max=[0.45, 0.35, 1.15])
-    rename_map: dict[str, str] = {}
-    canonical_bones: dict[str, Any] = {}
-    for old_name, info in classified.items():
-        c_name = info["canonical_name"]
-        rename_map[old_name] = c_name
-    for old_name, info in classified.items():
-        c_name = rename_map[old_name]
-        info_copy = dict(info)
-        info_copy["legacy_name"] = old_name
-        info_copy["canonical_name"] = c_name
-        if info_copy.get("parent") in rename_map:
-            info_copy["parent"] = rename_map[info_copy["parent"]]
-        info_copy["children"] = [rename_map.get(c, c) for c in info_copy.get("children", [])]
-        canonical_bones[c_name] = info_copy
-
-    validation = validate_canonical_rig_bone_names(canonical_bones)
-    if not validation["valid"]:
+def _validate_blend_file(blend_path: Path) -> None:
+    """Verifies that `blend_path` is a real uncompressed Blender `.blend` file (not a stub or Zstd stream)."""
+    if not blend_path.is_file():
+        raise FileNotFoundError(f"G1 候选 Blender 文件不存在: {blend_path}")
+    size = blend_path.stat().st_size
+    if size < 1024:
+        raise RuntimeError(f"G1 候选 Blender 文件过小 ({size} bytes)，拒绝占位文件: {blend_path}")
+    with blend_path.open("rb") as f:
+        header = f.read(32)
+    if header.startswith(b"\x28\xb5\x2f\xfd") or header.startswith(b"\x1f\x8b"):
         raise RuntimeError(
-            f"[SOP §3.1 硬门禁阻断] Candidate #{cand_idx} 骨骼规范重命名后仍存在非标骨骼: {validation['non_canonical_bones']}"
+            f"G1 候选 Blender 文件使用了压缩格式 ({blend_path.name})，工作台要求未压缩 .blend (compress=False)"
+        )
+    if not header.startswith(b"BLENDER"):
+        raise RuntimeError(f"G1 候选文件不是合法未压缩 Blender 头: {blend_path}")
+    if b"G1-CANDIDATE-" in header:
+        raise RuntimeError(f"检测到伪造的占位 .blend 头，拒绝通过: {blend_path}")
+
+
+def _validate_png_file(png_path: Path, expected_size: tuple[int, int] | None = None) -> tuple[int, int]:
+    """Verifies that `png_path` is a real PNG image and optionally matches `expected_size` `(width, height)`."""
+    if not png_path.is_file():
+        raise FileNotFoundError(f"PNG 渲染图不存在: {png_path}")
+    size = png_path.stat().st_size
+    if size < 128:
+        raise RuntimeError(f"PNG 渲染图过小 ({size} bytes): {png_path}")
+    with png_path.open("rb") as f:
+        header = f.read(24)
+    if len(header) < 24 or header[:8] != b"\x89PNG\r\n\x1a\n" or header[12:16] != b"IHDR":
+        raise RuntimeError(f"非法的 PNG 文件头: {png_path}")
+    width, height = struct.unpack(">II", header[16:24])
+    if expected_size is not None and (width, height) != expected_size:
+        raise RuntimeError(
+            f"PNG 尺寸不匹配 ({png_path.name}): 实际 {width}x{height}，期望 {expected_size[0]}x{expected_size[1]}"
+        )
+    return int(width), int(height)
+
+
+def _validate_mp4_file(mp4_path: Path) -> dict[str, Any]:
+    """Parses ISO BMFF / MP4 top-level atoms and verifies `ftyp`, `moov`, and non-empty `mdat` payload."""
+    if not mp4_path.is_file():
+        raise FileNotFoundError(f"MP4 视频不存在: {mp4_path}")
+    total_size = mp4_path.stat().st_size
+    if total_size < 256:
+        raise RuntimeError(
+            f"MP4 视频文件过小 ({total_size} bytes <= 256 bytes)，疑似 24 字节 ftyp 占位文件: {mp4_path}"
         )
 
+    boxes: list[str] = []
+    mdat_payload_bytes = 0
+    with mp4_path.open("rb") as f:
+        offset = 0
+        while offset + 8 <= total_size:
+            f.seek(offset)
+            hdr = f.read(8)
+            if len(hdr) < 8:
+                break
+            box_size, box_type_bytes = struct.unpack(">I4s", hdr)
+            box_type = box_type_bytes.decode("latin1", errors="replace")
+            header_len = 8
+            if box_size == 1:
+                ext = f.read(8)
+                if len(ext) < 8:
+                    break
+                box_size = struct.unpack(">Q", ext)[0]
+                header_len = 16
+            elif box_size == 0:
+                box_size = total_size - offset
+            if box_size < header_len or offset + box_size > total_size:
+                break
+            boxes.append(box_type)
+            if box_type == "mdat":
+                mdat_payload_bytes += max(0, int(box_size - header_len))
+            offset += box_size
+
+    required_boxes = {"ftyp", "moov", "mdat"}
+    missing = required_boxes.difference(boxes)
+    if missing or mdat_payload_bytes <= 0:
+        raise RuntimeError(
+            f"MP4 视频结构不完整 ({mp4_path.name}): boxes={boxes}, missing={sorted(missing)}, "
+            f"mdat_payload_bytes={mdat_payload_bytes}"
+        )
     return {
-        "schema_version": 2,
-        "bone_taxonomy_schema": BONE_TAXONOMY_SCHEMA,
-        "candidate_id": str(cand_idx),
-        "bbox_min": [-0.45, -0.35, 0.0],
-        "bbox_max": [0.45, 0.35, 1.15],
-        "num_active_bones": len(canonical_bones),
-        "canonical_rename_map": rename_map,
-        "bone_naming_validation": validation,
-        "decorations_restored": decor_manifest.get("detached_decorations", []),
-        "bones": canonical_bones,
+        "path": str(mp4_path),
+        "bytes": int(total_size),
+        "boxes": boxes,
+        "mdat_payload_bytes": int(mdat_payload_bytes),
     }
 
 
-def _encode_sync_comparison_video_or_placeholder(
+def _encode_sync_comparison_video(
     out_mp4: Path,
     frame_images: list[Path],
     fps: int = 24,
 ) -> Path:
-    """Encodes a synchronized MP4 from rendered frames via ffmpeg if available."""
+    """Encodes a real MP4 video from `frame_images` via `ffmpeg` and validates MP4 box integrity.
+    Never writes a 24-byte `ftyp` placeholder stub.
+    """
+    if not frame_images:
+        raise RuntimeError(f"缺少同步对比序列帧，无法编码视频: {out_mp4.name}")
+    for frame_path in frame_images:
+        _validate_png_file(Path(frame_path))
+
+    ffmpeg_bin = _find_ffmpeg_binary()
+    if not ffmpeg_bin:
+        raise RuntimeError("缺少 ffmpeg 运行时，无法编码真实 G1/G3 同步对比 MP4 视频")
+
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
-    ffmpeg_bin = shutil.which("ffmpeg")
-    if ffmpeg_bin and frame_images:
-        pattern = str(frame_images[0].parent / "sync_frame_%04d.png")
+    pattern = str(Path(frame_images[0]).parent / "sync_frame_%04d.png")
+
+    codec_attempts = [
+        ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+        ["-c:v", "mpeg4", "-q:v", "3", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+    ]
+    last_err: Exception | None = None
+    for codec_args in codec_attempts:
         try:
             subprocess.run(
                 [
                     ffmpeg_bin,
                     "-y",
                     "-framerate",
-                    str(fps),
+                    str(max(1, int(fps))),
                     "-i",
                     pattern,
-                    "-c:v",
-                    "libx264",
-                    "-pix_fmt",
-                    "yuv420p",
+                    *codec_args,
                     str(out_mp4),
                 ],
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 check=True,
-                timeout=30,
+                timeout=60,
             )
-            if out_mp4.is_file() and out_mp4.stat().st_size > 0:
-                return out_mp4
-        except Exception:
-            pass
-    # Write valid minimal MP4 ftyp header if ffmpeg is unavailable in minimal test environments
-    out_mp4.write_bytes(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom")
-    return out_mp4
+            _validate_mp4_file(out_mp4)
+            return out_mp4
+        except Exception as exc:
+            last_err = exc
+            continue
+
+    raise RuntimeError(f"ffmpeg 编码同步对比视频失败 ({out_mp4.name}): {last_err}")
+
+
+# Alias kept for internal caller compatibility; strictly encodes real MP4 and never writes placeholders.
+_encode_sync_comparison_video_or_placeholder = _encode_sync_comparison_video
+
+
+def validate_g1_evidence(report: dict[str, Any]) -> None:
+    """Validates that `g1_report.json` was produced by real Blender + FFmpeg and all artifacts match SHA-256."""
+    if report.get("schema_version") != 2 or report.get("backend") != "blender":
+        raise RuntimeError("G1 报告缺少真实 Blender 渲染与变形核验证据；必须重新运行 g1-pack")
+    if not report.get("passed"):
+        raise RuntimeError("G1 报告未通过真实性校验；必须重新运行 g1-pack")
+
+    evidence = report.get("evidence", {})
+    required_groups = {
+        "candidate_inputs",
+        "candidate_blends",
+        "candidate_metas",
+        "octahedral_views",
+        "sync_videos",
+        "follow_through_issues",
+        "review_html",
+    }
+    if not required_groups.issubset(evidence):
+        raise RuntimeError("G1 证据清单不完整；必须重新运行 g1-pack")
+
+    for group_key in ("candidate_inputs", "candidate_blends", "candidate_metas", "octahedral_views", "sync_videos"):
+        items = evidence.get(group_key, {})
+        if not isinstance(items, dict) or not items:
+            raise RuntimeError(f"G1 证据组为空: {group_key}")
+        for name, item in items.items():
+            p = Path(item.get("path", ""))
+            if not item.get("sha256") or sha256_file(p) != item["sha256"]:
+                raise RuntimeError(f"G1 证据已改变或缺失 ({group_key}:{name})；必须重新运行 g1-pack")
+            if group_key == "candidate_blends":
+                _validate_blend_file(p)
+            elif group_key == "octahedral_views":
+                _validate_png_file(p, expected_size=(640, 640))
+            elif group_key == "sync_videos":
+                _validate_mp4_file(p)
+
+    for single_key in ("follow_through_issues", "review_html"):
+        item = evidence.get(single_key, {})
+        p = Path(item.get("path", ""))
+        if not item.get("sha256") or sha256_file(p) != item["sha256"]:
+            raise RuntimeError(f"G1 证据已改变或缺失 ({single_key})；必须重新运行 g1-pack")
 
 
 def build_g1_review_html(
@@ -399,6 +281,7 @@ def build_g1_review_html(
     for c in candidates_summary:
         cid = int(c["candidate_id"])
         val = c["bone_naming_validation"]
+        audit_rep = c.get("audit_report", {})
         views_html = "".join(
             f'<div class="view-cell"><div class="view-label">{v.upper()}</div>'
             f'<img src="{html.escape(octahedral_rel_map[cid][v])}" alt="cand {cid} {v}"/></div>'
@@ -408,7 +291,8 @@ def build_g1_review_html(
             f"<tr><td><code>{html.escape(old_n)}</code></td><td><code>{html.escape(new_n)}</code></td>"
             f"<td><code>{html.escape(str(c['bones'][new_n].get('kind', '')).upper())}</code></td>"
             f"<td><code>{html.escape(str(c['bones'][new_n].get('sub_role', '')))}</code></td></tr>"
-            for old_n, new_n in list(c.get("canonical_rename_map", {}).items())[:12]
+            for old_n, new_n in list(c.get("canonical_rename_map", {}).items())[:16]
+            if new_n in c.get("bones", {})
         )
         cand_cards.append(f"""
         <section class="card">
@@ -416,7 +300,13 @@ def build_g1_review_html(
             <h2>候选 #{cid} (<code>candidate_{cid}</code>)</h2>
             <span class="badge pass">规范命名 100% 合规 ({val['canonical_count']}/{val['total_bones']} 骨 · 零匿名骨)</span>
           </div>
-          <p class="meta">已恢复完整装饰：{len(c.get('decorations_restored', []))} 项 | Blend: <code>{html.escape(c.get('blend_file', ''))}</code></p>
+          <p class="meta">
+            几何评分：<code>{html.escape(str(audit_rep.get('score', 'N/A')))}</code> |
+            穿出率：<code>{html.escape(str(audit_rep.get('outside_ratio', 'N/A')))}</code> |
+            四象限覆盖：<code>{html.escape(str(audit_rep.get('quadrants_covered', 'N/A')))}</code> |
+            已恢复装饰：{len(c.get('restored_decorations', []))} 项 |
+            Blend: <code>{html.escape(Path(c.get('blend_file', '')).name)}</code>
+          </p>
           <div class="views-grid">{views_html}</div>
           <details style="margin-top:12px;">
             <summary>查看强制骨骼规范命名映射表 (<code>&lt;KIND&gt;_&lt;SIDE&gt;_&lt;GROUP&gt;_&lt;INDEX&gt;</code>)</summary>
@@ -501,8 +391,10 @@ def build_g1_review_pack(
     duration_sec: float = 6.0,
     fps: int = 24,
 ) -> dict[str, Any]:
-    """End-to-end deterministic G1 builder: restores decorations on 4 candidates, canonicalizes all bones,
-    renders 16 octahedral bone views + synchronized motion comparison videos, and marks `awaiting_rig_review`.
+    """End-to-end deterministic G1 builder: requires 4 real candidate GLBs, runs headless Blender
+    (`studio_bpy_worker.py --mode prepare_g1_candidates`) to restore decorations, canonicalize bones,
+    render 16 3D Octahedral bone views, evaluate real mesh deformation across the archetype test motion,
+    and encode 3 synchronized 2x2 comparison MP4 videos via `ffmpeg`.
     """
     if archetype not in ARCHETYPE_SPECS:
         raise ValueError(f"Invalid archetype {archetype!r}; choose from {tuple(ARCHETYPE_SPECS)}")
@@ -512,110 +404,242 @@ def build_g1_review_pack(
     work_dir = dirs["work_dir"]
     checks_dir = dirs["checks_dir"] / "g1_review"
     checks_dir.mkdir(parents=True, exist_ok=True)
+    report_path = checks_dir / "g1_report.json"
 
-    cand_src_dir = Path(candidates_dir) if candidates_dir else (work_dir / "candidates")
-    cand_src_dir.mkdir(parents=True, exist_ok=True)
+    # Invalidate previous G1 approval/waiting state before running anything that can fail.
+    ledger = load_ledger(monster_id, project_root=proj, drive_root=drive_root)
+    derive_invalidations(ledger, change_type="skeleton_topology_defect")
+    ledger["gates"]["G1"]["status"] = "not_ready"
+    ledger["gates"]["G1"]["user_decision"] = "pending"
+    save_ledger(ledger, project_root=proj, drive_root=drive_root)
 
-    decor_manifest_path = work_dir / "decoration_manifest.json"
-    decor_manifest = (
-        json.loads(decor_manifest_path.read_text(encoding="utf-8"))
-        if decor_manifest_path.is_file()
-        else {"detached_decorations": []}
-    )
+    report: dict[str, Any] = {
+        "schema_version": 2,
+        "monster_id": monster_id,
+        "archetype": archetype,
+        "checked_at": now_taipei_iso(),
+        "passed": False,
+        "status": "running",
+        "evidence": {},
+    }
+    _write_report(report_path, report)
 
-    bpy_py = _find_bpy_python()
-    bpy_worker = WORKER_DIR / "studio_bpy_worker.py"
-    if bpy_py and bpy_worker.is_file() and any(cand_src_dir.glob("candidate_*.glb")):
-        subprocess.run(
-            [
-                bpy_py,
-                str(bpy_worker),
+    try:
+        cand_src_dir = Path(candidates_dir).resolve() if candidates_dir else (work_dir / "candidates")
+        cand_glbs = [cand_src_dir / f"candidate_{cid}.glb" for cid in range(4)]
+        missing_cands = [str(p) for p in cand_glbs if not p.is_file()]
+        if missing_cands:
+            raise FileNotFoundError(
+                f"G1 缺少 4 个真实候选绑定 GLB (candidate_0..3.glb): {missing_cands}"
+            )
+
+        decor_manifest_path = work_dir / "decoration_manifest.json"
+        with tempfile.TemporaryDirectory(dir=work_dir, prefix="g1_stage_") as temp_dir:
+            stage_dir = Path(temp_dir)
+            worker_args = [
                 "--mode",
                 "prepare_g1_candidates",
                 "--candidates",
-                *[str(p) for p in sorted(cand_src_dir.glob("candidate_*.glb"))[:4]],
+                *[str(p) for p in cand_glbs],
                 "--out_dir",
-                str(work_dir / "g1_candidates"),
-            ],
-            check=False,
-        )
+                str(stage_dir),
+                "--archetype",
+                archetype,
+            ]
+            if decor_manifest_path.is_file():
+                worker_args.extend(["--decor_manifest", str(decor_manifest_path)])
 
-    g1_cand_dir = work_dir / "g1_candidates"
-    g1_cand_dir.mkdir(parents=True, exist_ok=True)
-
-    candidates_summary: list[dict[str, Any]] = []
-    octahedral_rel_map: dict[int, dict[str, str]] = {}
-    follow_through_issues: list[dict[str, Any]] = []
-
-    for cid in range(4):
-        cand_glb = cand_src_dir / f"candidate_{cid}.glb"
-        meta_path = g1_cand_dir / f"candidate_{cid}_rig_meta.json"
-        blend_path = g1_cand_dir / f"candidate_{cid}_full.blend"
-
-        if meta_path.is_file():
-            rig_meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            val = validate_canonical_rig_bone_names(rig_meta.get("bones", {}))
-            if not val["valid"]:
+            command = _worker_command(worker_args)
+            if not command:
                 raise RuntimeError(
-                    f"[SOP §3.1 硬门禁阻断] candidate_{cid} 含有未规范命名的骨骼: {val['non_canonical_bones']}"
+                    "缺少 bpy/Blender 运行时，无法生成真实 G1 四候选骨架渲染、装饰恢复与同步对比视频"
                 )
-            rig_meta["bone_naming_validation"] = val
-        else:
-            rig_meta = _build_default_candidate_meta(cid, cand_glb if cand_glb.is_file() else None, decor_manifest)
-            meta_path.write_text(json.dumps(rig_meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
-        if not blend_path.is_file():
-            blend_path.write_bytes(b"BLENDER-v402-G1-CANDIDATE-" + str(cid).encode("ascii"))
+            subprocess.run(command, check=True, timeout=300)
 
-        rig_meta["blend_file"] = str(blend_path)
-        rig_meta["meta_file"] = str(meta_path)
-        candidates_summary.append(rig_meta)
+            summary_path = stage_dir / "bpy_g1_summary.json"
+            if not summary_path.is_file():
+                raise FileNotFoundError(f"Blender G1 worker 未生成 bpy_g1_summary.json: {summary_path}")
+            bpy_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            if bpy_summary.get("schema_version") != 2 or bpy_summary.get("render_engine") != "BLENDER_WORKBENCH":
+                raise RuntimeError("Blender G1 worker 摘要缺少 schema_version=2 或 BLENDER_WORKBENCH 证据")
 
-        octahedral_rel_map[cid] = {}
-        for view in G1_VIEWS:
-            img_name = f"cand_{cid}_{view}_octahedral.png"
-            img_path = checks_dir / img_name
-            if not img_path.is_file():
-                render_octahedral_view_png(rig_meta, cid, view, img_path)
-            octahedral_rel_map[cid][view] = img_name
+            eff_fps = int(bpy_summary.get("fps") or fps or 24)
+            raw_ft_issues = bpy_summary.get("follow_through_issues", {})
 
-        # Synthesize archetype test motion at key phases to verify zero NaN & record follow-through status
-        for phase in (0.0, 0.5 * math.pi, math.pi, 1.5 * math.pi):
-            _ = synthesize_archetype_pose_eulers(rig_meta["bones"], archetype, phase)
+            g1_cand_dir = work_dir / "g1_candidates"
+            g1_cand_dir.mkdir(parents=True, exist_ok=True)
 
-        follow_through_issues.append({
-            "candidate_id": cid,
-            "check": f"{ARCHETYPE_SPECS[archetype]['title']} 装饰随动与规范命名核验",
-            "status": "PASS",
-            "detail": (
-                f"全部 {rig_meta['bone_naming_validation']['canonical_count']} 根变形骨骼 100% 符合 "
-                f"<KIND>_<SIDE>_<GROUP>_<INDEX>；刚性挂件零局部形变，柔性分件独立蒙皮无穿插。"
-            ),
-        })
+            candidates_summary: list[dict[str, Any]] = []
+            octahedral_rel_map: dict[int, dict[str, str]] = {}
+            follow_through_issues: list[dict[str, Any]] = []
+            evidence_inputs: dict[str, dict[str, str]] = {}
+            evidence_blends: dict[str, dict[str, str]] = {}
+            evidence_metas: dict[str, dict[str, str]] = {}
+            evidence_views: dict[str, dict[str, str]] = {}
+            evidence_videos: dict[str, dict[str, str]] = {}
 
-    # Render / encode synchronized 4-candidate comparison videos (front, side, three_quarter)
-    sync_video_rels: dict[str, str] = {}
-    for v_name in ("front", "side", "three_quarter"):
-        mp4_name = f"g1_candidates_sync_{v_name}.mp4"
-        mp4_path = checks_dir / mp4_name
-        _encode_sync_comparison_video_or_placeholder(mp4_path, [], fps=fps)
-        sync_video_rels[v_name] = mp4_name
+            for cid in range(4):
+                cand_key = f"candidate_{cid}"
+                src_glb = cand_glbs[cid]
+                evidence_inputs[cand_key] = {"path": str(src_glb), "sha256": sha256_file(src_glb)}
 
-    issues_path = checks_dir / "follow_through_issues.json"
-    issues_path.write_text(json.dumps(follow_through_issues, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+                staged_meta = stage_dir / f"candidate_{cid}_rig_meta.json"
+                if not staged_meta.is_file():
+                    staged_meta = stage_dir / cand_key / "studio_rig_meta.json"
+                if not staged_meta.is_file():
+                    raise FileNotFoundError(f"缺少候选骨骼元数据: {staged_meta}")
 
-    html_path = checks_dir / "g1_review.html"
-    build_g1_review_html(
-        monster_id=monster_id,
-        archetype=archetype,
-        candidates_summary=candidates_summary,
-        octahedral_rel_map=octahedral_rel_map,
-        sync_video_rels=sync_video_rels,
-        follow_through_issues=follow_through_issues,
-        out_html_path=html_path,
-    )
+                staged_blend = stage_dir / f"candidate_{cid}_full.blend"
+                _validate_blend_file(staged_blend)
 
-    # Register awaiting_rig_review in SOP ledger
+                rig_meta = json.loads(staged_meta.read_text(encoding="utf-8"))
+                val = validate_canonical_rig_bone_names(rig_meta.get("bones", {}))
+                if not val["valid"]:
+                    raise RuntimeError(
+                        f"[SOP §3.1 硬门禁阻断] {cand_key} 含有未规范命名的骨骼: {val['non_canonical_bones']}"
+                    )
+                rig_meta["candidate_id"] = str(cid)
+                rig_meta["bone_naming_validation"] = val
+
+                dest_blend = g1_cand_dir / f"candidate_{cid}_full.blend"
+                dest_meta = g1_cand_dir / f"candidate_{cid}_rig_meta.json"
+                dest_sub_dir = g1_cand_dir / cand_key
+                dest_sub_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(staged_blend, dest_blend)
+
+                staged_full_glb = stage_dir / f"candidate_{cid}_full.glb"
+                if staged_full_glb.is_file():
+                    shutil.copy2(staged_full_glb, g1_cand_dir / f"candidate_{cid}_full.glb")
+
+                rig_meta["blend_file"] = str(dest_blend)
+                rig_meta["meta_file"] = str(dest_meta)
+                meta_text = json.dumps(rig_meta, indent=2, ensure_ascii=False) + "\n"
+                dest_meta.write_text(meta_text, encoding="utf-8")
+                (dest_sub_dir / "studio_rig_meta.json").write_text(meta_text, encoding="utf-8")
+
+                evidence_blends[cand_key] = {"path": str(dest_blend), "sha256": sha256_file(dest_blend)}
+                evidence_metas[cand_key] = {"path": str(dest_meta), "sha256": sha256_file(dest_meta)}
+                candidates_summary.append(rig_meta)
+
+                octahedral_rel_map[cid] = {}
+                for view in G1_VIEWS:
+                    img_name = f"cand_{cid}_{view}_octahedral.png"
+                    staged_img = stage_dir / img_name
+                    _validate_png_file(staged_img, expected_size=(640, 640))
+                    dest_img = checks_dir / img_name
+                    shutil.copy2(staged_img, dest_img)
+                    octahedral_rel_map[cid][view] = img_name
+                    evidence_views[f"{cand_key}_{view}"] = {"path": str(dest_img), "sha256": sha256_file(dest_img)}
+
+                ft_info = raw_ft_issues.get(cand_key)
+                if not isinstance(ft_info, dict) or "max_vertex_displacement_norm" not in ft_info:
+                    raise RuntimeError(f"缺少 {cand_key} 的真实网格变形与随动核验指标")
+
+                ft_status = str(ft_info.get("status", "PASS"))
+                detail_str = (
+                    f"规范骨骼 {val['canonical_count']}/{val['total_bones']} 根；"
+                    f"最大顶点位移比={ft_info.get('max_vertex_displacement_norm')}，"
+                    f"最大边拉伸比={ft_info.get('max_edge_stretch_ratio')}，"
+                    f"异常拉伸边占比={ft_info.get('max_bad_edge_ratio')}，"
+                    f"未赋权顶点={ft_info.get('unweighted_vertices')}/{ft_info.get('total_vertices')}，"
+                    f"几何评分={ft_info.get('geometric_score')} (穿出率={ft_info.get('outside_ratio')})"
+                )
+                if ft_info.get("issues"):
+                    detail_str += f" | 发现项: {', '.join(str(x) for x in ft_info['issues'])}"
+
+                follow_through_issues.append(
+                    {
+                        "candidate_id": cid,
+                        "check": f"{ARCHETYPE_SPECS[archetype]['title']} 真实网格变形与装饰随动核验",
+                        "status": ft_status,
+                        "detail": detail_str,
+                        "metrics": ft_info,
+                    }
+                )
+
+            if all(item["status"] == "FAIL" for item in follow_through_issues):
+                raise RuntimeError(
+                    "G1 四个候选全部未通过真实网格变形核验 (status=FAIL)，请检查候选蒙皮权重或骨骼绑定"
+                )
+
+            sync_video_rels: dict[str, str] = {}
+            video_box_reports: dict[str, dict[str, Any]] = {}
+            for v_name in G1_SYNC_VIEWS:
+                frame_dir = stage_dir / "sync_frames" / v_name
+                frame_images = sorted(frame_dir.glob("sync_frame_*.png"))
+                if len(frame_images) < 8:
+                    raise RuntimeError(
+                        f"G1 同步对比视角 {v_name} 渲染帧数不足 ({len(frame_images)} < 8)"
+                    )
+                for f_img in frame_images:
+                    _validate_png_file(f_img, expected_size=(1280, 720))
+
+                mp4_name = f"g1_candidates_sync_{v_name}.mp4"
+                staged_mp4 = stage_dir / mp4_name
+                _encode_sync_comparison_video(staged_mp4, frame_images, fps=eff_fps)
+                box_rep = _validate_mp4_file(staged_mp4)
+
+                dest_mp4 = checks_dir / mp4_name
+                shutil.copy2(staged_mp4, dest_mp4)
+                sync_video_rels[v_name] = mp4_name
+                video_box_reports[v_name] = box_rep
+                evidence_videos[v_name] = {"path": str(dest_mp4), "sha256": sha256_file(dest_mp4)}
+
+            issues_path = checks_dir / "follow_through_issues.json"
+            issues_path.write_text(
+                json.dumps(follow_through_issues, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+
+            html_path = checks_dir / "g1_review.html"
+            build_g1_review_html(
+                monster_id=monster_id,
+                archetype=archetype,
+                candidates_summary=candidates_summary,
+                octahedral_rel_map=octahedral_rel_map,
+                sync_video_rels=sync_video_rels,
+                follow_through_issues=follow_through_issues,
+                out_html_path=html_path,
+            )
+
+            report.update(
+                {
+                    "backend": "blender",
+                    "render_engine": bpy_summary.get("render_engine", "BLENDER_WORKBENCH"),
+                    "passed": True,
+                    "status": "awaiting_rig_review",
+                    "review_html": str(html_path),
+                    "follow_through_issues_json": str(issues_path),
+                    "octahedral_views_rendered": 16,
+                    "sync_videos": {k: str(checks_dir / v) for k, v in sync_video_rels.items()},
+                    "video_validation": video_box_reports,
+                    "evidence": {
+                        "candidate_inputs": evidence_inputs,
+                        "candidate_blends": evidence_blends,
+                        "candidate_metas": evidence_metas,
+                        "octahedral_views": evidence_views,
+                        "sync_videos": evidence_videos,
+                        "follow_through_issues": {
+                            "path": str(issues_path),
+                            "sha256": sha256_file(issues_path),
+                        },
+                        "review_html": {
+                            "path": str(html_path),
+                            "sha256": sha256_file(html_path),
+                        },
+                    },
+                }
+            )
+            _write_report(report_path, report)
+
+    except Exception as exc:
+        report["status"] = "failed"
+        report["error"] = str(exc)
+        _write_report(report_path, report)
+        raise
+
+    # Register awaiting_rig_review in SOP ledger only after all real Blender + FFmpeg evidence is verified
     ledger = load_ledger(monster_id, project_root=proj, drive_root=drive_root)
     mark_awaiting_review(
         ledger,
@@ -623,6 +647,7 @@ def build_g1_review_pack(
         review_pack_path=str(html_path),
         materials={
             "archetype": archetype,
+            "g1_report_json": str(report_path),
             "rig_meta_path": candidates_summary[0]["meta_file"],
             "candidate_metas": [c["meta_file"] for c in candidates_summary],
             "candidate_blends": [c["blend_file"] for c in candidates_summary],
@@ -637,6 +662,7 @@ def build_g1_review_pack(
         "monster_id": monster_id,
         "archetype": archetype,
         "status": "awaiting_rig_review",
+        "g1_report_json": str(report_path),
         "review_html": str(html_path),
         "octahedral_views_rendered": 16,
         "sync_videos": {k: str(checks_dir / v) for k, v in sync_video_rels.items()},

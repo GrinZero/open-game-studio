@@ -1589,19 +1589,14 @@ class MonsterSopExecutionSuiteTests(unittest.TestCase):
                 drive_root = Path(tmp) / "drive"
                 src_glb = self._create_minimal_glb(proj_root / "scratch/raw/troll_source.glb")
 
-                # 1. Stage 1 Preflight + U1 sync
-                pre_rep = sop_preflight.run_preflight(
-                    monster_id="troll_01",
-                    input_glb=src_glb,
-                    project_root=proj_root,
-                )
-                self.assertTrue(pre_rep["passed"])
-                u1_rep = sop_preflight.sync_u1_to_drive(
-                    monster_id="troll_01",
-                    project_root=proj_root,
-                    drive_root=drive_root,
-                )
-                self.assertTrue(Path(u1_rep["drive_u1_glb"]).is_file())
+                # No Blender: a structural GLB fixture is never a valid preflight/U1 result.
+                with patch.object(sop_preflight, "_worker_command", return_value=None):
+                    with self.assertRaisesRegex(RuntimeError, "bpy/Blender"):
+                        sop_preflight.run_preflight("troll_01", src_glb, project_root=proj_root)
+                report_path = sop_preflight.resolve_scratch_dirs(proj_root, "troll_01")["checks_dir"] / "preflight_report.json"
+                self.assertFalse(json.loads(report_path.read_text())["passed"])
+                with self.assertRaises(RuntimeError):
+                    sop_preflight.sync_u1_to_drive("troll_01", project_root=proj_root, drive_root=drive_root)
 
                 # Verify art_source redline violation is caught if intermediate file is placed in art_source/
                 bad_dir = proj_root / "art_source/troll_01/v1"
@@ -1616,16 +1611,98 @@ class MonsterSopExecutionSuiteTests(unittest.TestCase):
                 work_dir = dirs["work_dir"]
                 for idx in range(4):
                     self._create_minimal_glb(work_dir / "candidates" / f"candidate_{idx}.glb")
-                g1_rep = sop_g1_pack.build_g1_review_pack(
-                    monster_id="troll_01",
-                    archetype="humanoid",
-                    project_root=proj_root,
-                    drive_root=drive_root,
-                )
+
+                # No Blender: G1 pack must fail and never fabricate stick figures or 24-byte MP4s.
+                with patch.object(sop_g1_pack, "_worker_command", return_value=None):
+                    with self.assertRaisesRegex(RuntimeError, "bpy/Blender"):
+                        sop_g1_pack.build_g1_review_pack(
+                            monster_id="troll_01",
+                            archetype="humanoid",
+                            project_root=proj_root,
+                            drive_root=drive_root,
+                        )
+
+                def _fake_g1_worker(cmd, **kwargs):
+                    from PIL import Image
+
+                    stage_out = Path(cmd[cmd.index("--out_dir") + 1])
+                    raw_bones = {
+                        "bone_0": {"parent": None, "rest_head_world": [0.0, 0.0, 0.50], "rest_tail_world": [0.0, 0.0, 0.65], "rest_length": 0.15},
+                        "bone_1": {"parent": "bone_0", "rest_head_world": [0.0, 0.0, 0.65], "rest_tail_world": [0.0, 0.0, 0.85], "rest_length": 0.20},
+                        "bone_2": {"parent": "bone_1", "rest_head_world": [0.0, 0.0, 0.85], "rest_tail_world": [0.0, -0.08, 1.02], "rest_length": 0.19},
+                        "bone_3": {"parent": "bone_1", "rest_head_world": [0.08, 0.0, 0.80], "rest_tail_world": [0.24, 0.0, 0.68], "rest_length": 0.20},
+                        "bone_4": {"parent": "bone_1", "rest_head_world": [-0.08, 0.0, 0.80], "rest_tail_world": [-0.24, 0.0, 0.68], "rest_length": 0.20},
+                    }
+                    classified = sop_preflight.classify_rig_bones(raw_bones, bbox_min=[-0.45, -0.35, 0.0], bbox_max=[0.45, 0.35, 1.15])
+                    canonical_bones = {}
+                    rename_map = {}
+                    for old_n, info in classified.items():
+                        cn = info["canonical_name"]
+                        rename_map[old_n] = cn
+                        canonical_bones[cn] = {
+                            **info,
+                            "legacy_name": old_n,
+                            "parent": classified[info["parent"]]["canonical_name"] if info.get("parent") in classified else None,
+                            "children": [classified[c]["canonical_name"] for c in info.get("children", []) if c in classified],
+                        }
+                    ft_issues = {}
+                    for cid in range(4):
+                        ck = f"candidate_{cid}"
+                        (stage_out / f"{ck}_full.blend").write_bytes(b"BLENDER-v402" + b"\x00" * 2048)
+                        meta = {
+                            "schema_version": 2,
+                            "bbox_min": [-0.45, -0.35, 0.0],
+                            "bbox_max": [0.45, 0.35, 1.15],
+                            "canonical_rename_map": rename_map,
+                            "bone_naming_validation": sop_preflight.validate_canonical_rig_bone_names(canonical_bones),
+                            "audit_report": {"score": 82.5, "outside_ratio": 0.0, "quadrants_covered": "4/4"},
+                            "restored_decorations": [],
+                            "bones": canonical_bones,
+                        }
+                        (stage_out / f"{ck}_rig_meta.json").write_text(json.dumps(meta))
+                        for v in sop_g1_pack.G1_VIEWS:
+                            Image.new("RGB", (640, 640), (28, 34, 46)).save(stage_out / f"cand_{cid}_{v}_octahedral.png")
+                        ft_issues[ck] = {
+                            "status": "PASS",
+                            "max_vertex_displacement_norm": 0.12,
+                            "max_edge_stretch_ratio": 1.18,
+                            "max_bad_edge_ratio": 0.0,
+                            "unweighted_vertices": 0,
+                            "total_vertices": 64,
+                            "geometric_score": 82.5,
+                            "outside_ratio": 0.0,
+                            "issues": [],
+                        }
+                    for sv in sop_g1_pack.G1_SYNC_VIEWS:
+                        fdir = stage_out / "sync_frames" / sv
+                        fdir.mkdir(parents=True, exist_ok=True)
+                        for f_i in range(8):
+                            Image.new("RGB", (1280, 720), (20 + f_i * 4, 28, 40)).save(fdir / f"sync_frame_{f_i:04d}.png")
+                    (stage_out / "bpy_g1_summary.json").write_text(
+                        json.dumps({"schema_version": 2, "render_engine": "BLENDER_WORKBENCH", "fps": 24, "follow_through_issues": ft_issues})
+                    )
+
+                real_subproc_run = sop_g1_pack.subprocess.run
+
+                def _dispatch_run(cmd, *a, **kw):
+                    if "--mode" in cmd and "prepare_g1_candidates" in cmd:
+                        return _fake_g1_worker(cmd, **kw)
+                    return real_subproc_run(cmd, *a, **kw)
+
+                with patch.object(sop_g1_pack, "_worker_command", side_effect=lambda args: args), \
+                     patch.object(sop_g1_pack.subprocess, "run", side_effect=_dispatch_run), \
+                     patch.object(sop_g2_pack, "_worker_command", return_value=None):
+                    g1_rep = sop_g1_pack.build_g1_review_pack(
+                        monster_id="troll_01",
+                        archetype="humanoid",
+                        project_root=proj_root,
+                        drive_root=drive_root,
+                    )
                 self.assertEqual(g1_rep["status"], "awaiting_rig_review")
                 self.assertEqual(g1_rep["octahedral_views_rendered"], 16)
                 self.assertEqual(len(g1_rep["candidates"]), 4)
                 self.assertTrue(Path(g1_rep["review_html"]).is_file())
+                sop_g1_pack.validate_g1_evidence(json.loads(Path(g1_rep["g1_report_json"]).read_text()))
 
                 # Approve G1 via CLI dispatcher
                 rc_g1 = monster_sop.main([
@@ -1642,13 +1719,14 @@ class MonsterSopExecutionSuiteTests(unittest.TestCase):
                 self.assertEqual(rc_g1, 0)
 
                 # 3. Stage 3 G2 50-pose Pack
-                g2_rep = sop_g2_pack.build_g2_review_pack(
-                    monster_id="troll_01",
-                    seed=42,
-                    num_poses=50,
-                    project_root=proj_root,
-                    drive_root=drive_root,
-                )
+                with patch.object(sop_g2_pack, "_worker_command", return_value=None):
+                    g2_rep = sop_g2_pack.build_g2_review_pack(
+                        monster_id="troll_01",
+                        seed=42,
+                        num_poses=50,
+                        project_root=proj_root,
+                        drive_root=drive_root,
+                    )
                 self.assertEqual(g2_rep["num_poses"], 50)
                 self.assertTrue(Path(g2_rep["overview_jpg"]).is_file())
                 self.assertTrue(Path(g2_rep["review_html"]).is_file())

@@ -2935,3 +2935,128 @@ def audit_pose_dataset_coverage(
         "passed": len(failures) == 0,
         "failures": failures,
     }
+
+
+ARCHETYPE_SPECS: dict[str, dict[str, Any]] = {
+    "winged": {
+        "title": "带翼类 · 展翅拍翼与收翼周期 (Wing Spread, Flap & Fold)",
+        "sop_clause": "SOP §3.3 带翼类",
+        "focus_checks": "翼根/翼中/翼尖联动、羽片或翼膜折叠间隙、躯干与尾羽随动、是否卷束穿体",
+        "action": "wing_spread_flap_fold",
+        "frames": 48,
+        "fps": 24,
+    },
+    "humanoid": {
+        "title": "人形类 · 握拳半蹲至双手举顶站立 (Fist Squat to Overhead Reach)",
+        "sop_clause": "SOP §3.3 人形类",
+        "focus_checks": "肩/肘/前臂扭转/腕/指闭合、髋/膝/踝/趾配合、腋下与胯部体积挤压、衣摆随动",
+        "action": "fist_squat_to_overhead_reach",
+        "frames": 48,
+        "fps": 24,
+    },
+    "quadruped": {
+        "title": "四足/多足兽 · 重心转移、走跑与下颌撕咬 (Weight Shift, Gait & Jaw Bite)",
+        "sop_clause": "SOP §3.3 四足/多足兽",
+        "focus_checks": "前后左右腿交替支撑与相位、肩髋深屈曲、脊柱/颈/尾联动、下颌独立开合（非整头伪装张嘴）",
+        "action": "weight_shift_gait_jaw_bite",
+        "frames": 48,
+        "fps": 24,
+    },
+    "aberrant": {
+        "title": "异形怪物 · 多肢交替抓取与长尾/触手异步盘绕 (Multi-Limb Grasp & Async Coil)",
+        "sop_clause": "SOP §3.3 异形怪物",
+        "focus_checks": "多节链条扭转累积、软肢局部塌陷、铰接轴心准确度与刚柔部件边界",
+        "action": "multi_limb_grasp_async_coil",
+        "frames": 48,
+        "fps": 24,
+    },
+}
+
+G1_VIEWS = ("front", "side", "back", "three_quarter")
+G1_SYNC_VIEWS = ("front", "side", "three_quarter")
+
+
+def synthesize_archetype_pose_eulers(
+    classified_bones: dict[str, dict[str, Any]],
+    archetype: str,
+    phase_or_frame: float | int,
+    total_frames: int | None = None,
+) -> dict[str, list[float]]:
+    """Computes synchronized local Euler (rx, ry, rz) angles in radians at phase `phase_rad` (0..2pi)
+    or frame index `(frame_idx, total_frames)` for any canonicalized rig (`<KIND>_<SIDE>_<GROUP>_<INDEX>`),
+    guaranteeing identical motion intent across all 4 candidates regardless of minor bone count differences.
+    """
+    if archetype not in ARCHETYPE_SPECS:
+        raise ValueError(f"Unsupported archetype: {archetype!r}; choose from {tuple(ARCHETYPE_SPECS)}")
+
+    if total_frames is not None:
+        phase_rad = 2.0 * math.pi * float(phase_or_frame) / float(max(1, total_frames))
+    else:
+        phase_rad = float(phase_or_frame)
+
+    s1 = math.sin(phase_rad)
+    c1 = math.cos(phase_rad)
+    s2 = math.sin(2.0 * phase_rad)
+    deg = math.radians
+    eulers: dict[str, list[float]] = {}
+
+    for b_name, info in classified_bones.items():
+        kind = str(info.get("kind", "limb")).lower()
+        sub_role = str(info.get("sub_role", "")).lower()
+        side = str(info.get("side", "C")).upper()
+        chain_idx = int(info.get("chain_index", 1))
+        group_num = int(str(info.get("group_id", "01")) or 1)
+        side_sign = 1.0 if side == "L" else (-1.0 if side == "R" else 0.0)
+        alt_phase = phase_rad + (0.0 if (group_num % 2 == 1) else math.pi) + (0.0 if side != "R" else math.pi)
+
+        if kind == "rigid" or info.get("fixed_local"):
+            eulers[b_name] = [0.0, 0.0, 0.0]
+        elif kind == "root":
+            eulers[b_name] = [deg(4.0) * s1, 0.0, deg(5.0) * c1]
+        elif kind == "spine":
+            eulers[b_name] = [deg(8.0) * s1, deg(3.0) * c1, deg(6.0) * s2]
+        elif kind == "head":
+            eulers[b_name] = [deg(10.0) * c1, deg(5.0) * s1, deg(8.0) * s1]
+        elif kind == "jaw":
+            open_ratio = max(0.0, math.sin(phase_rad * 1.5))
+            eulers[b_name] = [deg(26.0) * open_ratio, 0.0, 0.0]
+        elif kind == "wing":
+            flap = math.sin(phase_rad - 0.35 * chain_idx)
+            fold = 0.5 * (1.0 - math.cos(phase_rad * 0.5))
+            eulers[b_name] = [
+                deg(38.0) * flap,
+                deg(10.0) * side_sign * fold,
+                deg(28.0) * side_sign * (0.6 * flap - 0.4 * fold),
+            ]
+        elif kind == "limb":
+            if archetype == "humanoid":
+                reach = math.sin(phase_rad)
+                if sub_role == "clavicle_socket":
+                    eulers[b_name] = [deg(15.0) * reach, 0.0, deg(12.0) * side_sign * reach]
+                elif sub_role in ("upper_limb", "ball_socket"):
+                    eulers[b_name] = [deg(55.0) * reach, deg(10.0) * side_sign, deg(22.0) * side_sign * reach]
+                elif sub_role == "forearm_hinge":
+                    eulers[b_name] = [deg(45.0) * max(0.0, -reach), deg(18.0) * s1, 0.0]
+                else:
+                    eulers[b_name] = [deg(18.0) * s1, 0.0, deg(10.0) * c1]
+            elif archetype == "quadruped":
+                gait = math.sin(alt_phase)
+                if sub_role in ("upper_limb", "ball_socket"):
+                    eulers[b_name] = [deg(34.0) * gait, 0.0, deg(6.0) * side_sign * c1]
+                elif sub_role == "forearm_hinge":
+                    eulers[b_name] = [deg(42.0) * max(0.0, -gait), 0.0, 0.0]
+                else:
+                    eulers[b_name] = [deg(20.0) * gait, 0.0, 0.0]
+            else:
+                wave = math.sin(alt_phase - 0.3 * chain_idx)
+                eulers[b_name] = [deg(30.0) * wave, deg(8.0) * c1, deg(16.0) * side_sign * wave]
+        elif kind == "digit":
+            curl = 0.5 * (1.0 + math.sin(phase_rad))
+            eulers[b_name] = [deg(32.0) * curl, 0.0, 0.0]
+        elif kind in ("tail", "flex"):
+            travel = math.sin(phase_rad * 1.5 - 0.45 * chain_idx)
+            eulers[b_name] = [deg(16.0) * travel, deg(4.0) * c1, deg(22.0) * travel]
+        else:
+            eulers[b_name] = [deg(10.0) * s1, 0.0, deg(10.0) * c1]
+
+    return eulers

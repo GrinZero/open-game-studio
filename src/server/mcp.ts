@@ -20,7 +20,7 @@ import { assetHttpOrigin } from "./asset-http.js";
 import { codexWorkspace } from "./codex-workspace.js";
 const core = new StudioCore();
 reconcileGenerations(core);
-const server = new McpServer({ name: "game-studio", version: "0.1.9" });
+const server = new McpServer({ name: "game-studio", version: "0.1.10" });
 new OpenAIExtensions(server);
 const appUri = "ui://game-studio/workbench";
 async function openingArgs(
