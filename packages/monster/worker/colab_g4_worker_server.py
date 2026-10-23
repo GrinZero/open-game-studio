@@ -22,9 +22,12 @@ from __future__ import annotations
 import json
 from pose_features import (
     features_enabled,
+    dense_surface_enabled,
     dataset_cache_matches,
     FEATURE_VERSION,
     resolution_2k_enabled,
+    three_view_enabled,
+    studio_view_order,
     studio_resolution,
     idle_split_filename,
 )
@@ -53,9 +56,9 @@ REGISTRY_PATH = DRIVE_ROOT / "runtime" / "endpoint_registry.json"
 
 
 class ColabLifecycleGuard:
-    """Thread-safe GPU mutex + activity tracker + automatic idle VM self-termination."""
+    """Thread-safe GPU mutex + activity tracker + optional idle VM self-termination (disabled by default per SOP §7.1)."""
 
-    def __init__(self, idle_timeout_sec: int = 600):
+    def __init__(self, idle_timeout_sec: int = 0):
         self.idle_timeout_sec = idle_timeout_sec
         self.lock = threading.Lock()
         self.busy = False
@@ -80,7 +83,7 @@ class ColabLifecycleGuard:
         while not self.stopped:
             time.sleep(15)
             idle_s = self.idle_seconds()
-            if not self.busy and idle_s >= self.idle_timeout_sec:
+            if self.idle_timeout_sec > 0 and not self.busy and idle_s >= self.idle_timeout_sec:
                 print(
                     f"\n[IdleWatchdog] Worker idle for {idle_s:.0f}s (>= {self.idle_timeout_sec}s). "
                     "Triggering automatic Colab G4 runtime.unassign() to prevent CU bleed!"
@@ -158,7 +161,7 @@ def query_gpu_telemetry() -> dict[str, Any]:
         return {"gpu": "unknown", "vram_used_mib": 0.0, "vram_total_mib": 0.0, "gpu_util_pct": 0.0}
 
 
-GUARD = ColabLifecycleGuard(idle_timeout_sec=int(os.environ.get("MONSTER_IDLE_TIMEOUT", "600")))
+GUARD = ColabLifecycleGuard(idle_timeout_sec=int(os.environ.get("MONSTER_IDLE_TIMEOUT", "0")))
 
 
 def save_stage_state(monster_id: str, stage: str, meta: dict[str, Any]) -> None:
@@ -227,7 +230,10 @@ def api_heartbeat() -> str:
         "current_job": GUARD.current_job,
         "feature_version": FEATURE_VERSION,
         "depth_visibility_enabled": features_enabled(),
+        "dense_surface_enabled": dense_surface_enabled(),
         "resolution_2k_enabled": resolution_2k_enabled(),
+        "three_view_enabled": three_view_enabled(),
+        "studio_views": list(studio_view_order()),
         "studio_resolution": f"{comp_w}x{comp_h}",
         "h3_profile": os.environ.get("H3_PROFILE", "full"),
         "idle_seconds": round(GUARD.idle_seconds(), 1),
@@ -262,11 +268,24 @@ def api_rig_candidates(monster_id: str, input_glb_file: str, run_auto_audit: boo
             cand_dir = m_work / "candidates"
             cand_dir.mkdir(parents=True, exist_ok=True)
 
-            src_glb = Path(input_glb_file)
+            src_glb = Path(input_glb_file) if input_glb_file else None
             archived_input = m_drive / "input_mesh.glb"
-            shutil.copy2(src_glb, archived_input)
+            u1_input = m_drive / "u1" / "rig_input_variant.glb"
+            if src_glb and src_glb.is_file():
+                shutil.copy2(src_glb, archived_input)
+            elif u1_input.is_file():
+                shutil.copy2(u1_input, archived_input)
+            elif not archived_input.is_file():
+                raise FileNotFoundError(
+                    f"No input GLB provided and no U1 input found at {u1_input} or {archived_input}"
+                )
 
             cands = run_stage1_skintokens_candidates(archived_input, cand_dir, num_candidates=4)
+            drive_cand_dir = m_drive / "candidates"
+            drive_cand_dir.mkdir(parents=True, exist_ok=True)
+            for c in cands:
+                if c.exists():
+                    shutil.copy2(c, drive_cand_dir / c.name)
             GUARD.touch()
 
             py_bpy = str(SKINTOKENS_PY) if SKINTOKENS_PY.exists() else sys.executable
@@ -303,7 +322,15 @@ def api_rig_candidates(monster_id: str, input_glb_file: str, run_auto_audit: boo
                 if contact_sheet.exists():
                     zf.write(contact_sheet, contact_sheet.name)
 
-            save_stage_state(monster_id, "stage1_rig", {"status": "completed", "bundle": str(bundle_zip)})
+            save_stage_state(
+                monster_id,
+                "stage1_rig",
+                {
+                    "status": "awaiting_rig_review",
+                    "user_decision": "pending",
+                    "bundle": str(bundle_zip),
+                },
+            )
             write_task_progress(
                 monster_id=monster_id,
                 stage="stage1_completed",
@@ -395,13 +422,20 @@ def api_train_monster_probe(
                     {
                         "num_samples": int(num_samples),
                         "depth_visibility_enabled": features_enabled(),
+                        "dense_surface_enabled": dense_surface_enabled(),
                         "resolution_2k_enabled": resolution_2k_enabled(),
+                        "three_view_enabled": three_view_enabled(),
+                        "studio_views": list(studio_view_order()),
                         "studio_resolution": f"{comp_w}x{comp_h}",
                         "feature_version": FEATURE_VERSION,
                     },
                 )
 
             GUARD.touch(f"Stage3_DINOv2Train:{monster_id}")
+            if ckpt_path.exists():
+                backup_dir = m_drive / "backups"
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ckpt_path, backup_dir / f"dinov2_head_{int(time.time())}.pt")
             write_task_progress(
                 monster_id=monster_id,
                 stage="training",
@@ -429,7 +463,17 @@ def api_train_monster_probe(
                 ],
                 check=True,
             )
-            save_stage_state(monster_id, "stage3_dinov2", {"ckpt": str(ckpt_path), "epochs": int(epochs), "depth_visibility_enabled": features_enabled(), "feature_version": FEATURE_VERSION})
+            save_stage_state(
+                monster_id,
+                "stage3_dinov2",
+                {
+                    "ckpt": str(ckpt_path),
+                    "epochs": int(epochs),
+                    "depth_visibility_enabled": features_enabled(),
+                    "dense_surface_enabled": dense_surface_enabled(),
+                    "feature_version": FEATURE_VERSION,
+                },
+            )
 
             GUARD.touch(f"Stage4_StudioExam:{monster_id}")
             write_task_progress(
@@ -482,7 +526,9 @@ def api_train_monster_probe(
             )
             shutil.rmtree(synth_dir, ignore_errors=True)
             report_str = exam_report_path.read_text(encoding="utf-8")
-            save_stage_state(monster_id, "stage4_exam", json.loads(report_str))
+            exam_payload = json.loads(report_str)
+            exam_payload["user_decision"] = "pending"
+            save_stage_state(monster_id, "stage4_exam", exam_payload)
             write_task_progress(
                 monster_id=monster_id,
                 stage="awaiting_exam_review",
@@ -515,6 +561,7 @@ def api_reexam_only(monster_id: str, rerender_exam: bool = False, auto_shutdown_
         GUARD.touch(f"Stage4_FastReExam:{monster_id}")
         try:
             report = reexam_existing_monster(monster_id, rerender_exam=rerender_exam)
+            report["user_decision"] = "pending"
             save_stage_state(monster_id, "stage4_reexam_v2_2", report)
             return json.dumps(report, indent=2, ensure_ascii=False)
         finally:
@@ -528,7 +575,7 @@ def api_generate_actions_batch(
     monster_id: str,
     actions_csv: str,
     bake_glb_on_cloud: bool = True,
-    auto_shutdown_after: bool = True,
+    auto_shutdown_after: bool = False,
 ) -> tuple[str, str]:
     """Endpoint 3: Batch-generates multiple actions via the 15-node ComfyUI MiniMax H3 FL2VA graph."""
     with GUARD.lock:
@@ -543,6 +590,8 @@ def api_generate_actions_batch(
         )
         try:
             specs = [s.strip() for s in actions_csv.replace(",", " ").split() if s.strip()]
+            batch_action_names = [s.split(":")[0].strip() for s in specs if s.split(":")[0].strip()]
+            batch_action_set = set(batch_action_names)
             runner = Path(__file__).resolve().parent / "pipeline_runner.py"
             subprocess.run(
                 [
@@ -551,6 +600,8 @@ def api_generate_actions_batch(
                     "animate",
                     "--monster_id",
                     monster_id,
+                    "--bake_glb_on_cloud",
+                    "1" if bake_glb_on_cloud else "0",
                     "--actions",
                     *specs,
                 ],
@@ -561,16 +612,32 @@ def api_generate_actions_batch(
             out_zip = m_work / f"{monster_id}_animations_bundle.zip"
             summary = []
             with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-                for glb_p in (m_drive / "animations").glob("*.glb"):
-                    zf.write(glb_p, f"animations/{glb_p.name}")
-                    summary.append(glb_p.name)
+                if bake_glb_on_cloud:
+                    for act_name in batch_action_names:
+                        glb_p = m_drive / "animations" / f"{act_name}.glb"
+                        if glb_p.exists():
+                            zf.write(glb_p, f"animations/{glb_p.name}")
+                            summary.append(glb_p.name)
                 for tj_p in (m_work / "actions").rglob("joints_3d_traj.json"):
                     act_name = tj_p.parent.name
-                    zf.write(tj_p, f"trajectories/{act_name}_joints_3d.json")
+                    if act_name in batch_action_set:
+                        zf.write(tj_p, f"trajectories/{act_name}_joints_3d.json")
+                batch_manifest = {
+                    "monster_id": monster_id,
+                    "requested_specs": specs,
+                    "batch_actions": batch_action_names,
+                    "bake_glb_on_cloud": bool(bake_glb_on_cloud),
+                    "completed_animations": summary,
+                    "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+                zf.writestr("batch_manifest.json", json.dumps(batch_manifest, ensure_ascii=False, indent=2))
 
             res_json = json.dumps(
                 {
                     "monster_id": monster_id,
+                    "requested_specs": specs,
+                    "batch_actions": batch_action_names,
+                    "bake_glb_on_cloud": bool(bake_glb_on_cloud),
                     "completed_actions": summary,
                     "auto_shutdown_triggered": auto_shutdown_after,
                 },
@@ -582,7 +649,7 @@ def api_generate_actions_batch(
                 stage="animating_completed",
                 stage_display="动作生成与烘焙完成",
                 status="completed",
-                detail=f"成功完成 {len(summary)} 个动作生成与 GLB 烘焙。",
+                detail=f"成功完成当前批次 {len(summary)} 个动作生成与打包。",
             )
             return res_json, str(out_zip)
         finally:
@@ -612,7 +679,7 @@ def launch_headless_worker(port: int = 7865) -> None:
     with gr.Blocks(title="MonsterStudio · Colab G4 Headless Worker") as app:
         gr.Markdown(
             "# 🦖 MonsterStudio · Colab G4 无头算力服务端 (Worker v2.3 · Depth/Visibility)\n"
-            f"- **自动断连看门狗已启动**：空闲超过 `{GUARD.idle_timeout_sec}s` 自动调用 `runtime.unassign()` 释放 G4 停止扣点。"
+            f"- **空闲看门狗配置**：`idle_timeout_sec={GUARD.idle_timeout_sec}s`（默认 0 禁用自动断连，由 SOP 阶段受控释放）。"
         )
         hb_btn = gr.Button("刷新心跳 / 查看 GPU 遥测")
         hb_out = gr.Code(language="json", label="Worker Telemetry")
@@ -634,8 +701,11 @@ def launch_headless_worker(port: int = 7865) -> None:
 
         with gr.Tab("2. 5000 姿态渲染 + DINOv2 训练 + 模拟考"):
             _, _, comp_w, comp_h = studio_resolution()
+            views_label = "三视图 [Left | Front | Right]" if three_view_enabled() else "双视图 [Front | Side]"
             gr.Markdown(
                 f"**{FEATURE_VERSION}** · 深度/可见性监督：**{'开启' if features_enabled() else '关闭'}** · "
+                f"稠密表面坐标与LBS拟合：**{'开启' if dense_surface_enabled() else '关闭'}** · "
+                f"视角模式：**{views_label}** · "
                 f"画布分辨率：**{comp_w}x{comp_h} ({'2K 特性开关已开启' if resolution_2k_enabled() else '默认 768P'})** · "
                 f"H3 权重：**{os.environ.get('H3_PROFILE', 'full')}**。"
                 "在 Notebook Cell 1 修改总开关后重新运行 Cell 1 和 Cell 4。"
@@ -654,13 +724,22 @@ def launch_headless_worker(port: int = 7865) -> None:
                 outputs=[tr_out],
                 api_name="train_monster_probe",
             )
+            reexam_rerender = gr.Checkbox(label="Re-render Exam Video before Re-Exam", value=False)
+            reexam_kill = gr.Checkbox(label="复考完成后自动释放 G4 GPU", value=False)
+            reexam_btn = gr.Button("Fast Re-Exam Only (0 Retraining)")
+            reexam_btn.click(
+                api_reexam_only,
+                inputs=[m_id2, reexam_rerender, reexam_kill],
+                outputs=[tr_out],
+                api_name="reexam_only",
+            )
 
         with gr.Tab("3. MiniMax H3 批量动作生成 + 自动关机"):
             m_id3 = gr.Textbox(label="Monster ID", value="swamp_troll_01")
             acts = gr.Textbox(label="Action Specs", value="idle:loop walk:loop run:loop slash:once")
             bake_cloud = gr.Checkbox(label="Bake GLB on Cloud", value=True)
-            auto_kill_anim = gr.Checkbox(label="批量生成完成后立即调用 runtime.unassign() 释放 G4", value=True)
-            an_btn = gr.Button("Run MiniMax H3 Batch & Auto-Shutdown")
+            auto_kill_anim = gr.Checkbox(label="批量生成完成后立即调用 runtime.unassign() 释放 G4", value=False)
+            an_btn = gr.Button("Run MiniMax H3 Batch")
             an_json = gr.Code(language="json", label="Batch Summary")
             an_zip = gr.File(label="Animations & 3D Trajectories ZIP")
             an_btn.click(
@@ -691,7 +770,10 @@ def launch_headless_worker(port: int = 7865) -> None:
         **runtime_metadata(),
         "feature_version": FEATURE_VERSION,
         "depth_visibility_enabled": features_enabled(),
+        "dense_surface_enabled": dense_surface_enabled(),
         "resolution_2k_enabled": resolution_2k_enabled(),
+        "three_view_enabled": three_view_enabled(),
+        "studio_views": list(studio_view_order()),
         "studio_resolution": f"{comp_w}x{comp_h}",
         "h3_profile": os.environ.get("H3_PROFILE", "full"),
         "status": "ONLINE",

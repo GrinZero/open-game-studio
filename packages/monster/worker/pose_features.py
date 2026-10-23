@@ -5,7 +5,12 @@ import hashlib
 import io
 import json
 import os
+import sys
 from pathlib import Path
+
+_WORKER_DIR = str(Path(__file__).resolve().parent)
+if _WORKER_DIR not in sys.path:
+    sys.path.insert(0, _WORKER_DIR)
 
 try:
     import numpy as np
@@ -17,19 +22,49 @@ try:
 except ImportError:
     Image = None  # type: ignore
 
+from mocap_priors import (  # noqa: E402
+    MOCAP_PRIORS_ENV,
+    MOCAP_PRIORS_SCHEMA,
+    blend_limb_afterimage_ghost_rgba,
+    bone_motion_blur_speed_factor,
+    calibrate_view_scale_drift,
+    compute_chain_wave_target_euler,
+    compute_mesh_edge_stretch_metric,
+    dejitter_velocity_gated,
+    mocap_priors_enabled,
+    sample_ghost_perturbation_eulers,
+    verify_blender_lbs_skin_consistency,
+    whittaker_charbonnier_smooth_trajectory,
+    windowed_peak_dsnt_numpy,
+    windowed_peak_dsnt_torch,
+)
+
 FEATURE_ENV = "MONSTER_ENABLE_DEPTH_VISIBILITY"
 RESOLUTION_2K_ENV = "MONSTER_ENABLE_2K"
+THREE_VIEW_ENV = "MONSTER_ENABLE_3VIEW"
+DENSE_SURFACE_ENV = "MONSTER_ENABLE_DENSE_SURFACE"
 DATASET_SCHEMA = "monster-pose-depth-visibility-v1"
 FEATURE_VERSION = "v2.3-depth-visibility-1"
 DEFAULT_SYNTH_SAMPLES = 5000
 DEFAULT_STUDIO_RESOLUTION = (672, 768, 1344, 768)
 STUDIO_2K_RESOLUTION = (1280, 1440, 2560, 1440)
+STUDIO_3VIEW_DEFAULT_RESOLUTION = (448, 768, 1344, 768)
+STUDIO_3VIEW_2K_RESOLUTION = (896, 1440, 2688, 1440)
+DUAL_VIEW_ORDER = ("front", "side")
+THREE_VIEW_ORDER = ("left", "front", "right")
 
 
 def features_enabled() -> bool:
     value = os.environ.get(FEATURE_ENV, "1").strip().lower()
     if value not in {"0", "1", "true", "false", "on", "off"}:
         raise ValueError(f"Invalid {FEATURE_ENV}: {value!r}")
+    return value in {"1", "true", "on"}
+
+
+def dense_surface_enabled() -> bool:
+    value = os.environ.get(DENSE_SURFACE_ENV, "0").strip().lower()
+    if value not in {"0", "1", "true", "false", "on", "off"}:
+        raise ValueError(f"Invalid {DENSE_SURFACE_ENV}: {value!r}")
     return value in {"1", "true", "on"}
 
 
@@ -40,16 +75,38 @@ def resolution_2k_enabled() -> bool:
     return value in {"1", "true", "on"}
 
 
-def studio_resolution(enable_2k: bool | None = None) -> tuple[int, int, int, int]:
+def three_view_enabled() -> bool:
+    value = os.environ.get(THREE_VIEW_ENV, "0").strip().lower()
+    if value not in {"0", "1", "true", "false", "on", "off"}:
+        raise ValueError(f"Invalid {THREE_VIEW_ENV}: {value!r}")
+    return value in {"1", "true", "on"}
+
+
+def studio_view_order(enable_3view: bool | None = None) -> tuple[str, ...]:
+    """Returns panel order left-to-right: ('front', 'side') for 2-view or ('left', 'front', 'right') for 3-view."""
+    use_3view = three_view_enabled() if enable_3view is None else bool(enable_3view)
+    return THREE_VIEW_ORDER if use_3view else DUAL_VIEW_ORDER
+
+
+def studio_resolution(
+    enable_2k: bool | None = None, enable_3view: bool | None = None
+) -> tuple[int, int, int, int]:
     """Returns (panel_width, panel_height, composite_width, composite_height)."""
     use_2k = resolution_2k_enabled() if enable_2k is None else bool(enable_2k)
+    use_3view = three_view_enabled() if enable_3view is None else bool(enable_3view)
+    if use_3view:
+        return STUDIO_3VIEW_2K_RESOLUTION if use_2k else STUDIO_3VIEW_DEFAULT_RESOLUTION
     return STUDIO_2K_RESOLUTION if use_2k else DEFAULT_STUDIO_RESOLUTION
 
 
-def idle_split_filename(comp_w: int | None = None, comp_h: int | None = None) -> str:
+def idle_split_filename(
+    comp_w: int | None = None, comp_h: int | None = None, enable_3view: bool | None = None
+) -> str:
+    use_3view = three_view_enabled() if enable_3view is None else bool(enable_3view)
     if comp_w is None or comp_h is None:
-        _, _, comp_w, comp_h = studio_resolution()
-    return f"idle_split_{int(comp_w)}x{int(comp_h)}.png"
+        _, _, comp_w, comp_h = studio_resolution(enable_3view=use_3view)
+    prefix = "idle_3view" if use_3view else "idle_split"
+    return f"{prefix}_{int(comp_w)}x{int(comp_h)}.png"
 
 
 def dinov2_panel_padding(panel_w: int, panel_h: int, patch_size: int = 14) -> tuple[int, int, int, int]:
@@ -63,6 +120,14 @@ def dinov2_panel_padding(panel_w: int, panel_h: int, patch_size: int = 14) -> tu
     return pad_top, pad_bottom, pad_left, pad_right
 
 
+def dense_grid_shape(panel_w: int, panel_h: int, patch_size: int = 14) -> tuple[int, int]:
+    """Returns (H_hm, W_hm) spatial grid dimensions of the 4x deconv heatmap & dense surface head."""
+    pad_top, pad_bottom, pad_left, pad_right = dinov2_panel_padding(panel_w, panel_h, patch_size=patch_size)
+    h_pad = int(panel_h) + pad_top + pad_bottom
+    w_pad = int(panel_w) + pad_left + pad_right
+    return (h_pad // patch_size) * 4, (w_pad // patch_size) * 4
+
+
 def dataset_signature(blend_path, meta_path, num_samples, seed=42):
     meta = json.loads(Path(meta_path).read_text())
     meta.pop("calibration", None)  # Stage 2 adds calibration; it is not a rig change.
@@ -71,7 +136,15 @@ def dataset_signature(blend_path, meta_path, num_samples, seed=42):
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     digest.update(json.dumps(meta, sort_keys=True, separators=(",", ":")).encode())
-    res_tag = ":2560x1440" if resolution_2k_enabled() else ""
+    use_2k = resolution_2k_enabled()
+    use_3view = three_view_enabled()
+    use_dense = dense_surface_enabled()
+    if use_3view:
+        res_tag = ":2688x1440:3view" if use_2k else ":1344x768:3view"
+    else:
+        res_tag = ":2560x1440" if use_2k else ""
+    if use_dense:
+        res_tag += ":dense"
     digest.update(f"{FEATURE_VERSION}:{features_enabled()}:{int(num_samples)}:{int(seed)}{res_tag}".encode())
     return digest.hexdigest()
 
@@ -84,13 +157,26 @@ def dataset_cache_matches(synth_dir, blend_path, meta_path, num_samples):
             return False
         if data.get("depth_visibility_enabled", False) != features_enabled():
             return False
+        if bool(data.get("dense_surface_enabled", False)) != dense_surface_enabled():
+            return False
         panel_w, panel_h, comp_w, comp_h = studio_resolution()
         calib = data.get("calibration", {})
         if calib.get("panel_width") != panel_w or calib.get("panel_height") != panel_h:
             return False
         if calib.get("composite_width") != comp_w or calib.get("composite_height") != comp_h:
             return False
+        expected_views = 3 if three_view_enabled() else 2
+        if int(calib.get("num_views", 2)) != expected_views:
+            return False
         samples = data["samples"]
+        if dense_surface_enabled():
+            if not (path / "rig_skinning.npz").is_file():
+                return False
+            if not all(
+                sample.get("dense_map") and (path / "dense" / sample["dense_map"]).is_file()
+                for sample in samples
+            ):
+                return False
         return len(samples) == int(num_samples) and all(
             (path / "images" / sample["image"]).is_file() for sample in samples
         ) and (path / idle_split_filename(comp_w, comp_h)).is_file()
@@ -110,11 +196,18 @@ def validate_enhanced_dataset(data, bone_names):
     cov_audit = data.get("coverage_audit")
     if isinstance(cov_audit, dict) and not cov_audit.get("passed", True):
         raise ValueError(f"Synthetic pose dataset failed coverage/decoupling audit: {cov_audit.get('failures')}")
+    num_views = int(data["calibration"].get("num_views", 2))
+    aux_views = ("front", "side", "right") if num_views == 3 else ("front", "side")
+    check_dense = bool(data.get("dense_surface_enabled", False))
     known_visibility = 0
     for sample in data["samples"]:
+        if check_dense and not sample.get("dense_map"):
+            raise ValueError("Dense surface dataset is missing sample dense_map references.")
         for bone in bone_names:
             joint = sample["joints"][bone]
-            for view in ("front", "side"):
+            if num_views == 3 and ("right_uv_head" not in joint or "right_uv_tail" not in joint):
+                raise ValueError("3-view dataset is missing right_uv_head / right_uv_tail labels.")
+            for view in aux_views:
                 for endpoint in ("head", "tail"):
                     label = joint[f"{view}_{endpoint}_aux"]
                     for field in ("depth_camera", "depth_relative", "visibility_ratio"):
@@ -159,11 +252,13 @@ def video_domain_degrade(image):
 
 def fuse_depth_visibility(uv_front, uv_side, conf_front, conf_side, calib,
                           depth_front, depth_side, visibility_front, visibility_side,
-                          logvar_front, logvar_side):
-    """Fixed dual-orthographic studio only; inferred depth remains an uncertain prior.
+                          logvar_front, logvar_side,
+                          uv_right=None, conf_right=None, depth_right=None,
+                          visibility_right=None, logvar_right=None):
+    """Fixed dual- or tri-orthographic studio triangulation with visibility/depth fusion.
 
-    Front camera looks +Y; side camera looks -X. Relative depth is referenced to
-    the fixed studio center, divided by depth_scale (not the world vertical Z).
+    Front camera looks +Y; left/side camera looks -X; optional right camera looks +X.
+    Relative depth is referenced to the fixed studio center, divided by depth_scale.
     """
     scale = float(calib["depth_scale"])
     cx, cy, cz = calib["center"]
@@ -175,12 +270,98 @@ def fuse_depth_visibility(uv_front, uv_side, conf_front, conf_side, calib,
     x_depth = cx - depth_side * scale
     y_depth = cy + depth_front * scale
     zf, zs = cz + (0.5 - uv_front[..., 1] / H) * S, cz + (0.5 - uv_side[..., 1] / H) * S
+    s_safe = max(S, 1e-4)
+
+    if uv_right is not None and conf_right is not None:
+        cr = np.clip(conf_right, 0.001, 1)
+        vr = np.clip(visibility_right if visibility_right is not None else np.ones_like(cr), 0, 1)
+        dr = depth_right if depth_right is not None else np.zeros_like(cr)
+        lvr = logvar_right if logvar_right is not None else np.zeros_like(cr)
+
+        # Right camera at -X looking +X: image +X points toward -Y (character front)
+        y_direct_r = cy - (uv_right[..., 0] / W - 0.5) * S * W / H
+        zr = cz + (0.5 - uv_right[..., 1] / H) * S
+        x_depth_r = cx + dr * scale
+
+        qf = cf * (0.10 + 0.90 * vf)
+        qs = cs * (0.10 + 0.90 * vs)
+        qr = cr * (0.10 + 0.90 * vr)
+
+        epi_fs = np.exp(-0.5 * (np.abs(zf - zs) / (0.065 * s_safe)) ** 2)
+        epi_fr = np.exp(-0.5 * (np.abs(zf - zr) / (0.065 * s_safe)) ** 2)
+        epi_sr = np.exp(-0.5 * (np.abs(zs - zr) / (0.065 * s_safe)) ** 2)
+
+        q_all = np.maximum(1e-6, qf + qs + qr)
+        f_dom = (3.0 * qf / q_all) ** 2
+        s_dom = (3.0 * qs / q_all) ** 2
+        r_dom = (3.0 * qr / q_all) ** 2
+
+        epi_f = np.maximum(epi_fs, epi_fr)
+        epi_s = np.maximum(epi_fs, epi_sr)
+        epi_r = np.maximum(epi_fr, epi_sr)
+
+        wf = (cf ** 2) * (0.05 + 0.95 * vf) * (epi_f + (1.0 - epi_f) * f_dom)
+        ws_z = (cs ** 2) * (0.05 + 0.95 * vs) * (epi_s + (1.0 - epi_s) * s_dom)
+        wr_z = (cr ** 2) * (0.05 + 0.95 * vr) * (epi_r + (1.0 - epi_r) * r_dom)
+
+        # Opposing lateral Y fusion: when Left and Right views disagree on Y (one side is occluded),
+        # exponentially favor the side with higher visibility * confidence and front-epipolar agreement.
+        dy_lr = np.abs(y_direct - y_direct_r)
+        y_agree = np.exp(-0.5 * (dy_lr / (0.075 * s_safe)) ** 2)
+        qs_eff = qs * (0.20 + 0.80 * epi_fs)
+        qr_eff = qr * (0.20 + 0.80 * epi_fr)
+        q_lr = np.maximum(1e-6, qs_eff + qr_eff)
+        s_lr_ratio = qs_eff / q_lr
+        r_lr_ratio = qr_eff / q_lr
+
+        ws_y = ws_z * (y_agree + (1.0 - y_agree) * (2.0 * s_lr_ratio) ** 3)
+        wr_y = wr_z * (y_agree + (1.0 - y_agree) * (2.0 * r_lr_ratio) ** 3)
+
+        v_side_max = np.maximum(vs, vr)
+        f_occ_boost = 1.0 + 1.8 * np.maximum(0.0, vf - v_side_max - 0.35)
+        s_occ_boost = 1.0 + 1.8 * np.maximum(0.0, vs - vf - 0.35)
+        r_occ_boost = 1.0 + 1.8 * np.maximum(0.0, vr - vf - 0.35)
+
+        wdf = (
+            0.35
+            * (cf ** 2)
+            * (0.25 + 0.75 * vf)
+            * f_occ_boost
+            / (1.0 + np.exp(np.clip(logvar_front, -6, 3)) / (0.05 ** 2))
+        )
+        wds = (
+            0.35
+            * (cs ** 2)
+            * (0.25 + 0.75 * vs)
+            * s_occ_boost
+            / (1.0 + np.exp(np.clip(logvar_side, -6, 3)) / (0.05 ** 2))
+        )
+        wdr = (
+            0.35
+            * (cr ** 2)
+            * (0.25 + 0.75 * vr)
+            * r_occ_boost
+            / (1.0 + np.exp(np.clip(lvr, -6, 3)) / (0.05 ** 2))
+        )
+
+        points = np.stack(
+            (
+                (wf * x_direct + wds * x_depth + wdr * x_depth_r) / np.maximum(1e-12, wf + wds + wdr),
+                (ws_y * y_direct + wr_y * y_direct_r + wdf * y_depth) / np.maximum(1e-12, ws_y + wr_y + wdf),
+                (wf * zf + ws_z * zs + wr_z * zr) / np.maximum(1e-12, wf + ws_z + wr_z),
+            ),
+            axis=-1,
+        ).astype(np.float32)
+        reliability = np.maximum(
+            np.maximum(cf * (0.2 + 0.8 * vf), cs * (0.2 + 0.8 * vs)),
+            cr * (0.2 + 0.8 * vr),
+        )
+        return points, reliability
 
     # Asymmetric epipolar V-consistency & cross-view depth consistency gating:
     # When |zf - zs| is large (one view is occluded or jumped to a wrong landmark),
     # compare each view's visibility * confidence and cross-check its direct coordinate
     # against the other view's depth prior so the occluded view is downweighted rather than averaged 50/50.
-    s_safe = max(S, 1e-4)
     dz = np.abs(zf - zs)
     epi_ok = np.exp(-0.5 * (dz / (0.065 * s_safe)) ** 2)
     qf = cf * (0.10 + 0.90 * vf)
@@ -218,3 +399,362 @@ def fuse_depth_visibility(uv_front, uv_side, conf_front, conf_side, calib,
     ).astype(np.float32)
     reliability = np.maximum(cf * (0.2 + 0.8 * vf), cs * (0.2 + 0.8 * vs))
     return points, reliability
+
+
+# ==============================================================================
+# Multi-View Dense Surface Correspondence & Linear Blend Skinning (LBS) Helpers
+# ==============================================================================
+
+
+def normalize_rest_vertices_numpy(rest_verts, calib: dict) -> np.ndarray:
+    """Normalizes rest-pose 3D mesh vertices `(V, 3)` into `[0, 1]^3` relative to studio center and depth_scale."""
+    pts = np.asarray(rest_verts, dtype=np.float32)
+    center = np.asarray(calib["center"], dtype=np.float32)
+    scale = max(1e-4, float(calib.get("depth_scale", float(calib.get("ortho_scale", 1.0)) / 1.48)))
+    return np.clip((pts - center) / scale + 0.5, 0.0, 1.0).astype(np.float32)
+
+
+def denormalize_rest_vertices_numpy(rest_xyz_norm, calib: dict) -> np.ndarray:
+    """Maps normalized `[0, 1]^3` rest-pose surface coordinates back to 3D world rest coordinates."""
+    norm_pts = np.asarray(rest_xyz_norm, dtype=np.float32)
+    center = np.asarray(calib["center"], dtype=np.float32)
+    scale = max(1e-4, float(calib.get("depth_scale", float(calib.get("ortho_scale", 1.0)) / 1.48)))
+    return ((norm_pts - 0.5) * scale + center).astype(np.float32)
+
+
+def project_3d_points_to_ortho_view_numpy(pts_3d, calib: dict, view_name: str) -> tuple[np.ndarray, np.ndarray]:
+    """Vectorized orthographic projection of `(..., 3)` 3D world points into `(..., 2)` unpadded
+    panel pixel coordinates `(u_px, v_px)` and `(...,)` relative camera depth (smaller = closer to camera).
+    Supports all studio views: `'front'`, `'side'`/`'left'`, and `'right'`.
+    """
+    pts = np.asarray(pts_3d, dtype=np.float64)
+    cx, cy, cz = (float(c) for c in calib["center"])
+    W = float(calib["panel_width"])
+    H = float(calib["panel_height"])
+    S = max(1e-4, float(calib["ortho_scale"]))
+    D = max(1e-4, float(calib.get("depth_scale", S / 1.48)))
+    span_x = S * (W / H)
+    span_z = S
+
+    px, py, pz = pts[..., 0], pts[..., 1], pts[..., 2]
+    v_px = (0.5 - (pz - cz) / span_z) * H
+    v_low = view_name.strip().lower()
+    if v_low == "front":
+        u_px = ((px - cx) / span_x + 0.5) * W
+        depth_rel = (py - cy) / D
+    elif v_low in ("side", "left"):
+        u_px = ((py - cy) / span_x + 0.5) * W
+        depth_rel = (cx - px) / D
+    elif v_low == "right":
+        u_px = ((cy - py) / span_x + 0.5) * W
+        depth_rel = (px - cx) / D
+    else:
+        raise ValueError(f"Unsupported studio orthographic view: {view_name!r}")
+    uv_px = np.stack([u_px, v_px], axis=-1)
+    return uv_px, depth_rel
+
+
+def lbs_deform_vertices_numpy(
+    rest_verts,
+    skin_indices,
+    skin_weights,
+    rest_heads,
+    rest_rots,
+    posed_heads,
+    posed_rots,
+) -> np.ndarray:
+    """Vectorized Linear Blend Skinning (LBS) transforming rest-pose vertices `(V, 3)` into posed
+    3D world space:
+        `v_posed[i] = sum_m w[i, m] * (R_posed[b] @ R_rest[b].T @ (v_rest[i] - h_rest[b]) + h_posed[b])`
+    Supports single-frame `(B, 3)` / `(B, 3, 3)` or multi-frame `(T, B, 3)` / `(T, B, 3, 3)` bone transforms.
+    """
+    v_rest = np.asarray(rest_verts, dtype=np.float64)
+    idx = np.asarray(skin_indices, dtype=np.int64)
+    w = np.asarray(skin_weights, dtype=np.float64)
+    h_rest = np.asarray(rest_heads, dtype=np.float64)
+    r_rest = np.asarray(rest_rots, dtype=np.float64)
+    h_posed = np.asarray(posed_heads, dtype=np.float64)
+    r_posed = np.asarray(posed_rots, dtype=np.float64)
+
+    # G_b = R_posed @ R_rest^T : shape (..., B, 3, 3)
+    g_mats = np.einsum("...bij,bkj->...bik", r_posed, r_rest)
+    # Offset in rest space per vertex-influence pair (V, M, 3)
+    offsets = v_rest[:, None, :] - h_rest[idx]
+    if g_mats.ndim == 3:
+        # Single frame: g_mats[idx] is (V, M, 3, 3), h_posed[idx] is (V, M, 3)
+        transformed = np.einsum("vmij,vmj->vmi", g_mats[idx], offsets) + h_posed[idx]
+        return np.sum(w[:, :, None] * transformed, axis=1)
+    # Multi-frame (T, B, 3, 3):
+    g_vm = g_mats[:, idx]  # (T, V, M, 3, 3)
+    h_vm = h_posed[:, idx]  # (T, V, M, 3)
+    transformed = np.einsum("tvmij,vmj->tvmi", g_vm, offsets) + h_vm
+    return np.sum(w[None, :, :, None] * transformed, axis=2)
+
+
+def erode_mask_3x3_numpy(mask: np.ndarray) -> np.ndarray:
+    """Applies a 3x3 morphological erosion on a 2D `(H, W)` or 3D `(N, H, W)` boolean/float mask
+    so boundary silhouette pixels are excluded prior to dense correspondence matching.
+    """
+    m = np.asarray(mask) > 0.5
+    if m.ndim == 2:
+        padded = np.pad(m, ((1, 1), (1, 1)), mode="constant", constant_values=False)
+        H, W = m.shape
+        out = np.ones((H, W), dtype=bool)
+        for dy in range(3):
+            for dx in range(3):
+                out &= padded[dy : dy + H, dx : dx + W]
+        return out
+    if m.ndim == 3:
+        padded = np.pad(m, ((0, 0), (1, 1), (1, 1)), mode="constant", constant_values=False)
+        N, H, W = m.shape
+        out = np.ones((N, H, W), dtype=bool)
+        for dy in range(3):
+            for dx in range(3):
+                out &= padded[:, dy : dy + H, dx : dx + W]
+        return out
+    raise ValueError(f"Expected 2D or 3D mask for 3x3 erosion, got shape {m.shape}")
+
+
+_BARY_LATTICE_WEIGHTS: np.ndarray | None = None
+
+
+def _get_barycentric_lattice(subdiv: int = 6) -> np.ndarray:
+    """Returns a cached symmetric barycentric coordinate lattice `(M, 3)` covering a triangle."""
+    global _BARY_LATTICE_WEIGHTS
+    if _BARY_LATTICE_WEIGHTS is not None:
+        return _BARY_LATTICE_WEIGHTS
+    pts = []
+    for i in range(subdiv + 1):
+        for j in range(subdiv + 1 - i):
+            k = subdiv - i - j
+            pts.append((i / subdiv, j / subdiv, k / subdiv))
+    # Include centroid and interior third-points for dense fill
+    pts.append((1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0))
+    _BARY_LATTICE_WEIGHTS = np.array(pts, dtype=np.float32)
+    return _BARY_LATTICE_WEIGHTS
+
+
+def rasterize_ortho_dense_rest_map_numpy(
+    posed_verts,
+    rest_xyz_norm,
+    triangles,
+    calib: dict,
+    view_name: str | None = None,
+    grid_hw: tuple[int, int] | None = None,
+    *,
+    view: str | None = None,
+    grid_h: int | None = None,
+    grid_w: int | None = None,
+    already_normalized: bool = False,
+) -> dict[str, np.ndarray]:
+    """Vectorized orthographic Z-buffer rasterizer generating ground-truth dense surface maps
+    `{"mask": (H_hm, W_hm), "rest_xyz": (3, H_hm, W_hm)}` aligned with the padded DINOv2 heatmap
+    grid `(H_hm, W_hm)` for any view (`'front'`, `'side'`/`'left'`, `'right'`).
+    """
+    eff_view = view_name or view or "front"
+    W_panel = int(calib["panel_width"])
+    H_panel = int(calib["panel_height"])
+    pad_top, pad_bottom, pad_left, pad_right = dinov2_panel_padding(W_panel, H_panel)
+    W_pad = float(W_panel + pad_left + pad_right)
+    H_pad = float(H_panel + pad_top + pad_bottom)
+    if grid_hw is not None:
+        H_hm, W_hm = int(grid_hw[0]), int(grid_hw[1])
+    elif grid_h is not None and grid_w is not None:
+        H_hm, W_hm = int(grid_h), int(grid_w)
+    else:
+        H_hm, W_hm = dense_grid_shape(W_panel, H_panel)
+
+    mask_out = np.zeros((H_hm, W_hm), dtype=np.float32)
+    rest_out = np.zeros((3, H_hm, W_hm), dtype=np.float32)
+
+    verts_p = np.asarray(posed_verts, dtype=np.float64)
+    verts_r = (
+        np.asarray(rest_xyz_norm, dtype=np.float32)
+        if already_normalized
+        else normalize_rest_vertices_numpy(rest_xyz_norm, calib)
+    )
+    if verts_p.shape[0] == 0:
+        return {"mask": mask_out, "rest_xyz": rest_out}
+
+    uv_px, depth_rel = project_3d_points_to_ortho_view_numpy(verts_p, calib, eff_view)
+    u_grid = ((uv_px[:, 0] + pad_left) / W_pad) * float(W_hm - 1)
+    v_grid = ((uv_px[:, 1] + pad_top) / H_pad) * float(H_hm - 1)
+
+    tris = np.asarray(triangles, dtype=np.int64) if triangles is not None and len(triangles) > 0 else None
+    if tris is not None and tris.ndim == 2 and tris.shape[0] > 0:
+        bary = _get_barycentric_lattice(subdiv=6)  # (M, 3)
+        t_u = u_grid[tris]  # (F, 3)
+        t_v = v_grid[tris]  # (F, 3)
+        t_d = depth_rel[tris]  # (F, 3)
+        t_r = verts_r[tris]  # (F, 3, 3)
+
+        samp_u = (t_u @ bary.T).reshape(-1)
+        samp_v = (t_v @ bary.T).reshape(-1)
+        samp_d = (t_d @ bary.T).reshape(-1)
+        samp_r = np.einsum("fvc,mv->fmc", t_r, bary).reshape(-1, 3)
+    else:
+        samp_u = u_grid.reshape(-1)
+        samp_v = v_grid.reshape(-1)
+        samp_d = depth_rel.reshape(-1)
+        samp_r = verts_r.reshape(-1, 3)
+
+    ix = np.rint(samp_u).astype(np.int64)
+    iy = np.rint(samp_v).astype(np.int64)
+    in_bounds = (ix >= 0) & (ix < W_hm) & (iy >= 0) & (iy < H_hm)
+    if not np.any(in_bounds):
+        return {"mask": mask_out, "rest_xyz": rest_out}
+
+    ix = ix[in_bounds]
+    iy = iy[in_bounds]
+    samp_d = samp_d[in_bounds]
+    samp_r = samp_r[in_bounds]
+
+    # Back-to-front Painter's sort: largest depth (farthest) first, smallest depth (closest) last
+    order = np.argsort(samp_d, kind="mergesort")[::-1]
+    iy_ord = iy[order]
+    ix_ord = ix[order]
+    r_ord = samp_r[order]
+
+    mask_out[iy_ord, ix_ord] = 1.0
+    rest_out[0, iy_ord, ix_ord] = r_ord[:, 0]
+    rest_out[1, iy_ord, ix_ord] = r_ord[:, 1]
+    rest_out[2, iy_ord, ix_ord] = r_ord[:, 2]
+    return {"mask": mask_out, "rest_xyz": rest_out}
+
+
+def match_dense_surface_correspondences(
+    dense_views: dict[str, dict[str, np.ndarray]],
+    rest_verts,
+    calib: dict,
+    max_points_per_view: int = 256,
+    dist_thresh_rel: float = 0.04,
+    mask_thresh: float = 0.60,
+    max_logvar: float = 1.5,
+) -> list[dict[str, dict[str, np.ndarray]]]:
+    """Matches per-view predicted dense rest-pose coordinates (`rest_xyz`) to nearest rest-mesh
+    vertices across all active studio views (`'front'`, `'side'`/`'left'`, `'right'`).
+
+    Key Improvements over raw hard KDTree lookup:
+      1. 3x3 morphological mask erosion (`erode_mask_3x3_numpy`) to reject silhouette bleeding;
+      2. Predictive uncertainty gating via `dense_logvar` (`exp(-0.5 * logvar)`) to suppress
+         symmetric/textureless or motion-blurred regions;
+      3. Scale-relative rest-coordinate distance threshold (`dist < dist_thresh_rel * depth_scale`)
+         instead of a hardcoded world-unit `0.04`.
+    """
+    raw_rest = rest_verts.get("rest_verts", []) if isinstance(rest_verts, dict) else rest_verts
+    v_rest = np.asarray(raw_rest, dtype=np.float64)
+    if v_rest.ndim != 2 or v_rest.shape[0] == 0 or not dense_views:
+        return []
+
+    W_panel = float(calib["panel_width"])
+    H_panel = float(calib["panel_height"])
+    pad_top, pad_bottom, pad_left, pad_right = dinov2_panel_padding(int(W_panel), int(H_panel))
+    W_pad = W_panel + float(pad_left + pad_right)
+    H_pad = H_panel + float(pad_top + pad_bottom)
+    depth_scale = max(1e-4, float(calib.get("depth_scale", float(calib.get("ortho_scale", 1.0)) / 1.48)))
+    max_dist_world = max(1e-5, float(dist_thresh_rel) * depth_scale)
+
+    first_view = next(iter(dense_views.values()))
+    first_mask_raw = first_view.get("mask") if "mask" in first_view else first_view.get("mask_prob")
+    if first_mask_raw is None:
+        return []
+    first_mask = np.asarray(first_mask_raw)
+    T = int(first_mask.shape[0]) if first_mask.ndim >= 3 else 1
+
+    per_frame_matches: list[dict[str, dict[str, np.ndarray]]] = [{} for _ in range(T)]
+
+    for raw_view_name, view_payload in dense_views.items():
+        if view_payload is None or "rest_xyz" not in view_payload:
+            continue
+        m_raw = view_payload.get("mask") if "mask" in view_payload else view_payload.get("mask_prob")
+        if m_raw is None:
+            continue
+        v_canon = "side" if raw_view_name == "left" else raw_view_name
+        mask_arr = np.asarray(m_raw, dtype=np.float32)
+        xyz_arr = np.asarray(view_payload["rest_xyz"], dtype=np.float32)
+        logvar_arr = (
+            np.asarray(view_payload["logvar"], dtype=np.float32)
+            if "logvar" in view_payload and view_payload["logvar"] is not None
+            else None
+        )
+
+        if mask_arr.ndim == 4 and mask_arr.shape[1] == 1:
+            mask_arr = mask_arr[:, 0]
+        elif mask_arr.ndim == 2:
+            mask_arr = mask_arr[None]
+
+        if xyz_arr.ndim == 3:
+            xyz_arr = xyz_arr[None]
+        if xyz_arr.shape[1] == 3 and xyz_arr.shape[-1] != 3:
+            # (T, 3, H_hm, W_hm) -> (T, H_hm, W_hm, 3)
+            xyz_arr = np.transpose(xyz_arr, (0, 2, 3, 1))
+
+        if logvar_arr is not None:
+            if logvar_arr.ndim == 4 and logvar_arr.shape[1] == 1:
+                logvar_arr = logvar_arr[:, 0]
+            elif logvar_arr.ndim == 2:
+                logvar_arr = logvar_arr[None]
+
+        _, H_hm, W_hm = mask_arr.shape
+        eroded_fg = erode_mask_3x3_numpy(mask_arr >= float(mask_thresh))
+        # Fall back to non-eroded foreground if thin structures (e.g. tendrils/digits) were completely eroded
+        for t in range(T):
+            fg_t = eroded_fg[t]
+            if int( np.sum(fg_t) ) < 4:
+                fg_t = mask_arr[t] >= float(mask_thresh)
+            if logvar_arr is not None:
+                fg_t = fg_t & (logvar_arr[t] <= float(max_logvar))
+
+            ys, xs = np.nonzero(fg_t)
+            if len(xs) == 0:
+                continue
+
+            m_probs = np.clip(mask_arr[t, ys, xs], 0.01, 1.0)
+            if logvar_arr is not None:
+                lv_vals = np.clip(logvar_arr[t, ys, xs], -6.0, 3.0)
+                cert = m_probs * np.exp(-0.5 * lv_vals)
+            else:
+                cert = m_probs
+
+            if len(xs) > max_points_per_view:
+                # Deterministic top-certainty + spatial stride selection
+                top_pool = min(len(xs), max_points_per_view * 3)
+                top_idx = np.argsort(cert)[::-1][:top_pool]
+                stride = np.linspace(0, len(top_idx) - 1, max_points_per_view, dtype=np.int64)
+                sel = top_idx[stride]
+                ys, xs, cert = ys[sel], xs[sel], cert[sel]
+
+            # Convert heatmap grid coordinates (xs, ys) to unpadded panel pixel coordinates (u_px, v_px)
+            u_norm = xs.astype(np.float64) / float(max(1, W_hm - 1))
+            v_norm = ys.astype(np.float64) / float(max(1, H_hm - 1))
+            u_px = u_norm * W_pad - float(pad_left)
+            v_px = v_norm * H_pad - float(pad_top)
+
+            pred_norm = xyz_arr[t, ys, xs]  # (P, 3)
+            pred_rest_3d = denormalize_rest_vertices_numpy(pred_norm, calib).astype(np.float64)
+
+            # Exact nearest-neighbor vertex lookup in rest-pose 3D space: (P, V) squared distances
+            diff = pred_rest_3d[:, None, :] - v_rest[None, :, :]
+            dist_sq = np.sum(diff * diff, axis=-1)
+            nearest_idx = np.argmin(dist_sq, axis=1)
+            nearest_dist = np.sqrt(np.maximum(0.0, dist_sq[np.arange(len(nearest_idx)), nearest_idx]))
+
+            keep = nearest_dist <= max_dist_world
+            if not np.any(keep):
+                continue
+
+            vert_indices = nearest_idx[keep].astype(np.int64)
+            target_uv = np.stack([u_px[keep], v_px[keep]], axis=-1).astype(np.float64)
+            d_keep = nearest_dist[keep]
+            proximity_w = np.exp(-0.5 * (d_keep / (0.5 * max_dist_world)) ** 2)
+            weights = np.clip(cert[keep].astype(np.float64) * proximity_w, 0.01, 1.0)
+
+            per_frame_matches[t][v_canon] = {
+                "vert_indices": vert_indices,
+                "target_uv": target_uv,
+                "weights": weights,
+                "pred_rest_3d": pred_rest_3d[keep],
+                "match_dist": d_keep,
+            }
+
+    return per_frame_matches

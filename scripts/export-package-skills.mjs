@@ -34,7 +34,13 @@ export function exportPackageSkills(repo = process.cwd()) {
         rmSync(target, { recursive: true });
       }
       mkdirSync(path.dirname(target), { recursive: true });
-      cpSync(source, target, { recursive: true });
+      cpSync(source, target, {
+        recursive: true,
+        filter: (srcPath) => {
+          const base = path.basename(srcPath);
+          return base !== "__pycache__" && !base.endsWith(".pyc");
+        },
+      });
       writeFileSync(marker, JSON.stringify({ source: relative }, null, 2) + "\n");
       exported.push({ name: skill.name, source: relative });
     }

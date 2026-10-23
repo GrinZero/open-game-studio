@@ -78,6 +78,20 @@ for (const plugin of [path.join(base, "plugins/game-studio"), cache]) {
     recursive: true,
   });
 }
+const globalAgentSkills = path.join(os.homedir(), ".agents/skills");
+if (existsSync(globalAgentSkills)) {
+  for (const skill of readdirSync(path.join(repo, "skills"), {
+    withFileTypes: true,
+  })) {
+    if (!skill.isDirectory()) continue;
+    const targetSkill = path.join(globalAgentSkills, skill.name);
+    if (existsSync(targetSkill)) {
+      cpSync(path.join(repo, "skills", skill.name), targetSkill, {
+        recursive: true,
+      });
+    }
+  }
+}
 const stamp = {
   build: readFileSync(path.join(repo, "src/shared/version.ts"), "utf8").match(
     /studioVersionMarker = "([^"]+)"/,

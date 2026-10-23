@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKER_MODULES = (
-    "pose_features", "pose_visibility", "dinov2_pose_trainer", "pipeline_runner",
+    "mocap_priors", "pose_features", "pose_visibility", "dinov2_pose_trainer", "pipeline_runner",
     "studio_bpy_worker", "runtime_metadata", "task_progress", "colab_g4_worker_server",
 )
 
@@ -33,7 +33,8 @@ def stop_previous_worker():
     old.APP.close()
 
 
-def configure(*, depth_visibility=True, enable_2k=False, profile="full", cache_models=True,
+def configure(*, depth_visibility=True, dense_surface=False, mocap_priors=True, enable_2k=False, enable_3view=False, profile="full", cache_models=True,
+              idle_timeout=0,
               drive_root="/content/drive/MyDrive/MonsterStudio",
               work_root="/content/monster-studio"):
     if profile not in {"int8", "full"}:
@@ -46,10 +47,13 @@ def configure(*, depth_visibility=True, enable_2k=False, profile="full", cache_m
         "MONSTER_DRIVE_ROOT": drive_root,
         "MONSTER_WORK_ROOT": work_root,
         "MONSTER_ENABLE_DEPTH_VISIBILITY": "1" if depth_visibility else "0",
+        "MONSTER_ENABLE_DENSE_SURFACE": "1" if dense_surface else "0",
+        "MONSTER_ENABLE_MOCAP_PRIORS": "1" if mocap_priors else "0",
         "MONSTER_ENABLE_2K": "1" if enable_2k else "0",
+        "MONSTER_ENABLE_3VIEW": "1" if enable_3view else "0",
         "MONSTER_CACHE_MODELS_ON_DRIVE": "1" if cache_models else "0",
         "H3_PROFILE": profile,
-        "MONSTER_IDLE_TIMEOUT": "600",
+        "MONSTER_IDLE_TIMEOUT": str(int(idle_timeout)),
         "SKINTOKENS_ROOT": "/content/skintokens-service",
         "SKINTOKENS_CACHE": "/content/drive/MyDrive/SkinTokens/cache",
         "SKINTOKENS_ARCHIVE": "/content/drive/MyDrive/SkinTokens/results",
@@ -317,7 +321,10 @@ def render_progress_html(data: dict[str, Any] | None = None, monster_id: str | N
 
     loss_chips = ""
     if losses:
-        labels = [("关键点 UV loss", "uv"), ("热图 loss", "heatmap"), ("可见性 loss", "visibility"), ("总 loss", "total")]
+        labels = [("关键点 UV loss", "uv"), ("热图 loss", "heatmap"), ("可见性 loss", "visibility")]
+        if "dense_xyz" in losses or "dense_mask" in losses:
+            labels.extend([("表面静止坐标 loss", "dense_xyz"), ("前景掩码 loss", "dense_mask")])
+        labels.append(("总 loss", "total"))
         chips_html = []
         for name, key in labels:
             val = losses.get(key)

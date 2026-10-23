@@ -29,12 +29,26 @@ from __future__ import annotations
 import copy
 import math
 import re
+import sys
+from pathlib import Path
 from typing import Any
+
+_WORKER_DIR = str(Path(__file__).resolve().parent)
+if _WORKER_DIR not in sys.path:
+    sys.path.insert(0, _WORKER_DIR)
 
 try:
     import numpy as np
 except ImportError:
     np = None  # type: ignore
+
+from mocap_priors import (  # noqa: E402
+    apply_floor_and_foot_contact_constraints,
+    compute_chain_wave_target_euler,
+    dejitter_velocity_gated,
+    mocap_priors_enabled,
+    whittaker_charbonnier_smooth_trajectory,
+)
 
 BONE_TAXONOMY_SCHEMA = "monster-bone-taxonomy-v2"
 DEFAULT_SYNTH_SAMPLES = 5000
@@ -97,8 +111,12 @@ def format_canonical_bone_name(kind: str, side: str, group: int | str, index: in
     return f"{k_up}_{s_up}_{grp_str}_{idx_str}"
 
 
-def infer_kind_and_side_from_name(name: str) -> tuple[str | None, str | None]:
-    """Infers `(kind, side)` from canonical names, procedural generator prefixes, or common rig aliases."""
+def infer_kind_and_side_from_name(
+    name: str, role_hint: str | None = None
+) -> tuple[str | None, str | None]:
+    """Infers `(kind, side)` from canonical names, procedural generator prefixes, common rig aliases,
+    or an explicit anatomical `role_hint` from `bones_meta[b].get("role")`.
+    """
     parsed = parse_canonical_bone_name(name)
     if parsed is not None:
         return parsed["kind"], parsed["side"]
@@ -110,54 +128,71 @@ def infer_kind_and_side_from_name(name: str) -> tuple[str | None, str | None]:
     elif re.search(r"(^|[._\-])(r|right)([._\-]|$)", low):
         side = "R"
 
-    if low in ("root", "hips", "pelvis", "cog", "master") or low.startswith("root_"):
-        return "root", side or "C"
-    if "rigid" in low or "shell" in low or "carapace" in low or "armor" in low:
-        return "rigid", side
-    if low.startswith("flex_") or any(
-        tok in low for tok in ("flex", "tentacle", "tendril", "vine", "ribbon", "hair", "cape", "whisker", "feeler")
-    ):
-        return "flex", side
-    if any(tok in low for tok in ("digit", "finger", "thumb", "index", "middle", "ring", "pinky", "toe", "phalange")):
-        return "digit", side
-    if "jaw" in low or "mandible" in low or "beak" in low:
-        return "jaw", side or "C"
-    if "head" in low or "neck" in low or "skull" in low or "cranium" in low:
-        return "head", side or "C"
-    if "spine" in low or "chest" in low or "torso" in low or "abdomen" in low or "thorax" in low:
-        return "spine", side or "C"
-    if "tail" in low:
-        return "tail", side or "C"
-    if "wing" in low or "patagium" in low or "feather" in low:
-        return "wing", side
-    if any(
-        tok in low
-        for tok in (
-            "limb",
-            "clavicle",
-            "shoulder",
-            "upper_arm",
-            "upperarm",
-            "forearm",
-            "lower_arm",
-            "lowerarm",
-            "hand",
-            "wrist",
-            "palm",
-            "thigh",
-            "upper_leg",
-            "upperleg",
-            "shin",
-            "calf",
-            "lower_leg",
-            "lowerleg",
-            "foot",
-            "ankle",
-            "paw",
-            "claw",
-        )
-    ):
-        return "limb", side
+    for token_src, allow_generic_spine in ((low, True), ((role_hint or "").strip().lower(), False)):
+        if not token_src or token_src in ("approved_deform", "deform", "bone"):
+            continue
+        if token_src in ("root", "hips", "pelvis", "cog", "master") or token_src.startswith("root_"):
+            return "root", side or "C"
+        if any(
+            tok in token_src
+            for tok in ("rigid", "shell", "carapace", "armor", "pelvis_attachment", "head_tip", "muzzle_tip")
+        ):
+            return "rigid", side
+        if token_src.startswith("flex_") or any(
+            tok in token_src
+            for tok in ("flex", "tentacle", "tendril", "vine", "ribbon", "hair", "cape", "whisker", "feeler")
+        ):
+            return "flex", side
+        if any(
+            tok in token_src
+            for tok in ("digit", "finger", "thumb", "index", "middle", "ring", "pinky", "toe", "phalange")
+        ):
+            return "digit", side
+        if any(tok in token_src for tok in ("jaw", "mandible", "beak", "muzzle", "snout")):
+            return "jaw", side or "C"
+        if any(tok in token_src for tok in ("head", "neck", "skull", "cranium")):
+            return "head", side or "C"
+        if allow_generic_spine and any(
+            tok in token_src for tok in ("spine", "chest", "torso", "abdomen", "thorax")
+        ):
+            return "spine", side or "C"
+        if "tail" in token_src:
+            return "tail", side or "C"
+        if "wing" in token_src or "patagium" in token_src or "feather" in token_src:
+            return "wing", side
+        if any(
+            tok in token_src
+            for tok in (
+                "limb",
+                "clavicle",
+                "scapula",
+                "shoulder",
+                "upper_arm",
+                "upperarm",
+                "forearm",
+                "lower_arm",
+                "lowerarm",
+                "elbow",
+                "hand",
+                "wrist",
+                "palm",
+                "hip",
+                "thigh",
+                "upper_leg",
+                "upperleg",
+                "knee",
+                "shin",
+                "calf",
+                "lower_leg",
+                "lowerleg",
+                "hock",
+                "foot",
+                "ankle",
+                "paw",
+                "claw",
+            )
+        ):
+            return "limb", side
 
     return None, side
 
@@ -372,16 +407,21 @@ def classify_rig_bones(
             assigned_side[curr_p] = side_h
             curr_p = meta[curr_p].get("parent")
 
-    # Step 4: Apply Explicit Name / Prefix Classifications (e.g. Flex_*, Wing_*, Digit_*, etc.)
+    # Step 4: Apply Explicit Name / Prefix / Role Classifications (e.g. Flex_*, Wing_*, Digit_*, role=tail/neck/...)
     topo_sorted = sorted(bone_names, key=lambda x: meta[x]["depth"])
     for b in topo_sorted:
         if b in assigned_kind:
             continue
-        n_kind, n_side = infer_kind_and_side_from_name(b)
+        role_hint = str(meta[b].get("role", ""))
+        n_kind, n_side = infer_kind_and_side_from_name(b, role_hint=role_hint)
+        if n_kind == "root" and meta[b].get("parent") is not None:
+            n_kind = "spine"
         if n_kind is not None:
             assigned_kind[b] = n_kind
             assigned_side[b] = n_side or _geom_side(b)
-            if n_kind == "flex":
+            if n_kind == "rigid":
+                assigned_sub_role[b] = "rigid_support"
+            elif n_kind == "flex":
                 assigned_sub_role[b] = "flex_chain"
                 for desc in _subtree_descendants(b):
                     if desc not in assigned_kind:
@@ -404,30 +444,61 @@ def classify_rig_bones(
                 assigned_sub_role[b] = "jaw_hinge"
             elif n_kind == "tail":
                 assigned_sub_role[b] = "tail_chain"
+                assigned_side[b] = n_side or "C"
+                for desc in _subtree_descendants(b):
+                    if desc not in assigned_kind and len(children_map.get(meta[desc].get("parent", ""), [])) <= 1:
+                        assigned_kind[desc] = "tail"
+                        assigned_sub_role[desc] = "tail_chain"
+                        assigned_side[desc] = assigned_side[b]
             elif n_kind == "wing":
                 assigned_sub_role[b] = "wing_chain"
             elif n_kind == "limb":
+                p = meta[b].get("parent")
+                role_low = role_hint.strip().lower()
                 if not children_map[b]:
                     assigned_sub_role[b] = "distal_limb"
-                elif len(children_map[b]) == 1 and not children_map[children_map[b][0]]:
+                elif p and assigned_kind.get(p) in ("root", "spine", "rigid"):
+                    assigned_sub_role[b] = "ball_socket"
+                elif (
+                    (len(children_map[b]) == 1 and not children_map[children_map[b][0]])
+                    or any(tok in role_low for tok in ("elbow", "knee", "hock", "hinge", "forearm", "shin", "calf"))
+                ):
                     assigned_sub_role[b] = "forearm_hinge"
                 else:
                     assigned_sub_role[b] = "upper_limb"
 
     # Step 5: Classify Remaining Midline & Lateral Bones via 3D Geometry + Topology
-    # Find highest spine branching hub depth (if any) to separate spine from neck/head
+    # Prefer midline hubs that branch into lateral (L/R) limbs so head/muzzle splits do not inflate chest_hub_depth
+    lateral_midline_hub_depths = [
+        meta[b]["depth"]
+        for b in bone_names
+        if b != primary_root
+        and len(children_map[b]) >= 2
+        and abs(float(meta[b].get("rest_head_world", [root_x, 0.0, 0.0])[0]) - root_x) < midline_tol_x
+        and any((assigned_side.get(c) or _geom_side(c)) in ("L", "R") for c in children_map[b])
+    ]
     branch_midline_depths = [
         meta[b]["depth"]
         for b in bone_names
         if len(children_map[b]) >= 2
         and abs(float(meta[b].get("rest_head_world", [root_x, 0.0, 0.0])[0]) - root_x) < midline_tol_x
     ]
-    chest_hub_depth = max(branch_midline_depths) if branch_midline_depths else 3
+    if lateral_midline_hub_depths:
+        chest_hub_depth = max(lateral_midline_hub_depths)
+    else:
+        chest_hub_depth = max(branch_midline_depths) if branch_midline_depths else 3
 
     for b in topo_sorted:
         if b in assigned_kind:
             continue
         info = meta[b]
+        p = info.get("parent")
+        if p and assigned_kind.get(p) == "tail" and len(children_map.get(p, [])) == 1:
+            assigned_kind[b] = "tail"
+            assigned_sub_role[b] = "tail_chain"
+            assigned_side[b] = assigned_side.get(p, "C")
+            continue
+
         h = info.get("rest_head_world", [root_x, 0.0, 0.0])
         t = info.get("rest_tail_world", h)
         dx, dy, dz = float(t[0]) - float(h[0]), float(t[1]) - float(h[1]), float(t[2]) - float(h[2])
@@ -438,8 +509,26 @@ def classify_rig_bones(
             if float(h[1]) > 0.10 * height and dy > 0.02 * height and len(children_map[b]) <= 1:
                 assigned_kind[b] = "tail"
                 assigned_sub_role[b] = "tail_chain"
-            elif info["depth"] > chest_hub_depth and dz >= -0.02 * height:
-                if dy < -0.02 * height and dz < 0.0:
+            elif p and assigned_kind.get(p) == "jaw":
+                assigned_kind[b] = "jaw"
+                assigned_sub_role[b] = "jaw_hinge"
+            elif info["depth"] > chest_hub_depth:
+                mid_siblings = [
+                    c for c in children_map.get(p or "", []) if (assigned_side.get(c) or _geom_side(c)) == "C"
+                ]
+                if len(mid_siblings) >= 2:
+                    lowest_sib = min(
+                        mid_siblings,
+                        key=lambda c: float(meta[c].get("rest_head_world", [0.0, 0.0, 0.0])[2])
+                        + float(meta[c].get("rest_tail_world", [0.0, 0.0, 0.0])[2]),
+                    )
+                    if b == lowest_sib:
+                        assigned_kind[b] = "jaw"
+                        assigned_sub_role[b] = "jaw_hinge"
+                    else:
+                        assigned_kind[b] = "head"
+                        assigned_sub_role[b] = "head_leaf" if not children_map[b] else "neck_chain"
+                elif dy < -0.02 * height and dz < 0.0 and not children_map[b] and assigned_kind.get(p or "") == "head":
                     assigned_kind[b] = "jaw"
                     assigned_sub_role[b] = "jaw_hinge"
                 else:
@@ -451,16 +540,15 @@ def classify_rig_bones(
         else:
             side_b = _geom_side(b)
             assigned_side[b] = side_b
-            p = info.get("parent")
             if p and assigned_kind.get(p) == "rigid" and p == "Core_Rigid":
                 assigned_kind[b] = "flex"
                 assigned_sub_role[b] = "flex_chain"
             else:
                 assigned_kind[b] = "limb"
-                if p and assigned_kind.get(p) in ("root", "spine", "rigid"):
-                    assigned_sub_role[b] = "ball_socket"
-                elif not children_map[b]:
+                if not children_map[b]:
                     assigned_sub_role[b] = "distal_limb"
+                elif p and assigned_kind.get(p) in ("root", "spine", "rigid"):
+                    assigned_sub_role[b] = "ball_socket"
                 elif len(children_map[b]) == 1 and not children_map[children_map[b][0]]:
                     assigned_sub_role[b] = "forearm_hinge"
                 else:
@@ -606,6 +694,48 @@ def canonicalize_rig_bone_names_in_blender(
                     break
 
     return rename_map
+
+
+def validate_canonical_rig_bone_names(
+    bones_meta_or_names: dict[str, Any] | list[str] | tuple[str, ...],
+) -> dict[str, Any]:
+    """Mandatory preflight gate that validates whether every deforming bone name conforms to
+    the Schema v2 `<KIND>_<SIDE>_<GROUP>_<INDEX>` naming contract (`_CANONICAL_NAME_RE`).
+    Returns a structured validation summary including `valid`, `non_canonical_bones`,
+    `counts_by_kind`, and `counts_by_side`.
+    """
+    if isinstance(bones_meta_or_names, dict):
+        bone_names = sorted(str(k) for k in bones_meta_or_names.keys())
+    else:
+        bone_names = [str(k) for k in bones_meta_or_names]
+
+    canonical_bones: list[str] = []
+    non_canonical_bones: list[str] = []
+    counts_by_kind: dict[str, int] = {}
+    counts_by_side: dict[str, int] = {}
+
+    for b_name in bone_names:
+        parsed = parse_canonical_bone_name(b_name)
+        if parsed is None:
+            non_canonical_bones.append(b_name)
+            continue
+        canonical_bones.append(b_name)
+        k = str(parsed["kind"])
+        s = str(parsed["side"])
+        counts_by_kind[k] = counts_by_kind.get(k, 0) + 1
+        counts_by_side[s] = counts_by_side.get(s, 0) + 1
+
+    has_unique_names = len(set(bone_names)) == len(bone_names)
+    return {
+        "schema": BONE_TAXONOMY_SCHEMA,
+        "valid": bool(len(bone_names) > 0 and len(non_canonical_bones) == 0 and has_unique_names),
+        "total_bones": len(bone_names),
+        "canonical_count": len(canonical_bones),
+        "non_canonical_bones": non_canonical_bones,
+        "has_unique_names": has_unique_names,
+        "counts_by_kind": counts_by_kind,
+        "counts_by_side": counts_by_side,
+    }
 
 
 # ==============================================================================
@@ -1007,6 +1137,7 @@ def _child_twist_cost(
         h_c = np.array(c_data["head_3d"], dtype=np.float64)
         t_c = np.array(c_data["tail_3d"], dtype=np.float64)
 
+        gap_rest = 0.0
         if "rest_head_world" in c_info and "rest_head_world" in info and "rest_tail_world" in info:
             rest_h_c = np.array(c_info["rest_head_world"], dtype=np.float64)
             gap_rest = float(np.linalg.norm(rest_h_c - rest_t_b))
@@ -1040,12 +1171,19 @@ def _child_twist_cost(
             rx2 = (math.pi - rx1) if rx1 >= 0.0 else (-math.pi - rx1)
             c_best_pen = 1e18
             c_rz_span = float(c_lims[2][1]) - float(c_lims[2][0])
+            c_sub = str(c_info.get("sub_role", ""))
+            coincident_hinge = gap_rest <= 0.008 and c_sub in ("forearm_hinge", "distal_limb")
             for rxc in (rx1, rx2):
                 pen_x = max(0.0, float(c_lims[0][0]) - rxc) + max(0.0, rxc - float(c_lims[0][1]))
                 cxc = math.cos(rxc)
                 rzc = math.atan2(-cxc * float(d_c_loc[0]), cxc * float(d_c_loc[1]))
                 pen_z = max(0.0, float(c_lims[2][0]) - rzc) + max(0.0, rzc - float(c_lims[2][1]))
-                hinge_pull = 0.25 * (rzc ** 2) if c_rz_span <= math.radians(15.0) else 0.0
+                if coincident_hinge:
+                    hinge_pull = 2.5 * (rzc ** 2) / max(0.06, sin_perp ** 2)
+                elif c_rz_span <= math.radians(15.0):
+                    hinge_pull = 0.25 * (rzc ** 2)
+                else:
+                    hinge_pull = 0.0
                 pen = (pen_x ** 2) + 8.0 * (pen_z ** 2) + hinge_pull
                 if pen < c_best_pen:
                     c_best_pen = pen
@@ -1145,11 +1283,18 @@ def solve_bone_rotation_by_kind(
     if kind == "digit":
         R_sw = minimum_swing_matrix_numpy(np.array([0.0, 1.0, 0.0], dtype=np.float64), d_loc)
         delta_raw = clamp_local_delta_euler(R_sw, lims)
-        delta_damped = clamp_local_delta_euler(
-            blend_rotation_matrices_slerp(np.eye(3, dtype=np.float64), delta_raw, 0.20, 2.5),
-            lims,
-        )
-        return R_init @ delta_damped, 0.0
+        p_children = children_map.get(p_name, []) if p_name else []
+        gp_name = bones_meta.get(p_name, {}).get("parent") if p_name else None
+        gp_children = children_map.get(gp_name, []) if gp_name else []
+        rest_len_d = float(info.get("rest_length", np.linalg.norm(t_b - h_b)))
+        is_multi_digit_fan = (len(p_children) >= 3 or len(gp_children) >= 3 or rest_len_d < 0.035)
+        if is_multi_digit_fan:
+            delta_damped = clamp_local_delta_euler(
+                blend_rotation_matrices_slerp(np.eye(3, dtype=np.float64), delta_raw, 0.20, 2.5),
+                lims,
+            )
+            return R_init @ delta_damped, 0.0
+        return R_init @ delta_raw, 0.0
 
     # 3. Limb Solver: Gimbal-Free Swing-Twist + Palm Centroid Swing (`hand_hub`) + Child-Pivot Swing-Twist (`forearm_hinge`)
     if kind == "limb":
@@ -1208,9 +1353,10 @@ def solve_bone_rotation_by_kind(
             ha_info = bones_meta.get(ha, {})
             if "rest_head_world" in ha_info:
                 rest_h_ha = np.array(ha_info["rest_head_world"], dtype=np.float64)
+                gap_ha = float(np.linalg.norm(rest_h_ha - rest_t_b))
                 v_c_rest = rest_h_ha - rest_h_b
                 n_c_rest = float(np.linalg.norm(v_c_rest))
-                if n_c_rest > 1e-5:
+                if n_c_rest > 1e-5 and gap_ha > 0.04 * rest_len_b:
                     y_ax = np.array([0.0, 1.0, 0.0], dtype=np.float64)
                     u_c_rest_loc = rest_R[b_name].T @ (v_c_rest / n_c_rest)
                     S_c_to_t_loc = minimum_swing_matrix_numpy(u_c_rest_loc, y_ax)
@@ -1258,7 +1404,7 @@ def solve_bone_rotation_by_kind(
                         tau = float(np.clip(w_tau * tau_raw, -max_tau, max_tau))
                     return R_init @ build_swing_twist_local_rotation(d_loc, tau), tau
 
-        if sub_role != "upper_limb":
+        if sub_role not in ("upper_limb", "forearm_hinge", "ball_socket"):
             R_sw = minimum_swing_matrix_numpy(np.array([0.0, 1.0, 0.0], dtype=np.float64), d_loc)
             return R_init @ R_sw, 0.0
 
@@ -1271,10 +1417,11 @@ def solve_bone_rotation_by_kind(
     grid_ry = np.linspace(ry_lo, ry_hi, 11)
     best_ry = ry_prior
     best_cost = 1e18
+    prior_w = 1.25 if (corr > 0.0 or b_name in prev_ry_map) else 0.05
     for ry_cand in grid_ry:
         ry_f = float(ry_cand)
         R_cand = R_init @ build_bounded_local_euler_rotation(d_loc, ry_f, rx_lims, rz_lims)
-        cost = 1.25 * ((ry_f - ry_prior) ** 2) + _child_twist_cost(
+        cost = prior_w * ((ry_f - ry_prior) ** 2) + _child_twist_cost(
             b_name, R_cand, v, h_b, valid_children, frame_bones, bones_meta, rest_R, obs_lookup=obs_lookup
         )
         if cost < best_cost:
@@ -1285,12 +1432,377 @@ def solve_bone_rotation_by_kind(
     return R_init @ R_loc_best, best_ry
 
 
+def _build_default_rest_rot_matrix(d0: np.ndarray) -> np.ndarray:
+    """Constructs a right-handed 3x3 rest rotation matrix `[x_ax, d0, z_ax]` whose local `+Y` axis is `d0`
+    and whose local `+X` axis aligns with world `+X` projected orthogonal to `d0` (matching Blender's
+    `+X` bone-roll convention so sagittal pitch rotations correspond to local `rx`).
+    """
+    x_proj = np.array([1.0, 0.0, 0.0], dtype=np.float64) - d0 * float(d0[0])
+    if float(np.linalg.norm(x_proj)) < 1e-6:
+        x_proj = np.array([0.0, 0.0, 1.0], dtype=np.float64) - d0 * float(d0[2])
+    x_ax = x_proj / max(1e-8, float(np.linalg.norm(x_proj)))
+    z_ax = np.cross(x_ax, d0)
+    z_ax /= max(1e-8, float(np.linalg.norm(z_ax)))
+    return np.column_stack([x_ax, d0, z_ax])
+
+
+def refine_frames_with_dense_lbs(
+    frames_out: list[dict[str, Any]],
+    bone_names: list[str],
+    classified_bones: dict[str, dict[str, Any]],
+    calib: dict[str, Any],
+    rig_skinning: dict[str, Any],
+    dense_correspondences: list[dict[str, dict[str, np.ndarray]]] | dict[str, dict[str, np.ndarray]],
+    effective_base_limits: dict[str, list[list[float]]] | None = None,
+) -> tuple[dict[str, Any], dict[str, list[list[float]]]]:
+    """Warm-started Multi-View Differentiable/Analytical Linear Blend Skinning (LBS) Surface &
+    Axial Roll Refiner.
+
+    Starts from the Layer 2/3 kinematic pose solution in `frames_out` and uses matched 3D rest-surface
+    correspondences across all active orthographic views (`'front'`, `'side'`/`'left'`, `'right'`)
+    to refine each bone's axial twist/roll (`ry`) and fine swing (`rx, rz`) within anatomical limits.
+    """
+    from pose_features import (
+        lbs_deform_vertices_numpy,
+        match_dense_surface_correspondences,
+        project_3d_points_to_ortho_view_numpy,
+    )
+
+    names = list(bone_names)
+    B = len(names)
+    index = {n: i for i, n in enumerate(names)}
+    order = sorted(names, key=lambda n: int(classified_bones[n].get("depth", 0)))
+    T = len(frames_out)
+
+    v_rest = np.asarray(rig_skinning.get("rest_verts", []), dtype=np.float64)
+    skin_idx = np.asarray(rig_skinning.get("skin_indices", []), dtype=np.int64)
+    skin_w = np.asarray(rig_skinning.get("skin_weights", []), dtype=np.float64)
+    if v_rest.ndim != 2 or v_rest.shape[0] == 0 or T == 0:
+        return {"dense_surface_refined": False, "dense_matched_points_total": 0}, {}
+
+    if skin_idx.ndim == 1:
+        skin_idx = skin_idx[:, None]
+    if skin_w.ndim == 1:
+        skin_w = skin_w[:, None]
+
+    if isinstance(dense_correspondences, dict):
+        per_frame_matches = match_dense_surface_correspondences(dense_correspondences, v_rest, calib)
+    else:
+        per_frame_matches = list(dense_correspondences)
+
+    if len(per_frame_matches) < T:
+        per_frame_matches.extend({} for _ in range(T - len(per_frame_matches)))
+
+    rest_H = np.zeros((B, 3), dtype=np.float64)
+    rest_T = np.zeros((B, 3), dtype=np.float64)
+    rest_R = np.zeros((B, 3, 3), dtype=np.float64)
+    for bi, n in enumerate(names):
+        info = classified_bones[n]
+        rest_H[bi] = np.asarray(info.get("rest_head_world", [0.0, 0.0, 0.0]), dtype=np.float64)
+        rest_T[bi] = np.asarray(info.get("rest_tail_world", [0.0, 0.0, 0.04]), dtype=np.float64)
+        if "rest_rot_mat_world" in info:
+            rest_R[bi] = np.asarray(info["rest_rot_mat_world"], dtype=np.float64)
+        else:
+            v0 = rest_T[bi] - rest_H[bi]
+            d0 = v0 / max(1e-8, float(np.linalg.norm(v0)))
+            rest_R[bi] = _build_default_rest_rot_matrix(d0)
+
+    # Precompute per-vertex per-bone effective weight matrix W_vb (V, B) and off-axis radius r_perp (V, B)
+    V = v_rest.shape[0]
+    W_vb = np.zeros((V, B), dtype=np.float64)
+    for m in range(skin_idx.shape[1]):
+        b_col = np.clip(skin_idx[:, m], 0, B - 1)
+        np.add.at(W_vb, (np.arange(V), b_col), skin_w[:, m])
+
+    W_panel = float(calib.get("panel_width", 672.0))
+    H_panel = float(calib.get("panel_height", 768.0))
+    depth_scale = max(1e-4, float(calib.get("depth_scale", float(calib.get("ortho_scale", 1.0)) / 1.48)))
+    res_scale = H_panel / 768.0
+    huber_delta_px = 4.0 * res_scale
+    outlier_gate_px = 0.14 * W_panel
+
+    deg = math.radians
+    unlocked_limits: dict[str, list[list[float]]] = {}
+    views_used_set: set[str] = set()
+    total_matched_pts = 0
+    err_before_list: list[float] = []
+    err_after_list: list[float] = []
+
+    for f in range(T):
+        f_matches = per_frame_matches[f]
+        if not f_matches:
+            continue
+
+        bmap = frames_out[f]["bones"]
+        posed_H = np.zeros((B, 3), dtype=np.float64)
+        posed_R = np.zeros((B, 3, 3), dtype=np.float64)
+        for bi, n in enumerate(names):
+            posed_H[bi] = np.asarray(bmap[n]["head_3d"], dtype=np.float64)
+            posed_R[bi] = np.asarray(bmap[n]["rot_mat_world"], dtype=np.float64)
+        posed_R_warm = posed_R.copy()
+
+        v_posed_curr = lbs_deform_vertices_numpy(
+            v_rest, skin_idx, skin_w, rest_H, rest_R, posed_H, posed_R
+        )
+
+        # Evaluate initial reprojection residuals and apply warm-start kinematic outlier gate
+        active_view_obs: dict[str, dict[str, np.ndarray]] = {}
+        for v_name, obs_v in f_matches.items():
+            v_idx = np.asarray(obs_v["vert_indices"], dtype=np.int64)
+            t_uv = np.asarray(obs_v["target_uv"], dtype=np.float64)
+            w_pts = np.asarray(obs_v["weights"], dtype=np.float64)
+            if len(v_idx) == 0:
+                continue
+            uv_init, _ = project_3d_points_to_ortho_view_numpy(v_posed_curr[v_idx], calib, v_name)
+            res_init = np.linalg.norm(uv_init - t_uv, axis=-1)
+            inlier = res_init <= outlier_gate_px
+            if not np.any(inlier):
+                continue
+            v_idx_in = v_idx[inlier]
+            t_uv_in = t_uv[inlier]
+            # Robust Geman-McClure style warm-start weight modulation
+            w_in = w_pts[inlier] / (1.0 + (res_init[inlier] / (0.045 * W_panel)) ** 2)
+            active_view_obs[v_name] = {
+                "vert_indices": v_idx_in,
+                "target_uv": t_uv_in,
+                "weights": w_in,
+            }
+            views_used_set.add(v_name)
+            total_matched_pts += int(len(v_idx_in))
+            err_before_list.extend(res_init[inlier].tolist())
+
+        if not active_view_obs:
+            continue
+
+        dense_children_map: dict[str, list[str]] = {n: [] for n in names}
+        for n in names:
+            pn = classified_bones[n].get("parent")
+            if pn and pn in dense_children_map:
+                dense_children_map[pn].append(n)
+
+        for n in order:
+            bi = index[n]
+            info = classified_bones[n]
+            kind = str(info.get("kind", "limb"))
+            p_name = info.get("parent")
+            if p_name and p_name in index:
+                pi = index[p_name]
+                init_R = posed_R[pi] @ (rest_R[pi].T @ rest_R[bi])
+                init_R_warm = posed_R_warm[pi] @ (rest_R[pi].T @ rest_R[bi])
+                head_b = posed_H[pi] + posed_R[pi] @ (rest_R[pi].T @ (rest_H[bi] - rest_H[pi]))
+            else:
+                init_R = rest_R[bi]
+                init_R_warm = rest_R[bi]
+                head_b = posed_H[bi]
+
+            # Update bone head if parent moved slightly, and adjust v_posed_curr accordingly
+            dh = head_b - posed_H[bi]
+            if float(np.linalg.norm(dh)) > 1e-8:
+                v_posed_curr += W_vb[:, bi : bi + 1] * dh[None, :]
+                posed_H[bi] = head_b
+
+            # Propagate warm-start local delta into the updated parent frame init_R
+            delta_warm = init_R_warm.T @ posed_R_warm[bi]
+            R_warm = init_R @ delta_warm
+            if float(np.linalg.norm(R_warm - posed_R[bi])) > 1e-8:
+                all_b_verts = np.nonzero(W_vb[:, bi] > 1e-5)[0]
+                if len(all_b_verts) > 0:
+                    wb_all = W_vb[all_b_verts, bi : bi + 1]
+                    r_loc_all = wb_all * ((v_rest[all_b_verts] - rest_H[bi]) @ rest_R[bi])
+                    v_posed_curr[all_b_verts] += r_loc_all @ (R_warm.T - posed_R[bi].T)
+                posed_R[bi] = R_warm
+
+            if kind == "rigid" or bool(info.get("fixed_local", False)):
+                rest_len = float(info.get("rest_length", np.linalg.norm(rest_T[bi] - rest_H[bi])))
+                tail_b = head_b + posed_R[bi][:, 1] * rest_len
+                bmap[n]["head_3d"] = [round(float(x), 5) for x in head_b]
+                bmap[n]["tail_3d"] = [round(float(x), 5) for x in tail_b]
+                bmap[n]["rot_mat_world"] = [[round(float(x), 5) for x in row] for row in posed_R[bi]]
+                continue
+
+            # Gather views where matched vertices have skinning weight on bone `bi`
+            bone_view_terms = []
+            off_axis_count = 0
+            u_shaft_rest = rest_R[bi][:, 1]
+            for v_name, v_obs in active_view_obs.items():
+                v_idx = v_obs["vert_indices"]
+                w_bone = W_vb[v_idx, bi]
+                has_w = w_bone >= 0.15
+                if not np.any(has_w):
+                    continue
+                sel_v = v_idx[has_w]
+                sel_wb = w_bone[has_w]
+                sel_uv = v_obs["target_uv"][has_w]
+                sel_w = v_obs["weights"][has_w] * sel_wb
+
+                offsets_rest = v_rest[sel_v] - rest_H[bi]
+                proj_shaft = (offsets_rest @ u_shaft_rest)[:, None] * u_shaft_rest[None, :]
+                r_perp = np.linalg.norm(offsets_rest - proj_shaft, axis=-1)
+                off_axis_count += int(np.sum(r_perp >= 0.008 * depth_scale))
+
+                # Weighted local rest vector r_local_w = w_{i,b} * R_rest^T (v_rest - h_rest)
+                r_local_w = sel_wb[:, None] * ((offsets_rest) @ rest_R[bi])
+                v_base = v_posed_curr[sel_v] - (r_local_w @ posed_R[bi].T)
+                bone_view_terms.append((v_name, sel_v, r_local_w, v_base, sel_uv, sel_w))
+
+            is_leaf_bone = len(dense_children_map.get(n, [])) == 0
+            if not bone_view_terms or not (is_leaf_bone or "dense_roll_limits_rad" in info):
+                rest_len = float(info.get("rest_length", np.linalg.norm(rest_T[bi] - rest_H[bi])))
+                tail_b = head_b + posed_R[bi][:, 1] * rest_len
+                bmap[n]["head_3d"] = [round(float(x), 5) for x in head_b]
+                bmap[n]["tail_3d"] = [round(float(x), 5) for x in tail_b]
+                bmap[n]["rot_mat_world"] = [[round(float(x), 5) for x in row] for row in posed_R[bi]]
+                continue
+
+            base_lims = (
+                copy.deepcopy(effective_base_limits[n])
+                if (effective_base_limits and n in effective_base_limits)
+                else copy.deepcopy(info.get("limits_rad", [[-deg(35), deg(35)], [-deg(20), deg(20)], [-deg(25), deg(25)]]))
+            )
+            rx_lims = (float(base_lims[0][0]), float(base_lims[0][1]))
+            ry_lo, ry_hi = float(base_lims[1][0]), float(base_lims[1][1])
+            rz_lims = (float(base_lims[2][0]), float(base_lims[2][1]))
+
+            # Unlock axial roll limits ONLY on leaf/paddle bones with sufficient off-axis surface support
+            # (or bones with explicit dense_roll_limits_rad) where axial roll cannot twist downstream chains!
+            if (off_axis_count >= 12 or "dense_roll_limits_rad" in info) and (ry_hi - ry_lo) < deg(15.0):
+                dense_roll = info.get("dense_roll_limits_rad", [-deg(40.0), deg(40.0)])
+                ry_lo = min(ry_lo, float(dense_roll[0]))
+                ry_hi = max(ry_hi, float(dense_roll[1]))
+                base_lims[1] = [ry_lo, ry_hi]
+                unlocked_limits[n] = copy.deepcopy(base_lims)
+
+            R_warm = posed_R[bi]
+            delta_warm = init_R.T @ R_warm
+            e_warm = matrix_to_euler_xyz_numpy(delta_warm)
+            rx_0 = float(np.clip(e_warm[0], rx_lims[0], rx_lims[1]))
+            ry_0 = float(np.clip(e_warm[1], ry_lo, ry_hi))
+            rz_0 = float(np.clip(e_warm[2], rz_lims[0], rz_lims[1]))
+            d_loc_0 = init_R.T @ R_warm[:, 1]
+
+            def _eval_candidates_cost(R_cands: np.ndarray, ry_vals: np.ndarray, rx_vals: np.ndarray, rz_vals: np.ndarray) -> np.ndarray:
+                # R_cands: (G, 3, 3) world rotation matrices
+                costs = 0.20 * ((ry_vals - ry_0) ** 2) + 8.0 * ((rx_vals - rx_0) ** 2 + (rz_vals - rz_0) ** 2)
+                for v_name, _, r_local_w, v_base, sel_uv, sel_w in bone_view_terms:
+                    # (G, P, 3)
+                    pts_cand = v_base[None, :, :] + np.einsum("gij,pj->gpi", R_cands, r_local_w)
+                    uv_cand, _ = project_3d_points_to_ortho_view_numpy(pts_cand, calib, v_name)
+                    diff_px = uv_cand - sel_uv[None, :, :]
+                    dist_sq = np.sum(diff_px * diff_px, axis=-1)
+                    # Pseudo-Huber loss in pixel space normalized by huber_delta_px
+                    huber = (huber_delta_px ** 2) * (np.sqrt(1.0 + dist_sq / (huber_delta_px ** 2)) - 1.0)
+                    costs = costs + np.sum(sel_w[None, :] * huber, axis=-1) / max(1.0, float(np.sum(sel_w)))
+                return costs
+
+            best_R = R_warm
+            best_ry = ry_0
+            best_rx = rx_0
+            best_rz = rz_0
+
+            # Stage A: Coarse-to-fine Axial Roll (ry) search preserving exact bone shaft direction d_loc_0
+            if (ry_hi - ry_lo) > 1e-4 and off_axis_count >= 2:
+                coarse_ry = np.unique(np.concatenate([np.linspace(ry_lo, ry_hi, 17), [ry_0]]))
+                R_coarse = np.stack(
+                    [init_R @ build_bounded_local_euler_rotation(d_loc_0, float(ry_c), rx_lims, rz_lims) for ry_c in coarse_ry],
+                    axis=0,
+                )
+                c_coarse = _eval_candidates_cost(
+                    R_coarse,
+                    coarse_ry,
+                    np.full_like(coarse_ry, rx_0),
+                    np.full_like(coarse_ry, rz_0),
+                )
+                idx_c = int(np.argmin(c_coarse))
+                ry_mid = float(coarse_ry[idx_c])
+                half_step = max(deg(0.5), (ry_hi - ry_lo) / 16.0)
+                fine_ry = np.unique(
+                    np.concatenate([np.linspace(max(ry_lo, ry_mid - half_step), min(ry_hi, ry_mid + half_step), 11), [ry_0, ry_mid]])
+                )
+                R_fine = np.stack(
+                    [init_R @ build_bounded_local_euler_rotation(d_loc_0, float(ry_c), rx_lims, rz_lims) for ry_c in fine_ry],
+                    axis=0,
+                )
+                c_fine = _eval_candidates_cost(
+                    R_fine,
+                    fine_ry,
+                    np.full_like(fine_ry, rx_0),
+                    np.full_like(fine_ry, rz_0),
+                )
+                idx_f = int(np.argmin(c_fine))
+                best_ry = float(fine_ry[idx_f])
+                best_R = R_fine[idx_f]
+                e_best = matrix_to_euler_xyz_numpy(init_R.T @ best_R)
+                best_rx = float(np.clip(e_best[0], rx_lims[0], rx_lims[1]))
+                best_rz = float(np.clip(e_best[2], rz_lims[0], rz_lims[1]))
+
+            # Stage B: Local 2D surface reprojection fine swing polish around (best_rx, best_ry, best_rz)
+            swing_rad = deg(1.5)
+            rx_grid = np.unique(np.clip(best_rx + np.linspace(-swing_rad, swing_rad, 5), rx_lims[0], rx_lims[1]))
+            rz_grid = np.unique(np.clip(best_rz + np.linspace(-swing_rad, swing_rad, 5), rz_lims[0], rz_lims[1]))
+            if len(rx_grid) > 1 or len(rz_grid) > 1:
+                cand_list = []
+                rx_list = []
+                ry_list = []
+                rz_list = []
+                for rxc in rx_grid:
+                    for rzc in rz_grid:
+                        cand_list.append(init_R @ euler_xyz_to_matrix_numpy(float(rxc), best_ry, float(rzc)))
+                        rx_list.append(float(rxc))
+                        ry_list.append(best_ry)
+                        rz_list.append(float(rzc))
+                R_sw = np.stack(cand_list, axis=0)
+                c_sw = _eval_candidates_cost(
+                    R_sw,
+                    np.asarray(ry_list, dtype=np.float64),
+                    np.asarray(rx_list, dtype=np.float64),
+                    np.asarray(rz_list, dtype=np.float64),
+                )
+                idx_sw = int(np.argmin(c_sw))
+                best_R = R_sw[idx_sw]
+
+            # Update v_posed_curr for all vertices weighted to bone `bi`
+            all_b_verts = np.nonzero(W_vb[:, bi] > 1e-5)[0]
+            if len(all_b_verts) > 0:
+                wb_all = W_vb[all_b_verts, bi : bi + 1]
+                r_loc_all = wb_all * ((v_rest[all_b_verts] - rest_H[bi]) @ rest_R[bi])
+                v_posed_curr[all_b_verts] += r_loc_all @ (best_R.T - posed_R[bi].T)
+
+            posed_R[bi] = best_R
+            rest_len = float(info.get("rest_length", np.linalg.norm(rest_T[bi] - rest_H[bi])))
+            tail_b = head_b + best_R[:, 1] * rest_len
+            bmap[n]["head_3d"] = [round(float(x), 5) for x in head_b]
+            bmap[n]["tail_3d"] = [round(float(x), 5) for x in tail_b]
+            bmap[n]["rot_mat_world"] = [[round(float(x), 5) for x in row] for row in best_R]
+
+        # Compute post-refinement 2D reprojection residuals
+        for v_name, v_obs in active_view_obs.items():
+            v_idx = v_obs["vert_indices"]
+            uv_after, _ = project_3d_points_to_ortho_view_numpy(v_posed_curr[v_idx], calib, v_name)
+            res_after = np.linalg.norm(uv_after - v_obs["target_uv"], axis=-1)
+            err_after_list.extend(res_after.tolist())
+
+    mean_before = round(float(np.mean(err_before_list)), 4) if err_before_list else 0.0
+    mean_after = round(float(np.mean(err_after_list)), 4) if err_after_list else 0.0
+    dense_diag = {
+        "dense_surface_refined": total_matched_pts > 0,
+        "dense_matched_points_total": total_matched_pts,
+        "dense_views_used": sorted(views_used_set),
+        "mean_reproj_error_px_before": mean_before,
+        "mean_reproj_error_px_after": mean_after,
+        "unlocked_roll_bones": sorted(unlocked_limits.keys()),
+    }
+    return dense_diag, unlocked_limits
+
+
 def reconstruct_frames_with_kind_solvers(
     pts_3d: np.ndarray,
     trust: np.ndarray,
     bone_names: list[str],
     classified_bones: dict[str, dict[str, Any]],
     depth_scale: float = 1.0,
+    dense_correspondences: list[dict[str, dict[str, np.ndarray]]] | dict[str, dict[str, np.ndarray]] | None = None,
+    rig_skinning: dict[str, Any] | None = None,
+    calib: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Executes Layer 2 (Universal Kinematic Core: multi-anchor IRLS Kabsch root fit + exact
     rest-offset FK + strict local Euler limit clamping) and Layer 3 (Kind-Specific Solvers)
@@ -1319,11 +1831,22 @@ def reconstruct_frames_with_kind_solvers(
         else:
             v0 = rest_T[n] - rest_H[n]
             d0 = v0 / max(1e-8, float(np.linalg.norm(v0)))
-            up = np.array([0.0, 0.0, 1.0]) if abs(float(d0[2])) < 0.9 else np.array([1.0, 0.0, 0.0])
-            x_ax = np.cross(d0, up)
-            x_ax /= max(1e-8, float(np.linalg.norm(x_ax)))
-            z_ax = np.cross(x_ax, d0)
-            rest_R[n] = np.column_stack([x_ax, d0, z_ax])
+            rest_R[n] = _build_default_rest_rot_matrix(d0)
+
+    all_rest_pts = np.vstack([np.stack(list(rest_H.values())), np.stack(list(rest_T.values()))])
+    rig_span = max(1e-4, float(np.max(np.ptp(all_rest_pts, axis=0))))
+    if T >= 2:
+        step_dists = np.linalg.norm(pts_3d[1:].astype(np.float64) - pts_3d[:-1].astype(np.float64), axis=-1)
+        rel_median_speed = float(np.median(step_dists)) / rig_span
+    else:
+        rel_median_speed = 0.0
+    # Preserve full smoothing on slow/moderate clips (rel_median_speed <= 0.005);
+    # scale down causal IIR lag & Whittaker stiffness on high-velocity dynamic clips so fast strides are not lagged
+    motion_smooth_scale = (
+        1.0
+        if rel_median_speed <= 0.005
+        else float(np.clip((0.0045 / max(1e-6, rel_median_speed)) ** 3, 0.04, 1.0))
+    )
 
     anchors = select_root_kabsch_anchors(classified_bones, root, children_map)
     ref_pts = np.array([rest_H[n] if e == 0 else rest_T[n] for n, e in anchors], dtype=np.float64)
@@ -1350,10 +1873,19 @@ def reconstruct_frames_with_kind_solvers(
     axial_nodes = [
         n
         for n in order
-        if n == root or (classified_bones[n].get("kind") in ("spine", "head") and classified_bones[n].get("side") == "C")
+        if n == root
+        or (
+            classified_bones[n].get("kind") in ("spine", "head")
+            and classified_bones[n].get("side") == "C"
+            and float(rest_T[n][2] - rest_H[n][2]) > 0.30 * max(1e-6, float(np.linalg.norm(rest_T[n] - rest_H[n])))
+            and float(rest_T[n][1] - rest_H[n][1]) <= 0.15 * max(1e-6, float(np.linalg.norm(rest_T[n] - rest_H[n])))
+        )
     ]
     top_axial = axial_nodes[-1] if len(axial_nodes) >= 2 else None
-    dz_axial_rest = float(rest_T[top_axial][2] - rest_H[root][2]) if top_axial is not None else 0.0
+    v_axial_rest = (rest_T[top_axial] - rest_H[root]) if top_axial is not None else np.zeros(3, dtype=np.float64)
+    dz_axial_rest = float(v_axial_rest[2]) if top_axial is not None else 0.0
+    dxy_axial_rest = math.hypot(float(v_axial_rest[0]), float(v_axial_rest[1])) if top_axial is not None else 0.0
+    is_upright_axial = bool(top_axial is not None and dz_axial_rest > 0.08 and dz_axial_rest > 1.25 * dxy_axial_rest)
     frame_macro_collapse = np.zeros(T, dtype=np.float64)
 
     frames_out: list[dict[str, Any]] = []
@@ -1376,13 +1908,25 @@ def reconstruct_frames_with_kind_solvers(
         "digit": (0.50, 2.5),
     }
 
+    coincident_pairs: list[tuple[int, int]] = []
+    for n in order:
+        p = classified_bones[n].get("parent")
+        if p and p in rest_T and float(np.linalg.norm(rest_H[n] - rest_T[p])) < 1e-3:
+            coincident_pairs.append((2 * index[p] + 1, 2 * index[n]))
+
     for f in range(T):
         observed = pts_3d[f].astype(np.float64).copy()
+        for ip, ic in coincident_pairs:
+            wp = max(1e-4, float(trust[f, ip])) ** 2
+            wc = max(1e-4, float(trust[f, ic])) ** 2
+            fused_pt = (wp * observed[ip] + wc * observed[ic]) / (wp + wc)
+            observed[ip] = fused_pt
+            observed[ic] = fused_pt
 
-        # Detect macro-axial vertical foreshortening (e.g., prone collapse / deep bow)
+        # Detect macro-axial vertical foreshortening on upright bipedal trunks (e.g., prone collapse / deep bow)
         macro_collapse = 0.0
         u_macro: np.ndarray | None = None
-        if top_axial is not None and dz_axial_rest > 0.08:
+        if is_upright_axial and top_axial is not None:
             v_macro_obs = observed[2 * index[top_axial] + 1] - observed[2 * index[root]]
             dz_obs = float(v_macro_obs[2])
             if dz_obs < 0.78 * dz_axial_rest and float(np.linalg.norm(v_macro_obs)) > 0.15 * dz_axial_rest:
@@ -1414,8 +1958,10 @@ def reconstruct_frames_with_kind_solvers(
                 fit_R = blend_rotation_matrices_slerp(fit_R, R_mac_sw @ fit_R, 0.55 * macro_collapse, 28.0)
         root_delta = clamp_local_delta_euler(rest_R[root].T @ fit_R @ rest_R[root], root_lims)
         if root in previous_delta:
+            root_alpha = 1.0 - (1.0 - 0.65) * motion_smooth_scale
+            root_max_step = 8.0 / max(0.15, motion_smooth_scale)
             root_delta = clamp_local_delta_euler(
-                blend_rotation_matrices_slerp(previous_delta[root], root_delta, 0.65, 8.0),
+                blend_rotation_matrices_slerp(previous_delta[root], root_delta, root_alpha, root_max_step),
                 root_lims,
             )
         root_world = rest_R[root] @ root_delta
@@ -1425,7 +1971,8 @@ def reconstruct_frames_with_kind_solvers(
         anchor_weights /= max(1e-12, float(anchor_weights.sum()))
         root_h = ((observed[anchor_ids] - (ref_pts - rest_H[root]) @ body_R.T) * anchor_weights[:, None]).sum(axis=0)
         if previous_root_h is not None:
-            root_h = 0.7 * root_h + 0.3 * previous_root_h
+            w_prev_h = 0.30 * motion_smooth_scale
+            root_h = (1.0 - w_prev_h) * root_h + w_prev_h * previous_root_h
         previous_root_h = root_h.copy()
 
         posed_R: dict[str, np.ndarray] = {}
@@ -1552,7 +2099,11 @@ def reconstruct_frames_with_kind_solvers(
                                 raw_obs_bones[ha]["head_3d"] = (h_n_obs + vc_new).tolist()
                                 raw_obs_bones[n]["tail_3d"] = (h_n_obs + vc_new).tolist()
                                 obs_dir = vc_new
-                            elif lc_rest > 0.03 and nc_obs < 0.78 * lc_rest:
+                            elif (
+                                lc_rest > 0.03
+                                and float(np.linalg.norm(rest_H[ha] - rest_T[n])) > 0.04 * rest_len
+                                and nc_obs < 0.78 * lc_rest
+                            ):
                                 l_eff = 0.85 * lc_rest
                                 dxz2 = float(vc[0] * vc[0] + vc[2] * vc[2])
                                 if dxz2 < l_eff * l_eff:
@@ -1591,8 +2142,16 @@ def reconstruct_frames_with_kind_solvers(
                 delta = clamp_local_delta_euler(init_R.T @ R_solved, lims)
                 if n in previous_delta:
                     alpha, max_step = slerp_params_by_kind.get(kind, (0.78, 18.0))
+                    if kind == "digit":
+                        p_ch = children_map.get(p, []) if p else []
+                        gp = classified_bones.get(p, {}).get("parent") if p else None
+                        gp_ch = children_map.get(gp, []) if gp else []
+                        if len(p_ch) < 3 and len(gp_ch) < 3 and rest_len >= 0.035:
+                            alpha, max_step = (0.72, 16.0)
+                    alpha_eff = 1.0 - (1.0 - alpha) * motion_smooth_scale
+                    max_step_eff = max_step / max(0.15, motion_smooth_scale)
                     delta = clamp_local_delta_euler(
-                        blend_rotation_matrices_slerp(previous_delta[n], delta, alpha, max_step),
+                        blend_rotation_matrices_slerp(previous_delta[n], delta, alpha_eff, max_step_eff),
                         lims,
                     )
                 R_world = init_R @ delta
@@ -1619,6 +2178,43 @@ def reconstruct_frames_with_kind_solvers(
             }
         prev_ry = curr_ry
         frames_out.append({"frame": f, "bones": bmap})
+
+    # Optional Stage 4.5: Warm-Started Multi-View Dense LBS Surface & Axial Roll Refinement
+    dense_diag: dict[str, Any] = {"dense_surface_refined": False, "dense_matched_points_total": 0}
+    unlocked_roll_limits: dict[str, list[list[float]]] = {}
+    if dense_correspondences is not None and rig_skinning is not None and calib is not None:
+        from pose_features import dense_surface_enabled
+        if dense_surface_enabled():
+            dense_diag, unlocked_roll_limits = refine_frames_with_dense_lbs(
+                frames_out=frames_out,
+                bone_names=names,
+                classified_bones=classified_bones,
+                calib=calib,
+                rig_skinning=rig_skinning,
+                dense_correspondences=dense_correspondences,
+                effective_base_limits=effective_base_limits,
+            )
+            for b_un, lim_un in unlocked_roll_limits.items():
+                effective_base_limits[b_un] = lim_un
+            # Recompute max_violation under any unlocked surface-observed roll limits
+            max_violation = 0.0
+            for f in range(T):
+                bmap_f = frames_out[f]["bones"]
+                for n in order:
+                    info = classified_bones[n]
+                    if info.get("kind") == "rigid" or bool(info.get("fixed_local", False)):
+                        continue
+                    p = info.get("parent")
+                    R_w = np.asarray(bmap_f[n]["rot_mat_world"], dtype=np.float64)
+                    if p and p in bmap_f:
+                        R_p = np.asarray(bmap_f[p]["rot_mat_world"], dtype=np.float64)
+                        R_init = R_p @ (rest_R[p].T @ rest_R[n])
+                    else:
+                        R_init = rest_R[n]
+                    vals = matrix_to_euler_xyz_numpy(R_init.T @ R_w)
+                    chk_lims = np.array(effective_base_limits[n], dtype=np.float64)
+                    violation = float(np.maximum(chk_lims[:, 0] - vals, vals - chk_lims[:, 1]).max())
+                    max_violation = max(max_violation, max(0.0, violation))
 
     # Kind-specific zero-phase Whittaker-Henderson + Minimum-Jerk (lam_accel, lam_jerk) on S^3
     whittaker_so3_by_kind = {
@@ -1659,7 +2255,10 @@ def reconstruct_frames_with_kind_solvers(
 
         root_l2, root_l3 = whittaker_so3_by_kind["root"]
         root_pos_sm = whittaker_smooth_trajectory(
-            root_pos_seq, weights=bone_confs[root] ** 2, lam_accel=root_l2, lam_jerk=root_l3
+            root_pos_seq,
+            weights=bone_confs[root] ** 2,
+            lam_accel=root_l2 * motion_smooth_scale,
+            lam_jerk=root_l3 * motion_smooth_scale,
         )
         sm_quats: dict[str, np.ndarray] = {}
         for n in order:
@@ -1669,9 +2268,18 @@ def reconstruct_frames_with_kind_solvers(
                 sm_quats[n] = local_quats[n]
                 continue
             l2, l3 = whittaker_so3_by_kind.get(k, (10.0, 20.0))
-            q_sm = whittaker_smooth_trajectory(
-                local_quats[n], weights=bone_confs[n] ** 2, lam_accel=l2, lam_jerk=l3
-            )
+            l2_eff = l2 * motion_smooth_scale
+            l3_eff = l3 * motion_smooth_scale
+            if mocap_priors_enabled():
+                q_sm = whittaker_charbonnier_smooth_trajectory(
+                    local_quats[n], weights=bone_confs[n] ** 2, lam_accel=l2_eff, lam_jerk=l3_eff
+                )
+                if k in ("limb", "digit", "tail", "flex", "wing"):
+                    q_sm = dejitter_velocity_gated(q_sm, passes=1, strength=0.22 * motion_smooth_scale)
+            else:
+                q_sm = whittaker_smooth_trajectory(
+                    local_quats[n], weights=bone_confs[n] ** 2, lam_accel=l2_eff, lam_jerk=l3_eff
+                )
             q_sm /= np.maximum(1e-12, np.linalg.norm(q_sm, axis=-1, keepdims=True))
             sm_quats[n] = q_sm
 
@@ -1719,6 +2327,29 @@ def reconstruct_frames_with_kind_solvers(
                 bmap_f[n]["tail_3d"] = [round(float(x), 5) for x in tail]
                 bmap_f[n]["rot_mat_world"] = [[round(float(x), 5) for x in row] for row in R_world]
 
+    use_priors = mocap_priors_enabled()
+    if use_priors:
+        contact_diag = apply_floor_and_foot_contact_constraints(
+            frames_out=frames_out,
+            order=order,
+            root=root,
+            classified_bones=classified_bones,
+            rest_H=rest_H,
+            rest_T=rest_T,
+            rest_R=rest_R,
+            effective_base_limits=effective_base_limits,
+            frame_macro_collapse=frame_macro_collapse,
+            clamp_local_delta_euler_fn=clamp_local_delta_euler,
+            minimum_swing_matrix_fn=minimum_swing_matrix_numpy,
+        )
+    else:
+        contact_diag = {
+            "floor_clamped_frames": 0,
+            "foot_contact_locked_frames": 0,
+            "max_floor_penetration_fixed": 0.0,
+            "contact_bones": [],
+        }
+
     kind_counts: dict[str, int] = {}
     for n in names:
         k = str(classified_bones[n].get("kind", "limb"))
@@ -1729,11 +2360,14 @@ def reconstruct_frames_with_kind_solvers(
         "frames": T,
         "cross_frame_confidence_replacement": False,
         "short_gap_max_frames": 3,
-        "post_smoothing": "whittaker_minimum_jerk_so3_v1",
+        "post_smoothing": "whittaker_charbonnier_minimum_jerk_so3_v2" if use_priors else "whittaker_minimum_jerk_so3_v1",
+        "mocap_priors_enabled": use_priors,
         "root_anchors": anchors,
         "final_limit_max_violation_rad": round(float(max_violation), 6),
         "fixed_local_bones": [n for n in names if classified_bones[n].get("fixed_local")],
         "kind_counts": kind_counts,
+        **dense_diag,
+        **contact_diag,
     }
     return frames_out, diag
 
@@ -1938,9 +2572,13 @@ def sample_stratified_pose_euler_dict(
 
     # Per-finger (`(side, group_id)`) independent state so fingers on the same hand never lock to 1 scalar
     finger_group_targets: dict[tuple[str, str], tuple[float, float]] = {}
+    # Per-chain (`(kind, side, group_id)`) cosine-wave state for multi-bone tail/flex/wing chains
+    chain_wave_targets: dict[tuple[str, str, str], tuple[float, float, float, float]] = {}
+    use_priors = mocap_priors_enabled()
     for b_name in topo_names:
         info = classified[b_name]
-        if info.get("kind") == "digit":
+        b_kind = str(info.get("kind", "limb"))
+        if b_kind == "digit":
             key = (str(info.get("side", "C")), str(info.get("group_id", "00")))
             if key not in finger_group_targets:
                 if regime == "workspace_cross_occlusion":
@@ -1950,6 +2588,15 @@ def sample_stratified_pose_euler_dict(
                     curl_u = rng.uniform(0.0, 1.0)
                 splay_u = rng.uniform(0.0, 1.0)
                 finger_group_targets[key] = (float(curl_u), float(splay_u))
+        elif use_priors and b_kind in ("tail", "flex", "wing"):
+            ckey = (b_kind, str(info.get("side", "C")), str(info.get("group_id", "00")))
+            if ckey not in chain_wave_targets:
+                chain_wave_targets[ckey] = (
+                    float(rng.uniform(0.0, 2.0 * math.pi)),
+                    float(rng.uniform(0.35, 0.92)),
+                    float(rng.uniform(0.0, 2.0 * math.pi)),
+                    float(rng.uniform(0.35, 0.92)),
+                )
 
     sampled_eulers: dict[str, list[float]] = {}
     for b_name in topo_names:
@@ -2029,6 +2676,16 @@ def sample_stratified_pose_euler_dict(
                 raw[0] = float(np.clip(c_eff * p_rot[0] + (1.0 - c_eff) * raw[0], lims[0][0], lims[0][1]))
                 raw[1] = float(np.clip((1.0 - 0.5 * c_eff) * raw[1], lims[1][0], lims[1][1]))
                 raw[2] = float(np.clip(c_eff * p_rot[2] + (1.0 - c_eff) * raw[2], lims[2][0], lims[2][1]))
+                if use_priors and kind in ("tail", "flex", "wing"):
+                    w_state = chain_wave_targets.get((kind, side, grp))
+                    if w_state is not None:
+                        wave_eul = compute_chain_wave_target_euler(
+                            chain_index=int(info.get("chain_index", 0)),
+                            lims=lims,
+                            wave_state=w_state,
+                        )
+                        raw[0] = float(np.clip(0.32 * wave_eul[0] + 0.68 * raw[0], lims[0][0], lims[0][1]))
+                        raw[2] = float(np.clip(0.32 * wave_eul[2] + 0.68 * raw[2], lims[2][0], lims[2][1]))
 
         if is_leaf:
             raw[1] = 0.0
@@ -2036,6 +2693,46 @@ def sample_stratified_pose_euler_dict(
         sampled_eulers[b_name] = raw
 
     return sampled_eulers, regime
+
+
+def sample_root_translation_offset(
+    bones_meta: dict[str, dict[str, Any]],
+    rng: Any,
+    sample_idx: int | None = None,
+    max_xy_fraction: float = 0.08,
+    max_z_fraction: float = 0.10,
+) -> list[float]:
+    """Samples a bounded 3D root translation offset `[dx, dy, dz]` in world/rig units so synthetic
+    training poses cover leaping, crouching, lunging, and lateral root shifts without clipping
+    outside the orthographic camera frustum.
+    """
+    pts: list[list[float]] = []
+    for info in bones_meta.values():
+        if "rest_head_world" in info:
+            pts.append(info["rest_head_world"])
+        if "rest_tail_world" in info:
+            pts.append(info["rest_tail_world"])
+    if pts:
+        arr = np.asarray(pts, dtype=np.float64)
+        span = np.maximum(1e-3, np.ptp(arr, axis=0))
+    else:
+        span = np.array([1.0, 1.0, 1.0], dtype=np.float64)
+
+    regime = select_pose_sampling_regime(sample_idx, rng)
+    max_dx = float(max_xy_fraction * span[0])
+    max_dy = float(max_xy_fraction * span[1])
+    max_dz = float(max_z_fraction * span[2])
+    if regime == "antiphase_extreme":
+        return [
+            _sample_bimodal_boundary(rng, -max_dx, max_dx),
+            _sample_bimodal_boundary(rng, -max_dy, max_dy),
+            _sample_bimodal_boundary(rng, -max_dz, max_dz),
+        ]
+    return [
+        float(rng.uniform(-max_dx, max_dx)),
+        float(rng.uniform(-max_dy, max_dy)),
+        float(rng.uniform(-max_dz, max_dz)),
+    ]
 
 
 def audit_pose_dataset_coverage(

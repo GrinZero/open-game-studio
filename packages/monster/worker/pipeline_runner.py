@@ -24,6 +24,7 @@ from pose_features import (
     features_enabled,
     dataset_cache_matches,
     resolution_2k_enabled,
+    three_view_enabled,
     studio_resolution,
     idle_split_filename,
 )
@@ -449,8 +450,18 @@ def reexam_existing_monster(monster_id: str, rerender_exam: bool = False) -> dic
 # Phase B: Action Video Generation via MiniMax H3 FL2VA + 3D IK Baking (Stages 5-6)
 # ==============================================================================
 
-def build_split_screen_prompt(action_desc: str) -> str:
+def build_split_screen_prompt(action_desc: str, enable_3view: bool | None = None) -> str:
     """Constructs the structured split-screen orthographic prompt for MiniMax H3."""
+    use_3view = three_view_enabled() if enable_3view is None else bool(enable_3view)
+    if use_3view:
+        return (
+            "Split-screen three-panel technical character reference sheet. "
+            "Left panel: left side profile orthographic view. "
+            "Center panel: front orthographic view. "
+            "Right panel: right side profile orthographic view. "
+            f"All three panels show the exact same creature performing a synchronized {action_desc} motion "
+            "in place on a dark studio floor. Static locked camera, no camera pan or zoom."
+        )
     return (
         "Split-screen two-panel technical character reference sheet. "
         "Left panel: front orthographic view. Right panel: side profile orthographic view. "
@@ -822,46 +833,57 @@ def submit_minimax_h3_comfy_job(
 
 
 def animate_monster_actions(
-    monster_id: str, action_specs: list[str], max_retries: int = 3, base_seed: int = 424242
-) -> None:
+    monster_id: str,
+    action_specs: list[str],
+    max_retries: int = 3,
+    base_seed: int = 424242,
+    bake_glb_on_cloud: bool = True,
+) -> list[str]:
     """Executes Phase B (Stages 5-6) for one or more actions (`<action_name>:<loop|once>`)."""
     monster_drive = DRIVE_ROOT / "monsters" / monster_id
     blend_path = monster_drive / "rigged_pruned.blend"
     ckpt_path = monster_drive / "dinov2_head.pt"
     meta_path = monster_drive / "studio_rig_meta.json"
     _, _, target_comp_w, target_comp_h = studio_resolution()
+    target_3view = three_view_enabled()
     if meta_path.is_file():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         calib = meta.get("calibration", {})
         comp_w = int(calib.get("composite_width", target_comp_w))
         comp_h = int(calib.get("composite_height", target_comp_h))
-        if (comp_w, comp_h) != (target_comp_w, target_comp_h):
+        calib_3view = int(calib.get("num_views", 3 if target_3view else 2)) == 3
+        if (comp_w, comp_h) != (target_comp_w, target_comp_h) or calib_3view != target_3view:
             raise RuntimeError(
-                f"Monster '{monster_id}' was trained at {comp_w}x{comp_h}, but current worker resolution is "
-                f"{target_comp_w}x{target_comp_h} (MONSTER_ENABLE_2K={'1' if resolution_2k_enabled() else '0'}). "
-                "Re-run train_monster_probe at the matching resolution before generating video."
+                f"Monster '{monster_id}' was trained at {comp_w}x{comp_h} (3view={calib_3view}), "
+                f"but current worker resolution is {target_comp_w}x{target_comp_h} "
+                f"(MONSTER_ENABLE_2K={'1' if resolution_2k_enabled() else '0'}, "
+                f"MONSTER_ENABLE_3VIEW={'1' if target_3view else '0'}). "
+                "Re-run train_monster_probe at the matching studio configuration before generating video."
             )
     else:
-        comp_w, comp_h = target_comp_w, target_comp_h
-    idle_png = monster_drive / idle_split_filename(comp_w, comp_h)
+        comp_w, comp_h, calib_3view = target_comp_w, target_comp_h, target_3view
+    idle_png = monster_drive / idle_split_filename(comp_w, comp_h, enable_3view=calib_3view)
     anim_out_dir = monster_drive / "animations"
     anim_out_dir.mkdir(parents=True, exist_ok=True)
 
     bpy_worker = Path(__file__).resolve().parent / "studio_bpy_worker.py"
     dino_worker = Path(__file__).resolve().parent / "dinov2_pose_trainer.py"
     py_bpy = str(SKINTOKENS_PY) if SKINTOKENS_PY.exists() else sys.executable
+    completed_glbs: list[str] = []
 
     for spec in action_specs:
         parts = spec.split(":")
         action_name = parts[0].strip()
         loop_lock = (len(parts) < 2) or (parts[1].strip().lower() == "loop")
-        prompt_text = build_split_screen_prompt(action_name.replace("_", " "))
+        prompt_text = build_split_screen_prompt(action_name.replace("_", " "), enable_3view=calib_3view)
 
         action_work = WORK_ROOT / "work" / monster_id / "actions" / action_name
         frames_dir = action_work / "frames"
         frames_dir.mkdir(parents=True, exist_ok=True)
         traj_json = action_work / "joints_3d_traj.json"
 
+        gate_passed = False
+        last_res: dict[str, Any] = {}
         for attempt in range(max_retries):
             seed = base_seed + attempt * 101
             mp4_path = action_work / f"raw_seed_{seed}.mp4"
@@ -897,37 +919,48 @@ def animate_monster_actions(
                 ]
             )
             with open(traj_json, "r", encoding="utf-8") as f:
-                res = json.load(f)
-            if res.get("gate_passed", False):
+                last_res = json.load(f)
+            if last_res.get("gate_passed", False):
+                gate_passed = True
                 print(f"[Stage 5 Gate PASSED] Action '{action_name}' passed on seed {seed}!")
                 break
             print(
                 f"[Stage 5 Gate REJECTED] Split-screen desync detected "
-                f"(v_diff={res.get('mean_epipolar_diff_px')}px, corr={res.get('vertical_trajectory_corr')}). "
+                f"(v_diff={last_res.get('mean_epipolar_diff_px')}px, corr={last_res.get('vertical_trajectory_corr')}). "
                 f"Retrying with next seed..."
             )
             for old_f in frames_dir.glob("*.jpg"):
                 old_f.unlink()
 
+        if not gate_passed:
+            raise RuntimeError(
+                f"[Stage 5 Gate FAILED] Action '{action_name}' failed vertical epipolar sync check after "
+                f"{max_retries} attempts (last v_diff={last_res.get('mean_epipolar_diff_px')}px, "
+                f"corr={last_res.get('vertical_trajectory_corr')}). Hard-stopping before IK bake per SOP §6.2."
+            )
+
         free_comfyui_vram()
-        out_glb = anim_out_dir / f"{action_name}_animated.glb"
-        run_cmd(
-            [
-                py_bpy,
-                str(bpy_worker),
-                "--mode",
-                "bake_ik",
-                "--blend_path",
-                str(blend_path),
-                "--meta_path",
-                str(monster_drive / "studio_rig_meta.json"),
-                "--joints_json",
-                str(traj_json),
-                "--out_glb",
-                str(out_glb),
-            ]
-        )
-        print(f"[PHASE B COMPLETE] Exported animated 3D asset: {out_glb}")
+        if bake_glb_on_cloud:
+            out_glb = anim_out_dir / f"{action_name}_animated.glb"
+            run_cmd(
+                [
+                    py_bpy,
+                    str(bpy_worker),
+                    "--mode",
+                    "bake_ik",
+                    "--blend_path",
+                    str(blend_path),
+                    "--meta_path",
+                    str(monster_drive / "studio_rig_meta.json"),
+                    "--joints_json",
+                    str(traj_json),
+                    "--out_glb",
+                    str(out_glb),
+                ]
+            )
+            completed_glbs.append(out_glb.name)
+            print(f"[PHASE B COMPLETE] Exported animated 3D asset: {out_glb}")
+    return completed_glbs
 
 
 def main() -> None:
@@ -948,6 +981,7 @@ def main() -> None:
     p_anim.add_argument("--monster_id", required=True)
     p_anim.add_argument("--actions", nargs="+", required=True, help="e.g. idle:loop walk:loop slash:once")
     p_anim.add_argument("--max_retries", type=int, default=3)
+    p_anim.add_argument("--bake_glb_on_cloud", type=int, default=1, help="1 to bake GLB on cloud, 0 for trajectory only")
 
     args = parser.parse_args()
     if args.cmd == "register":
@@ -955,7 +989,12 @@ def main() -> None:
     elif args.cmd == "reexam":
         reexam_existing_monster(args.monster_id, args.rerender_exam)
     elif args.cmd == "animate":
-        animate_monster_actions(args.monster_id, args.actions, args.max_retries)
+        animate_monster_actions(
+            args.monster_id,
+            args.actions,
+            args.max_retries,
+            bake_glb_on_cloud=bool(args.bake_glb_on_cloud),
+        )
 
 
 if __name__ == "__main__":

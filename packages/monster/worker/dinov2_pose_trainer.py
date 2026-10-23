@@ -28,10 +28,25 @@ from types import MethodType
 import warnings
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from pose_features import (features_enabled, DATASET_SCHEMA, FEATURE_VERSION, validate_enhanced_dataset,
-                           video_domain_degrade, fuse_depth_visibility, dinov2_panel_padding)
+from pose_features import (
+    calibrate_view_scale_drift,
+    features_enabled,
+    dense_surface_enabled,
+    dense_grid_shape,
+    match_dense_surface_correspondences,
+    mocap_priors_enabled,
+    DATASET_SCHEMA,
+    FEATURE_VERSION,
+    validate_enhanced_dataset,
+    video_domain_degrade,
+    fuse_depth_visibility,
+    dinov2_panel_padding,
+    windowed_peak_dsnt_numpy,
+    windowed_peak_dsnt_torch,
+)
 from bone_taxonomy import (
     BONE_TAXONOMY_SCHEMA,
+    _build_default_rest_rot_matrix,
     classify_rig_bones,
     clean_uv_short_gaps_hampel,
     compute_stratified_motion_metrics,
@@ -138,6 +153,11 @@ def dsnt_soft_argmax_numpy(logits: np.ndarray, beta: float = 12.0) -> tuple[np.n
     exp_u = np.sum(probs * grid_x, axis=(-2, -1))
     exp_v = np.sum(probs * grid_y, axis=(-2, -1))
     coords_norm = np.stack([exp_u, exp_v], axis=-1)
+    if mocap_priors_enabled():
+        deadband_norm = 2.5 / max(1.0, float(max(H_hm, W_hm)))
+        coords_norm = windowed_peak_dsnt_numpy(
+            probs, grid_x, grid_y, coords_norm, window_radius=3, pull_deadband_px=deadband_norm
+        ).astype(np.float32)
     return coords_norm, conf
 
 
@@ -158,10 +178,14 @@ if HAS_TORCH:
             backbone_name: str = "dinov2_vitb14_reg",
             custom_backbone: nn.Module | None = None,
             enable_depth_visibility: bool = False,
+            enable_dense_surface: bool = False,
+            num_views: int = 2,
         ):
             super().__init__()
             self.num_keypoints = num_keypoints
             self.enable_depth_visibility = bool(enable_depth_visibility)
+            self.enable_dense_surface = bool(enable_dense_surface)
+            self.num_views = int(num_views)
             if custom_backbone is not None:
                 self.backbone = custom_backbone
             else:
@@ -184,9 +208,37 @@ if HAS_TORCH:
             if self.enable_depth_visibility:
                 self.aux_head = nn.ModuleDict({
                     "keypoint_embedding": nn.Embedding(num_keypoints, 16),
-                    "readout": nn.Sequential(nn.Linear(embed_dim*2+18, 256), nn.GELU(), nn.Linear(256, 3)),
+                    "readout": nn.Sequential(
+                        nn.Linear(embed_dim * 2 + 16 + self.num_views, 256),
+                        nn.GELU(),
+                        nn.Linear(256, 3),
+                    ),
                 })
-
+            if self.enable_dense_surface:
+                gn_groups = 16 if embed_dim % 16 == 0 else (8 if embed_dim % 8 == 0 else 1)
+                self.dino_multi_fuse = nn.Sequential(
+                    nn.Conv2d(embed_dim * 2, embed_dim, kernel_size=1, bias=False),
+                    nn.GroupNorm(gn_groups, embed_dim),
+                    nn.GELU(),
+                )
+                self.rgb_detail_branch = nn.Sequential(
+                    nn.Conv2d(3, 32, kernel_size=3, stride=2, padding=1, bias=False),
+                    nn.GroupNorm(8, 32),
+                    nn.GELU(),
+                    nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1, bias=False),
+                    nn.GroupNorm(8, 64),
+                    nn.GELU(),
+                )
+                self.rgb_kp_refine = nn.Conv2d(128 + 64, num_keypoints, kernel_size=3, padding=1)
+                nn.init.zeros_(self.rgb_kp_refine.weight)
+                if self.rgb_kp_refine.bias is not None:
+                    nn.init.zeros_(self.rgb_kp_refine.bias)
+                self.dense_head = nn.Sequential(
+                    nn.Conv2d(128 + 64, 128, kernel_size=3, padding=1, bias=False),
+                    nn.GroupNorm(16, 128),
+                    nn.GELU(),
+                    nn.Conv2d(128, 5, kernel_size=1),
+                )
 
         @torch.no_grad()
         def extract_patch_grid(self, x: torch.Tensor) -> torch.Tensor:
@@ -195,8 +247,47 @@ if HAS_TORCH:
             h_p, w_p = H // 14, W // 14
             return feats.transpose(1, 2).reshape(B, -1, h_p, w_p)
 
-        def forward_from_features(self, patch_grid: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            logits = self.head(patch_grid)
+        @torch.no_grad()
+        def extract_multi_layer_patch_grid(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            """Extracts both the 4th-from-last layer (`L-4`) and the last layer (`L-1`) patch tokens
+            from DINOv2 as spatial feature grids `(B, C, H//14, W//14)`.
+            """
+            B, _, H, W = x.shape
+            h_p, w_p = H // 14, W // 14
+            n_tokens = h_p * w_p
+            if hasattr(self.backbone, "get_intermediate_layers"):
+                blocks = getattr(self.backbone, "blocks", None)
+                n_blocks = len(blocks) if blocks is not None else 12
+                idx_4th = max(0, n_blocks - 4)
+                idx_last = max(0, n_blocks - 1)
+                layers = self.backbone.get_intermediate_layers(x, n=[idx_4th, idx_last], norm=True)
+                t4 = layers[0][:, -n_tokens:, :].transpose(1, 2).reshape(B, -1, h_p, w_p)
+                t_last = layers[-1][:, -n_tokens:, :].transpose(1, 2).reshape(B, -1, h_p, w_p)
+                return t4, t_last
+
+            blocks = getattr(self.backbone, "blocks", None)
+            if blocks is not None and len(blocks) >= 4:
+                captured: list[torch.Tensor] = []
+                handle = blocks[-4].register_forward_hook(
+                    lambda _m, _inp, out: captured.append(out[0] if isinstance(out, tuple) else out)
+                )
+                try:
+                    last_grid = self.extract_patch_grid(x)
+                finally:
+                    handle.remove()
+                if captured:
+                    raw_4 = captured[-1][:, -n_tokens:, :]
+                    norm_layer = getattr(self.backbone, "norm", None)
+                    if norm_layer is not None:
+                        raw_4 = norm_layer(raw_4)
+                    t4 = raw_4.transpose(1, 2).reshape(B, -1, h_p, w_p)
+                    return t4, last_grid
+
+            last_grid = self.extract_patch_grid(x)
+            return last_grid, last_grid
+
+        @staticmethod
+        def _decode_logits_dsnt(logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
             B, K, H_hm, W_hm = logits.shape
             flat = logits.reshape(B, K, -1)
             probs = F.softmax(flat * 12.0, dim=-1).reshape(B, K, H_hm, W_hm)
@@ -210,26 +301,63 @@ if HAS_TORCH:
             exp_u = torch.sum(probs * grid_x, dim=(-2, -1))
             exp_v = torch.sum(probs * grid_y, dim=(-2, -1))
             coords_norm = torch.stack([exp_u, exp_v], dim=-1)
+            if mocap_priors_enabled():
+                deadband_norm = 2.5 / max(1.0, float(max(H_hm, W_hm)))
+                coords_norm = windowed_peak_dsnt_torch(
+                    probs, grid_x, grid_y, coords_norm, window_radius=3, pull_deadband_px=deadband_norm
+                )
+            return coords_norm, conf
+
+        def forward_from_features(self, patch_grid: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            logits = self.head(patch_grid)
+            coords_norm, conf = self._decode_logits_dsnt(logits)
             return coords_norm, conf, logits
 
         def forward(self, x: torch.Tensor, view_ids=None, return_aux: bool = False):
-            patch_grid = self.extract_patch_grid(x)
-            coords, conf, logits = self.forward_from_features(patch_grid)
-            if not self.enable_depth_visibility or not return_aux:
+            dense_out: dict[str, torch.Tensor] = {}
+            if self.enable_dense_surface:
+                feat_4th, feat_last = self.extract_multi_layer_patch_grid(x)
+                patch_grid = self.dino_multi_fuse(torch.cat([feat_last, feat_4th], dim=1))
+                trunk_128 = self.head[:-1](patch_grid)
+                base_logits = self.head[-1](trunk_128)
+                rgb_cue = self.rgb_detail_branch(x)
+                if rgb_cue.shape[-2:] != trunk_128.shape[-2:]:
+                    rgb_cue = F.interpolate(rgb_cue, size=trunk_128.shape[-2:], mode="bilinear", align_corners=False)
+                fused_192 = torch.cat([trunk_128, rgb_cue], dim=1)
+                logits = base_logits + self.rgb_kp_refine(fused_192)
+                coords, conf = self._decode_logits_dsnt(logits)
+                dense_raw = self.dense_head(fused_192)
+                dense_out = {
+                    "dense_mask_logits": dense_raw[:, 0:1],
+                    "dense_rest_xyz": torch.sigmoid(dense_raw[:, 1:4]),
+                    "dense_logvar": dense_raw[:, 4:5].clamp(-6.0, 3.0),
+                }
+            else:
+                patch_grid = self.extract_patch_grid(x)
+                coords, conf, logits = self.forward_from_features(patch_grid)
+
+            if not return_aux or (not self.enable_depth_visibility and not self.enable_dense_surface):
                 return coords, conf, logits
-            if view_ids is None:
-                raise ValueError("Auxiliary depth/visibility predictions require front=0 / side=1 view IDs")
-            B, C, H, W = patch_grid.shape
-            weights = F.interpolate(logits.float(), size=(H, W), mode="bilinear", align_corners=False)
-            weights = F.softmax(weights.flatten(2)*12.0, dim=-1)
-            local = torch.einsum("bkn,bcn->bkc", weights, patch_grid.float().flatten(2))
-            global_features = patch_grid.float().mean(dim=(2, 3))[:, None, :].expand(-1, self.num_keypoints, -1)
-            view = F.one_hot(view_ids.long(), num_classes=2).float()[:, None, :].expand(-1, self.num_keypoints, -1)
-            ids = torch.arange(self.num_keypoints, device=x.device)
-            identities = self.aux_head["keypoint_embedding"](ids)[None].expand(B, -1, -1)
-            aux = self.aux_head["readout"](torch.cat((local, global_features, view, identities), dim=-1))
-            return coords, conf, logits, {"depth": aux[..., 0], "depth_logvar": aux[..., 1].clamp(-6, 3),
-                                         "visibility_logits": aux[..., 2]}
+
+            aux_dict: dict[str, torch.Tensor] = dict(dense_out)
+            if self.enable_depth_visibility:
+                if view_ids is None:
+                    raise ValueError("Auxiliary depth/visibility predictions require front=0 / side=1 / right=2 view IDs")
+                B, C, H, W = patch_grid.shape
+                weights = F.interpolate(logits.float(), size=(H, W), mode="bilinear", align_corners=False)
+                weights = F.softmax(weights.flatten(2) * 12.0, dim=-1)
+                local = torch.einsum("bkn,bcn->bkc", weights, patch_grid.float().flatten(2))
+                global_features = patch_grid.float().mean(dim=(2, 3))[:, None, :].expand(-1, self.num_keypoints, -1)
+                view = F.one_hot(view_ids.long(), num_classes=self.num_views).float()[:, None, :].expand(-1, self.num_keypoints, -1)
+                ids = torch.arange(self.num_keypoints, device=x.device)
+                identities = self.aux_head["keypoint_embedding"](ids)[None].expand(B, -1, -1)
+                aux = self.aux_head["readout"](torch.cat((local, global_features, view, identities), dim=-1))
+                aux_dict.update({
+                    "depth": aux[..., 0],
+                    "depth_logvar": aux[..., 1].clamp(-6, 3),
+                    "visibility_logits": aux[..., 2],
+                })
+            return coords, conf, logits, aux_dict
 
 
 
@@ -273,24 +401,48 @@ def preprocess_panel_crop(pil_img: Image.Image, augment: bool = False, enhanced:
 if HAS_TORCH:
 
     class DualPanelMonsterDataset(Dataset):
-        def __init__(self, synth_dir: str, bone_names: list[str], augment: bool = True, enhanced: bool | None = None):
+        def __init__(
+            self,
+            synth_dir: str,
+            bone_names: list[str],
+            augment: bool = True,
+            enhanced: bool | None = None,
+            dense_surface: bool | None = None,
+        ):
             self.synth_dir = Path(synth_dir)
             with open(self.synth_dir / "keypoints_gt.json", "r", encoding="utf-8") as f:
                 data = json.load(f)
             self.enhanced = features_enabled() if enhanced is None else enhanced
+            self.dense_surface = (
+                (dense_surface_enabled() if dense_surface is None else bool(dense_surface))
+                and bool(data.get("dense_surface_enabled", False))
+            )
             if self.enhanced:
                 validate_enhanced_dataset(data, bone_names)
             self.calib = data["calibration"]
+            self.num_views = int(self.calib.get("num_views", 3 if len(self.calib.get("view_order", ())) == 3 else 2))
+            default_order = ("left", "front", "right") if self.num_views == 3 else ("front", "side")
+            self.view_order = tuple(self.calib.get("view_order", default_order))
             self.samples = data["samples"]
             self.bone_names = sorted(bone_names)
             self.augment = augment
+            self.rig_skinning: dict[str, Any] | None = None
+            skin_npz_path = self.synth_dir / "rig_skinning.npz"
+            if skin_npz_path.is_file():
+                with np.load(skin_npz_path) as skin_npz:
+                    self.rig_skinning = {
+                        "rest_verts": skin_npz["rest_verts"].astype(np.float32),
+                        "skin_indices": skin_npz["skin_indices"].astype(np.int64),
+                        "skin_weights": skin_npz["skin_weights"].astype(np.float32),
+                    }
 
         def __len__(self) -> int:
-            return len(self.samples) * 2
+            return len(self.samples) * self.num_views
 
-        def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-            sample_idx = idx // 2
-            is_side = (idx % 2) == 1
+        def __getitem__(self, idx: int) -> tuple[torch.Tensor, ...]:
+            sample_idx = idx // self.num_views
+            panel_idx = idx % self.num_views
+            view_name = self.view_order[panel_idx]
             item = self.samples[sample_idx]
             full_img = Image.open(self.synth_dir / "images" / item["image"]).convert("RGB")
             W = self.calib["panel_width"]
@@ -299,26 +451,44 @@ if HAS_TORCH:
             W_pad = float(W + pad_left + pad_right)
             H_pad = float(H + pad_top + pad_bottom)
 
-            crop = full_img.crop((W, 0, W * 2, H)) if is_side else full_img.crop((0, 0, W, H))
+            crop = full_img.crop((panel_idx * W, 0, (panel_idx + 1) * W, H))
             inp = preprocess_panel_crop(crop, augment=self.augment, enhanced=self.enhanced)
+
+            if view_name == "front":
+                uv_key, aux_view, view_id = "front_uv", "front", 0
+            elif view_name in ("side", "left"):
+                uv_key, aux_view, view_id = "side_uv", "side", 1
+            elif view_name == "right":
+                uv_key, aux_view, view_id = "right_uv", "right", 2
+            else:
+                raise ValueError(f"Unsupported studio view '{view_name}'")
 
             uv_list = []
             for b_name in self.bone_names:
                 j = item["joints"][b_name]
-                uv_h = j["side_uv_head"] if is_side else j["front_uv_head"]
-                uv_t = j["side_uv_tail"] if is_side else j["front_uv_tail"]
+                uv_h = j[f"{uv_key}_head"]
+                uv_t = j[f"{uv_key}_tail"]
                 uv_list.append([(uv_h[0] + pad_left) / W_pad, (uv_h[1] + pad_top) / H_pad])
                 uv_list.append([(uv_t[0] + pad_left) / W_pad, (uv_t[1] + pad_top) / H_pad])
 
             gt_uv = torch.tensor(uv_list, dtype=torch.float32)
             if not self.enhanced:
                 return inp, gt_uv
-            view = "side" if is_side else "front"
-            labels = [item["joints"][bone][f"{view}_{endpoint}_aux"]
+            labels = [item["joints"][bone][f"{aux_view}_{endpoint}_aux"]
                       for bone in self.bone_names for endpoint in ("head", "tail")]
             extra = {field: torch.tensor([label[field] for label in labels], dtype=torch.float32)
                      for field in ("depth_relative", "visibility_ratio", "visibility_valid", "in_frame", "label_valid")}
-            extra["view_id"] = torch.tensor(int(is_side), dtype=torch.long)
+            extra["view_id"] = torch.tensor(view_id, dtype=torch.long)
+            if self.dense_surface and item.get("dense_map"):
+                dense_path = self.synth_dir / "dense" / str(item["dense_map"])
+                if dense_path.is_file():
+                    with np.load(dense_path) as d_npz:
+                        m_key = f"{aux_view}_mask"
+                        r_key = f"{aux_view}_rest_xyz"
+                        if m_key in d_npz and r_key in d_npz:
+                            extra["dense_mask"] = torch.from_numpy(d_npz[m_key].astype(np.float32))[None]
+                            extra["dense_rest_xyz"] = torch.from_numpy(d_npz[r_key].astype(np.float32))
+                            extra["dense_valid"] = torch.tensor(1.0, dtype=torch.float32)
             return inp, gt_uv, extra
 
     def build_gaussian_target_heatmaps(
@@ -352,8 +522,46 @@ def enhanced_pose_losses(pred_uv, logits, aux, gt_uv, labels):
     depth_loss = masked_mean(0.5*(torch.exp(-lv)*residual.square()+lv), labels["label_valid"])
     vis_loss = masked_mean(F.binary_cross_entropy_with_logits(aux["visibility_logits"].float(),
                             labels["visibility_ratio"], reduction="none"), labels["visibility_valid"])
-    return {"uv": uv_loss, "heatmap": hm_loss, "depth": depth_loss, "visibility": vis_loss,
-            "total": 10.0*uv_loss + hm_loss + 0.25*depth_loss + 0.25*vis_loss}
+    total_loss = 10.0 * uv_loss + hm_loss + 0.25 * depth_loss + 0.25 * vis_loss
+    out = {
+        "uv": uv_loss,
+        "heatmap": hm_loss,
+        "depth": depth_loss,
+        "visibility": vis_loss,
+    }
+    if "dense_mask_logits" in aux and "dense_mask" in labels and "dense_rest_xyz" in labels:
+        pred_mask_logits = aux["dense_mask_logits"].float()
+        pred_xyz = aux["dense_rest_xyz"].float()
+        pred_dlv = aux["dense_logvar"].float()
+        gt_mask = labels["dense_mask"].float()
+        gt_xyz = labels["dense_rest_xyz"].float()
+        if gt_mask.shape[-2:] != pred_mask_logits.shape[-2:]:
+            gt_mask = F.interpolate(gt_mask, size=pred_mask_logits.shape[-2:], mode="nearest")
+            gt_xyz = F.interpolate(gt_xyz, size=pred_xyz.shape[-2:], mode="bilinear", align_corners=False)
+
+        d_valid = labels.get("dense_valid", torch.ones((gt_mask.shape[0],), device=gt_mask.device, dtype=torch.float32))
+        mask_bce = F.binary_cross_entropy_with_logits(pred_mask_logits, gt_mask, reduction="none").mean(dim=(1, 2, 3))
+        dense_mask_loss = masked_mean(mask_bce, d_valid)
+
+        # 3x3 morphological interior erosion on foreground mask so boundary pixels do not corrupt rest XYZ
+        fg_bin = (gt_mask > 0.5).float()
+        fg_eroded = 1.0 - F.max_pool2d(1.0 - fg_bin, kernel_size=3, stride=1, padding=1)
+        fg_use = torch.where(fg_eroded.sum(dim=(1, 2, 3), keepdim=True) >= 4.0, fg_eroded, fg_bin)
+        fg_denom = fg_use.sum(dim=(1, 2, 3)).clamp_min(1.0)
+
+        xyz_err = F.smooth_l1_loss(pred_xyz, gt_xyz, beta=0.02, reduction="none").mean(dim=1, keepdim=True)
+        xyz_per_sample = (xyz_err * fg_use).sum(dim=(1, 2, 3)) / fg_denom
+        dense_xyz_loss = masked_mean(xyz_per_sample, d_valid)
+
+        nll_map = 0.5 * (torch.exp(-pred_dlv) * xyz_err + pred_dlv)
+        nll_per_sample = (nll_map * fg_use).sum(dim=(1, 2, 3)) / fg_denom
+        dense_nll_loss = masked_mean(nll_per_sample, d_valid)
+
+        out["dense_mask"] = dense_mask_loss
+        out["dense_xyz"] = dense_xyz_loss
+        total_loss = total_loss + dense_mask_loss + 5.0 * dense_xyz_loss + 0.25 * dense_nll_loss
+    out["total"] = total_loss
+    return out
 
 
 def _query_telemetry() -> dict[str, Any]:
@@ -428,10 +636,23 @@ def train_monster_dinov2_probe(
         loader_kwargs["persistent_workers"] = True
         loader_kwargs["prefetch_factor"] = 2
     loader = DataLoader(ds, **loader_kwargs)
-    model = MonsterDINOv2PoseProbe(num_keypoints=num_keypoints, enable_depth_visibility=enhanced).to(device)
+    dense_enabled = bool(ds.dense_surface)
+    model = MonsterDINOv2PoseProbe(
+        num_keypoints=num_keypoints,
+        enable_depth_visibility=enhanced,
+        num_views=ds.num_views,
+        enable_dense_surface=dense_enabled,
+    ).to(device)
     parameters = list(model.head.parameters())
     if enhanced:
         parameters += list(model.aux_head.parameters())
+    if dense_enabled:
+        parameters += (
+            list(model.dino_multi_fuse.parameters())
+            + list(model.rgb_detail_branch.parameters())
+            + list(model.rgb_kp_refine.parameters())
+            + list(model.dense_head.parameters())
+        )
     optimizer = torch.optim.AdamW(parameters, lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     history = []
@@ -459,6 +680,11 @@ def train_monster_dinov2_probe(
         model.head.train()
         if enhanced:
             model.aux_head.train()
+        if dense_enabled:
+            model.dino_multi_fuse.train()
+            model.rgb_detail_branch.train()
+            model.rgb_kp_refine.train()
+            model.dense_head.train()
         totals_gpu: dict[str, torch.Tensor] = {}
         total_batches = len(loader)
         for step, batch in enumerate(loader, 1):
@@ -552,18 +778,27 @@ def train_monster_dinov2_probe(
     target = Path(out_ckpt)
     target.parent.mkdir(parents=True, exist_ok=True)
     checkpoint = {"bone_names": bone_names, "bones_meta": meta["bones"], "num_keypoints": num_keypoints,
-                  "calibration": ds.calib, "head_state_dict": model.head.state_dict(),
-                  "depth_visibility_enabled": enhanced, "feature_version": FEATURE_VERSION,
+                  "calibration": ds.calib, "num_views": ds.num_views, "view_order": list(ds.view_order),
+                  "head_state_dict": model.head.state_dict(),
+                  "depth_visibility_enabled": enhanced, "dense_surface_enabled": dense_enabled,
+                  "feature_version": FEATURE_VERSION,
                   "dataset_schema": DATASET_SCHEMA if enhanced else "legacy", "training_history": history}
     if enhanced:
         checkpoint["aux_state_dict"] = model.aux_head.state_dict()
+    if dense_enabled:
+        checkpoint["dino_multi_fuse_state_dict"] = model.dino_multi_fuse.state_dict()
+        checkpoint["rgb_detail_branch_state_dict"] = model.rgb_detail_branch.state_dict()
+        checkpoint["rgb_kp_refine_state_dict"] = model.rgb_kp_refine.state_dict()
+        checkpoint["dense_head_state_dict"] = model.dense_head.state_dict()
+        if ds.rig_skinning is not None:
+            checkpoint["rig_skinning"] = ds.rig_skinning
     temporary = target.with_suffix(".pt.tmp")
     torch.save(checkpoint, temporary)
     if target.exists():
         stamp = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y%m%d%H%M%S%f")
         shutil.copy2(target, target.with_name(f"{target.stem}.before_{stamp}.pt"))
     temporary.replace(target)
-    print(f"[Stage 3 Saved] {target} | depth_visibility={enhanced}")
+    print(f"[Stage 3 Saved] {target} | depth_visibility={enhanced} | dense_surface={dense_enabled}")
 
 
 # ==============================================================================
@@ -648,10 +883,18 @@ def evaluate_epipolar_consistency_and_triangulate(
     visibility_side_all=None,
     logvar_front_all=None,
     logvar_side_all=None,
+    uv_right_all: np.ndarray | None = None,
+    conf_right_all: np.ndarray | None = None,
+    depth_right_all=None,
+    visibility_right_all=None,
+    logvar_right_all=None,
+    dense_correspondences: list[dict[str, np.ndarray]] | None = None,
+    rig_skinning: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Pure-math Epipolar Consistency Gate (`|v_F(t) - v_S(t)| < 18px` & `corr > 0.82`),
     5-frame Hampel 2D tracking spike rejection, squared-confidence 3D ray triangulation,
     5-tap Savitzky-Golay quadratic polynomial smoothing, and top-down rigid bone-length projection.
+    Supports both 2-view (`front`, `side`) and 3-view (`left`, `front`, `right`) studio observations.
     """
     T, K, _ = uv_front_all.shape
     W, H = float(calib["panel_width"]), float(calib["panel_height"])
@@ -661,12 +904,22 @@ def evaluate_epipolar_consistency_and_triangulate(
     span_z = S
     res_scale = H / 768.0
     max_v_diff_px = 18.0 * res_scale
+    has_right = uv_right_all is not None and conf_right_all is not None
 
     # Evaluate raw epipolar gate statistics before spike interpolation so genuine desync is still flagged
-    v_diff_raw = np.abs(uv_front_all[:, :, 1] - uv_side_all[:, :, 1])
+    v_diff_fs = np.abs(uv_front_all[:, :, 1] - uv_side_all[:, :, 1])
+    if has_right:
+        v_diff_fr = np.abs(uv_front_all[:, :, 1] - uv_right_all[:, :, 1])
+        v_diff_raw = 0.5 * (v_diff_fs + v_diff_fr)
+    else:
+        v_diff_raw = v_diff_fs
     mean_v_diff_px = float(np.mean(v_diff_raw))
     vf_mean = np.mean(uv_front_all[:, :, 1], axis=1)
-    vs_mean = np.mean(uv_side_all[:, :, 1], axis=1)
+    vs_mean = (
+        0.5 * (np.mean(uv_side_all[:, :, 1], axis=1) + np.mean(uv_right_all[:, :, 1], axis=1))
+        if has_right
+        else np.mean(uv_side_all[:, :, 1], axis=1)
+    )
     if np.std(vf_mean) > 1e-3 and np.std(vs_mean) > 1e-3:
         v_corr = float(np.corrcoef(vf_mean, vs_mean)[0, 1])
     else:
@@ -677,9 +930,19 @@ def evaluate_epipolar_consistency_and_triangulate(
     uv_f_clean, uv_s_clean, conf_f_clean, conf_s_clean = clean_2d_trajectories_hampel(
         uv_front_all, uv_side_all, conf_front_all, conf_side_all, spike_thresh_px=22.0 * res_scale
     )
+    if has_right:
+        _, uv_r_clean, _, conf_r_clean = clean_2d_trajectories_hampel(
+            uv_front_all, uv_right_all, conf_front_all, conf_right_all, spike_thresh_px=22.0 * res_scale
+        )
+    else:
+        uv_r_clean, conf_r_clean = None, None
 
     pts_3d = np.zeros((T, K, 3), dtype=np.float32)
-    joint_conf = 0.5 * (conf_f_clean + conf_s_clean)
+    joint_conf = (
+        0.5 * (conf_f_clean + np.maximum(conf_s_clean, conf_r_clean))
+        if (has_right and conf_r_clean is not None)
+        else 0.5 * (conf_f_clean + conf_s_clean)
+    )
     for t in range(T):
         u_F, v_F = uv_f_clean[t, :, 0], uv_f_clean[t, :, 1]
         u_S, v_S = uv_s_clean[t, :, 0], uv_s_clean[t, :, 1]
@@ -687,20 +950,55 @@ def evaluate_epipolar_consistency_and_triangulate(
         w_S = np.square(np.clip(conf_s_clean[t], 1e-3, 1.0))
 
         X = cx + (u_F / W - 0.5) * span_x
-        Y = cy + (u_S / W - 0.5) * span_x
+        Y_S = cy + (u_S / W - 0.5) * span_x
         Z_F = cz + (0.5 - v_F / H) * span_z
         Z_S = cz + (0.5 - v_S / H) * span_z
-        Z = (w_F * Z_F + w_S * Z_S) / (w_F + w_S)
+        if has_right and uv_r_clean is not None and conf_r_clean is not None:
+            u_R, v_R = uv_r_clean[t, :, 0], uv_r_clean[t, :, 1]
+            w_R = np.square(np.clip(conf_r_clean[t], 1e-3, 1.0))
+            Y_R = cy - (u_R / W - 0.5) * span_x
+            Y = (w_S * Y_S + w_R * Y_R) / (w_S + w_R)
+            Z_R = cz + (0.5 - v_R / H) * span_z
+            Z = (w_F * Z_F + w_S * Z_S + w_R * Z_R) / (w_F + w_S + w_R)
+        else:
+            Y = Y_S
+            Z = (w_F * Z_F + w_S * Z_S) / (w_F + w_S)
         pts_3d[t] = np.stack([X, Y, Z], axis=-1)
 
     enhanced = depth_front_all is not None
     if enhanced:
         uv_f_enh = clean_uv_short_gaps_hampel(uv_front_all.astype(np.float64), scale=res_scale, max_gap=3)
         uv_s_enh = clean_uv_short_gaps_hampel(uv_side_all.astype(np.float64), scale=res_scale, max_gap=3)
+        uv_r_enh = (
+            clean_uv_short_gaps_hampel(uv_right_all.astype(np.float64), scale=res_scale, max_gap=3)
+            if has_right
+            else None
+        )
+        if mocap_priors_enabled():
+            uv_f_enh, uv_r_enh, _ = calibrate_view_scale_drift(
+                uv_front=uv_f_enh,
+                uv_side=uv_s_enh,
+                conf_front=conf_front_all,
+                conf_side=conf_side_all,
+                calib=calib,
+                uv_right=uv_r_enh,
+                conf_right=conf_right_all,
+                vis_front=visibility_front_all,
+                vis_side=visibility_side_all,
+                vis_right=visibility_right_all,
+            )
         epipolar_dv_px = np.abs(uv_f_enh[..., 1] - uv_s_enh[..., 1])
         epipolar_gate = np.exp(-0.5 * (epipolar_dv_px / (28.0 * res_scale)) ** 2)
-        cf_gated = np.clip(conf_front_all.astype(np.float64) * (0.35 + 0.65 * epipolar_gate), 0.01, 1.0)
         cs_gated = np.clip(conf_side_all.astype(np.float64) * (0.35 + 0.65 * epipolar_gate), 0.01, 1.0)
+        cr_gated = None
+        if has_right and uv_r_enh is not None:
+            epipolar_dv_fr_px = np.abs(uv_f_enh[..., 1] - uv_r_enh[..., 1])
+            epipolar_gate_fr = np.exp(-0.5 * (epipolar_dv_fr_px / (28.0 * res_scale)) ** 2)
+            cr_gated = np.clip(conf_right_all.astype(np.float64) * (0.35 + 0.65 * epipolar_gate_fr), 0.01, 1.0)
+            epipolar_gate_f = np.maximum(epipolar_gate, epipolar_gate_fr)
+            cf_gated = np.clip(conf_front_all.astype(np.float64) * (0.35 + 0.65 * epipolar_gate_f), 0.01, 1.0)
+        else:
+            cf_gated = np.clip(conf_front_all.astype(np.float64) * (0.35 + 0.65 * epipolar_gate), 0.01, 1.0)
         pts_3d, joint_conf = fuse_depth_visibility(
             uv_f_enh,
             uv_s_enh,
@@ -713,6 +1011,11 @@ def evaluate_epipolar_consistency_and_triangulate(
             visibility_side_all,
             logvar_front_all,
             logvar_side_all,
+            uv_right=uv_r_enh,
+            conf_right=cr_gated,
+            depth_right=depth_right_all,
+            visibility_right=visibility_right_all,
+            logvar_right=logvar_right_all,
         )
         pts_3d = whittaker_smooth_trajectory(
             np.asarray(pts_3d, dtype=np.float64),
@@ -723,16 +1026,27 @@ def evaluate_epipolar_consistency_and_triangulate(
         # Adaptive confidence normalization so low-logit checkpoints never zero out stereo_valid
         cf_norm = conf_front_all / np.maximum(1e-4, np.max(conf_front_all, axis=0, keepdims=True).clip(0.25, 1.0))
         cs_norm = conf_side_all / np.maximum(1e-4, np.max(conf_side_all, axis=0, keepdims=True).clip(0.25, 1.0))
-        stereo_weight = np.minimum(visibility_front_all, visibility_side_all) * np.minimum(cf_norm, cs_norm)
+        if has_right and visibility_right_all is not None:
+            cr_norm = conf_right_all / np.maximum(1e-4, np.max(conf_right_all, axis=0, keepdims=True).clip(0.25, 1.0))
+            lat_vis = np.maximum(visibility_side_all, visibility_right_all)
+            lat_conf = np.maximum(cs_norm, cr_norm)
+            stereo_weight = np.minimum(visibility_front_all, lat_vis) * np.minimum(cf_norm, lat_conf)
+            use_r = (visibility_right_all * cr_norm) > (visibility_side_all * cs_norm)
+            v_lat = np.where(use_r, uv_right_all[:, :, 1], uv_side_all[:, :, 1])
+            v_diff_eval = np.abs(uv_front_all[:, :, 1] - v_lat)
+        else:
+            stereo_weight = np.minimum(visibility_front_all, visibility_side_all) * np.minimum(cf_norm, cs_norm)
+            v_lat = uv_side_all[:, :, 1]
+            v_diff_eval = v_diff_raw
         stereo_valid = stereo_weight >= 0.30
         if int(stereo_valid.sum()) >= max(4, int(T * K * 0.05)):
-            mean_v_diff_px = float(np.average(v_diff_raw[stereo_valid], weights=stereo_weight[stereo_valid]))
+            mean_v_diff_px = float(np.average(v_diff_eval[stereo_valid], weights=stereo_weight[stereo_valid]))
             frame_ok = stereo_valid.sum(axis=1) >= 2
             if int(frame_ok.sum()) >= 3:
                 w = np.where(stereo_valid, stereo_weight, 0.0)
                 denom = w.sum(axis=1).clip(1e-6)
                 vf = (uv_front_all[:, :, 1] * w).sum(axis=1) / denom
-                vs = (uv_side_all[:, :, 1] * w).sum(axis=1) / denom
+                vs = (v_lat * w).sum(axis=1) / denom
                 if np.std(vf[frame_ok]) > 1e-3 and np.std(vs[frame_ok]) > 1e-3:
                     v_corr = float(np.corrcoef(vf[frame_ok], vs[frame_ok])[0, 1])
                 else:
@@ -748,7 +1062,12 @@ def evaluate_epipolar_consistency_and_triangulate(
         for k in range(K):
             b_name = bone_names[k // 2]
             depth = int(bones_meta.get(b_name, {}).get("depth", 1)) if bones_meta else 1
-            side_valid = conf_s_clean[:, k] >= 0.45
+            side_conf_eff = (
+                np.maximum(conf_s_clean[:, k], conf_r_clean[:, k])
+                if (has_right and conf_r_clean is not None)
+                else conf_s_clean[:, k]
+            )
+            side_valid = side_conf_eff >= 0.45
             if np.any(side_valid) and not np.all(side_valid):
                 pts_3d[:, k, 1] = short_gap_fill_1d_or_nd(pts_3d[:, k, 1], ~side_valid, max_gap=3)
 
@@ -778,6 +1097,9 @@ def evaluate_epipolar_consistency_and_triangulate(
             bone_names=bone_names,
             classified_bones=classified_meta,
             depth_scale=depth_scale,
+            dense_correspondences=dense_correspondences,
+            rig_skinning=rig_skinning,
+            calib=calib,
         )
         for t in range(T):
             b_map = frames_out[t]["bones"]
@@ -789,9 +1111,16 @@ def evaluate_epipolar_consistency_and_triangulate(
                 b_map[b_name]["visibility_side"] = visibility_side_all[t, endpoints].tolist()
                 b_map[b_name]["depth_std_front"] = np.exp(0.5 * logvar_front_all[t, endpoints]).tolist()
                 b_map[b_name]["depth_std_side"] = np.exp(0.5 * logvar_side_all[t, endpoints]).tolist()
+                if has_right and depth_right_all is not None and visibility_right_all is not None and logvar_right_all is not None:
+                    b_map[b_name]["depth_right_relative"] = depth_right_all[t, endpoints].tolist()
+                    b_map[b_name]["visibility_right"] = visibility_right_all[t, endpoints].tolist()
+                    b_map[b_name]["depth_std_right"] = np.exp(0.5 * logvar_right_all[t, endpoints]).tolist()
         return {
             "bone_taxonomy_schema": BONE_TAXONOMY_SCHEMA,
             "depth_visibility_enabled": enhanced,
+            "dense_surface_enabled": bool(
+                dense_correspondences is not None and rig_skinning is not None and dense_surface_enabled()
+            ),
             "gate_passed": gate_passed,
             "mean_epipolar_diff_px": round(mean_v_diff_px, 3),
             "vertical_trajectory_corr": round(v_corr, 4),
@@ -839,6 +1168,10 @@ def evaluate_epipolar_consistency_and_triangulate(
                 b_map[b_name]["visibility_side"] = visibility_side_all[t, endpoints].tolist()
                 b_map[b_name]["depth_std_front"] = np.exp(0.5 * logvar_front_all[t, endpoints]).tolist()
                 b_map[b_name]["depth_std_side"] = np.exp(0.5 * logvar_side_all[t, endpoints]).tolist()
+                if has_right and depth_right_all is not None and visibility_right_all is not None and logvar_right_all is not None:
+                    b_map[b_name]["depth_right_relative"] = depth_right_all[t, endpoints].tolist()
+                    b_map[b_name]["visibility_right"] = visibility_right_all[t, endpoints].tolist()
+                    b_map[b_name]["depth_std_right"] = np.exp(0.5 * logvar_right_all[t, endpoints]).tolist()
         frames_out.append({"frame": t, "bones": b_map})
 
     if classified_meta:
@@ -859,8 +1192,9 @@ def evaluate_epipolar_consistency_and_triangulate(
 def infer_dual_view_frames(
     ckpt_path: str, frame_paths: list[Path], custom_backbone: Any = None
 ) -> dict[str, Any]:
-    """Runs DINOv2 probe on a sequence of split-screen frames (`1344x768` or `2560x1440`) using
+    """Runs DINOv2 probe on a sequence of split-screen frames (`1344x768`, `2560x1440`, or `2688x1440`) using
     batched `torch.inference_mode()` + multi-threaded CPU frame decoding to maximize GPU throughput.
+    Supports both 2-view (`[Front | Side]`) and 3-view (`[Left | Front | Right]`) studio calibrations.
     """
     require_torch()
     configure_torch_gpu_acceleration()
@@ -870,6 +1204,12 @@ def infer_dual_view_frames(
     bone_names: list[str] = ckpt["bone_names"]
     bones_meta: dict[str, Any] | None = ckpt.get("bones_meta")
     calib: dict[str, Any] = ckpt["calibration"]
+    num_views = int(ckpt.get("num_views", calib.get("num_views", 3 if len(calib.get("view_order", ())) == 3 else 2)))
+    default_order = ("left", "front", "right") if num_views == 3 else ("front", "side")
+    view_order = tuple(ckpt.get("view_order", calib.get("view_order", default_order)))
+    view_id_map = {"front": 0, "side": 1, "left": 1, "right": 2}
+    panel_view_ids = [view_id_map[v] for v in view_order]
+
     W, H = float(calib["panel_width"]), float(calib["panel_height"])
     W_int, H_int = int(W), int(H)
     pad_top, pad_bottom, pad_left, pad_right = dinov2_panel_padding(W_int, H_int)
@@ -881,13 +1221,26 @@ def infer_dual_view_frames(
         raise ValueError("Enhanced checkpoint is missing its auxiliary head")
     if features_enabled() and not enhanced:
         warnings.warn("Legacy checkpoint: depth/visibility unavailable until retraining; using original 2D pipeline.")
+    dense_enabled = (
+        enhanced
+        and dense_surface_enabled()
+        and bool(ckpt.get("dense_surface_enabled", False))
+        and "dense_head_state_dict" in ckpt
+    )
+    rig_skinning = ckpt.get("rig_skinning") if dense_enabled else None
     model = MonsterDINOv2PoseProbe(
         num_keypoints=ckpt["num_keypoints"], custom_backbone=custom_backbone,
-        enable_depth_visibility=enhanced,
+        enable_depth_visibility=enhanced, num_views=num_views,
+        enable_dense_surface=dense_enabled,
     ).to(device)
     model.head.load_state_dict(ckpt["head_state_dict"])
     if enhanced:
         model.aux_head.load_state_dict(ckpt["aux_state_dict"])
+    if dense_enabled:
+        model.dino_multi_fuse.load_state_dict(ckpt["dino_multi_fuse_state_dict"])
+        model.rgb_detail_branch.load_state_dict(ckpt["rgb_detail_branch_state_dict"])
+        model.rgb_kp_refine.load_state_dict(ckpt["rgb_kp_refine_state_dict"])
+        model.dense_head.load_state_dict(ckpt["dense_head_state_dict"])
     model.eval()
 
     T = len(frame_paths)
@@ -896,19 +1249,29 @@ def infer_dual_view_frames(
     uv_side_all = np.zeros((T, K, 2), dtype=np.float32)
     conf_front_all = np.zeros((T, K), dtype=np.float32)
     conf_side_all = np.zeros((T, K), dtype=np.float32)
-    aux_arrays = {key: np.zeros((T, K), dtype=np.float32) for key in
-                  ("depth_front_all", "depth_side_all", "visibility_front_all", "visibility_side_all", "logvar_front_all", "logvar_side_all")} if enhanced else {}
+    uv_right_all = np.zeros((T, K, 2), dtype=np.float32) if num_views == 3 else None
+    conf_right_all = np.zeros((T, K), dtype=np.float32) if num_views == 3 else None
+    aux_keys = [
+        "depth_front_all", "depth_side_all",
+        "visibility_front_all", "visibility_side_all",
+        "logvar_front_all", "logvar_side_all",
+    ]
+    if num_views == 3:
+        aux_keys.extend(["depth_right_all", "visibility_right_all", "logvar_right_all"])
+    aux_arrays = {key: np.zeros((T, K), dtype=np.float32) for key in aux_keys} if enhanced else {}
+    dense_correspondences: list[dict[str, np.ndarray]] | None = [] if (dense_enabled and rig_skinning is not None) else None
 
-    def _load_frame_pair(fp: Path) -> tuple[Any, Any]:
+    def _load_frame_panels(fp: Path) -> tuple[Any, ...]:
         with Image.open(fp) as raw_im:
             im = raw_im.convert("RGB")
-        if im.size != (W_int * 2, H_int):
+        if im.size != (W_int * num_views, H_int):
             raise ValueError(
-                f"Frame {fp.name} resolution {im.width}x{im.height} does not match checkpoint calibration {W_int * 2}x{H_int}."
+                f"Frame {fp.name} resolution {im.width}x{im.height} does not match checkpoint calibration {W_int * num_views}x{H_int}."
             )
-        t_f = preprocess_panel_crop(im.crop((0, 0, W_int, H_int)), augment=False)
-        t_s = preprocess_panel_crop(im.crop((W_int, 0, W_int * 2, H_int)), augment=False)
-        return t_f, t_s
+        return tuple(
+            preprocess_panel_crop(im.crop((p_idx * W_int, 0, (p_idx + 1) * W_int, H_int)), augment=False)
+            for p_idx in range(num_views)
+        )
 
     batch_frames = max(1, int(os.environ.get("MONSTER_INFER_BATCH_FRAMES", "8")))
     decode_workers = min(8, max(2, (os.cpu_count() or 4) // 2))
@@ -917,35 +1280,67 @@ def infer_dual_view_frames(
         for start_t in range(0, T, batch_frames):
             end_t = min(T, start_t + batch_frames)
             chunk_paths = frame_paths[start_t:end_t]
-            pairs = list(pool.map(_load_frame_pair, chunk_paths))
-            chunk_len = len(pairs)
-            tensors = [tensor for pair in pairs for tensor in pair]
+            panel_tuples = list(pool.map(_load_frame_panels, chunk_paths))
+            chunk_len = len(panel_tuples)
+            tensors = [tensor for p_tuple in panel_tuples for tensor in p_tuple]
             batch = torch.stack(tensors, dim=0)
             if non_blocking:
                 batch = batch.pin_memory()
             batch = batch.to(device, non_blocking=non_blocking)
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
                 if enhanced:
-                    view_ids = torch.tensor([0, 1] * chunk_len, device=device, dtype=torch.long)
+                    view_ids = torch.tensor(panel_view_ids * chunk_len, device=device, dtype=torch.long)
                     coords_norm, conf, _, auxiliary = model(batch, view_ids, return_aux=True)
                     for prefix, key in (("depth", "depth"), ("visibility", "visibility_logits"), ("logvar", "depth_logvar")):
                         values = auxiliary[key].float()
                         if prefix == "visibility":
                             values = torch.sigmoid(values)
-                        vals_np = values.cpu().numpy().reshape(chunk_len, 2, K)
-                        aux_arrays[f"{prefix}_front_all"][start_t:end_t] = vals_np[:, 0, :]
-                        aux_arrays[f"{prefix}_side_all"][start_t:end_t] = vals_np[:, 1, :]
+                        vals_np = values.cpu().numpy().reshape(chunk_len, num_views, K)
+                        for p_idx, v_name in enumerate(view_order):
+                            target_view = "side" if v_name == "left" else v_name
+                            aux_arrays[f"{prefix}_{target_view}_all"][start_t:end_t] = vals_np[:, p_idx, :]
+                    if dense_correspondences is not None and rig_skinning is not None and "dense_mask_logits" in auxiliary:
+                        H_hm, W_hm = int(auxiliary["dense_mask_logits"].shape[-2]), int(auxiliary["dense_mask_logits"].shape[-1])
+                        d_mask_np = torch.sigmoid(auxiliary["dense_mask_logits"].float()).cpu().numpy().reshape(
+                            chunk_len, num_views, H_hm, W_hm
+                        )
+                        d_xyz_np = auxiliary["dense_rest_xyz"].float().cpu().numpy().reshape(
+                            chunk_len, num_views, 3, H_hm, W_hm
+                        )
+                        d_logvar_np = auxiliary["dense_logvar"].float().cpu().numpy().reshape(
+                            chunk_len, num_views, H_hm, W_hm
+                        )
+                        chunk_dense_views = {
+                            v_name: {
+                                "mask": d_mask_np[:, p_idx],
+                                "rest_xyz": d_xyz_np[:, p_idx],
+                                "logvar": d_logvar_np[:, p_idx],
+                            }
+                            for p_idx, v_name in enumerate(view_order)
+                        }
+                        dense_correspondences.extend(
+                            match_dense_surface_correspondences(chunk_dense_views, rig_skinning, calib)
+                        )
                 else:
                     coords_norm, conf, _ = model(batch)
-            coords_np = coords_norm.float().cpu().numpy().reshape(chunk_len, 2, K, 2)
-            conf_np = conf.float().cpu().numpy().reshape(chunk_len, 2, K)
+            coords_np = coords_norm.float().cpu().numpy().reshape(chunk_len, num_views, K, 2)
+            conf_np = conf.float().cpu().numpy().reshape(chunk_len, num_views, K)
 
-            uv_front_all[start_t:end_t, :, 0] = coords_np[:, 0, :, 0] * W_pad - float(pad_left)
-            uv_front_all[start_t:end_t, :, 1] = coords_np[:, 0, :, 1] * H_pad - float(pad_top)
-            uv_side_all[start_t:end_t, :, 0] = coords_np[:, 1, :, 0] * W_pad - float(pad_left)
-            uv_side_all[start_t:end_t, :, 1] = coords_np[:, 1, :, 1] * H_pad - float(pad_top)
-            conf_front_all[start_t:end_t] = conf_np[:, 0, :]
-            conf_side_all[start_t:end_t] = conf_np[:, 1, :]
+            for p_idx, v_name in enumerate(view_order):
+                u_px = coords_np[:, p_idx, :, 0] * W_pad - float(pad_left)
+                v_px = coords_np[:, p_idx, :, 1] * H_pad - float(pad_top)
+                if v_name == "front":
+                    uv_front_all[start_t:end_t, :, 0] = u_px
+                    uv_front_all[start_t:end_t, :, 1] = v_px
+                    conf_front_all[start_t:end_t] = conf_np[:, p_idx, :]
+                elif v_name in ("side", "left"):
+                    uv_side_all[start_t:end_t, :, 0] = u_px
+                    uv_side_all[start_t:end_t, :, 1] = v_px
+                    conf_side_all[start_t:end_t] = conf_np[:, p_idx, :]
+                elif v_name == "right" and uv_right_all is not None and conf_right_all is not None:
+                    uv_right_all[start_t:end_t, :, 0] = u_px
+                    uv_right_all[start_t:end_t, :, 1] = v_px
+                    conf_right_all[start_t:end_t] = conf_np[:, p_idx, :]
 
     return evaluate_epipolar_consistency_and_triangulate(
         uv_front_all=uv_front_all,
@@ -955,6 +1350,10 @@ def infer_dual_view_frames(
         calib=calib,
         bone_names=bone_names,
         bones_meta=bones_meta,
+        uv_right_all=uv_right_all,
+        conf_right_all=conf_right_all,
+        dense_correspondences=dense_correspondences,
+        rig_skinning=rig_skinning,
         **aux_arrays,
     )
 
@@ -1011,11 +1410,7 @@ def reconstruct_frame_so3_rotations_from_keypoints(
                 S_back = minimum_swing_matrix_numpy(v_f0, d0)
                 rest_R[b] = S_back @ R_f0
             else:
-                up = np.array([0.0, 0.0, 1.0]) if abs(float(d0[2])) < 0.9 else np.array([1.0, 0.0, 0.0])
-                x_ax = np.cross(d0, up)
-                x_ax /= max(1e-8, float(np.linalg.norm(x_ax)))
-                z_ax = np.cross(x_ax, d0)
-                rest_R[b] = np.column_stack([x_ax, d0, z_ax])
+                rest_R[b] = _build_default_rest_rot_matrix(d0)
         else:
             rest_R[b] = np.eye(3, dtype=np.float64)
 
@@ -1152,6 +1547,10 @@ def evaluate_stage4_studio_exam(ckpt_path: str, exam_dir: str, out_report: str) 
                     auxiliary_depth_errors.extend((
                         abs(predicted["depth_front_relative"][endpoint_index]-(y-cy)/depth_scale),
                         abs(predicted["depth_side_relative"][endpoint_index]-(cx-x)/depth_scale)))
+                    if "depth_right_relative" in predicted:
+                        auxiliary_depth_errors.append(
+                            abs(predicted["depth_right_relative"][endpoint_index]-(x-cx)/depth_scale)
+                        )
     stratified = compute_stratified_motion_metrics(pred_res["frames"], gt_data["frames"], ckpt_meta or {})
     primary_stats = stratified.get("primary_bones", {})
 

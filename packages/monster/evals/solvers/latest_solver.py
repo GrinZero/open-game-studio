@@ -31,7 +31,13 @@ from bone_taxonomy import (  # noqa: E402
     savgol_smooth_array,
     whittaker_smooth_trajectory,
 )
-from pose_features import fuse_depth_visibility  # noqa: E402
+from pose_features import (  # noqa: E402
+    calibrate_view_scale_drift,
+    dense_surface_enabled,
+    fuse_depth_visibility,
+    match_dense_surface_correspondences,
+    mocap_priors_enabled,
+)
 
 LATEST_SOLVER_NAME = "taxonomy_kind_v2"
 
@@ -87,6 +93,7 @@ def run_latest_solver(
     vs_raw = np.asarray(observations["visibility_side_all"], dtype=np.float64)
     lvf_raw = np.asarray(observations["logvar_front_all"], dtype=np.float64)
     lvs_raw = np.asarray(observations["logvar_side_all"], dtype=np.float64)
+    has_right = "uv_right_all" in observations and "conf_right_all" in observations
 
     stage1_raw_obs = {
         "uv_front": uv_f_raw,
@@ -100,18 +107,70 @@ def run_latest_solver(
         "logvar_front": lvf_raw,
         "logvar_side": lvs_raw,
     }
+    if has_right:
+        uv_r_raw = np.asarray(observations["uv_right_all"], dtype=np.float64)
+        cr_raw = np.asarray(observations["conf_right_all"], dtype=np.float64)
+        dr_raw = np.asarray(observations.get("depth_right_all", np.zeros_like(ds_raw)), dtype=np.float64)
+        vr_raw = np.asarray(observations.get("visibility_right_all", np.ones_like(vs_raw)), dtype=np.float64)
+        lvr_raw = np.asarray(observations.get("logvar_right_all", np.zeros_like(lvs_raw)), dtype=np.float64)
+        stage1_raw_obs.update({
+            "uv_right": uv_r_raw,
+            "conf_right": cr_raw,
+            "depth_right": dr_raw,
+            "visibility_right": vr_raw,
+            "logvar_right": lvr_raw,
+        })
+    else:
+        uv_r_raw = cr_raw = dr_raw = vr_raw = lvr_raw = None
 
-    # Stage 2: Bounded short-gap Hampel cleaning + Dual-ortho epipolar V-consistency gating
-    uv_f_clean = clean_uv_short_gaps_hampel(uv_f_raw, scale=scale_2k, max_gap=3)
+    # Stage 2: Bounded short-gap Hampel cleaning + View Scale/Drift Calibration + Dual/Tri-ortho epipolar gating
+    uv_f_hampel = clean_uv_short_gaps_hampel(uv_f_raw, scale=scale_2k, max_gap=3)
     uv_s_clean = clean_uv_short_gaps_hampel(uv_s_raw, scale=scale_2k, max_gap=3)
+    uv_r_hampel = (
+        clean_uv_short_gaps_hampel(uv_r_raw, scale=scale_2k, max_gap=3)
+        if (has_right and uv_r_raw is not None)
+        else None
+    )
 
-    replaced_f_mask = np.linalg.norm(uv_f_clean - uv_f_raw, axis=-1) > 1e-5
+    replaced_f_mask = np.linalg.norm(uv_f_hampel - uv_f_raw, axis=-1) > 1e-5
     replaced_s_mask = np.linalg.norm(uv_s_clean - uv_s_raw, axis=-1) > 1e-5
+
+    if mocap_priors_enabled():
+        uv_f_clean, uv_r_clean, drift_diag = calibrate_view_scale_drift(
+            uv_front=uv_f_hampel,
+            uv_side=uv_s_clean,
+            conf_front=cf_raw,
+            conf_side=cs_raw,
+            calib=calib,
+            uv_right=uv_r_hampel,
+            conf_right=cr_raw,
+            vis_front=vf_raw,
+            vis_side=vs_raw,
+            vis_right=vr_raw,
+        )
+    else:
+        uv_f_clean = uv_f_hampel
+        uv_r_clean = uv_r_hampel
+        drift_diag = {
+            "view_drift_calibrated": False,
+            "max_abs_dy_px": 0.0,
+            "mean_abs_dy_px": 0.0,
+            "max_abs_scale_pct": 0.0,
+        }
 
     epipolar_dv_px = np.abs(uv_f_clean[..., 1] - uv_s_clean[..., 1])
     epipolar_gate = np.exp(-0.5 * (epipolar_dv_px / (28.0 * scale_2k)) ** 2)
-    cf_gated = np.clip(cf_raw * (0.35 + 0.65 * epipolar_gate), 0.01, 1.0)
     cs_gated = np.clip(cs_raw * (0.35 + 0.65 * epipolar_gate), 0.01, 1.0)
+    if has_right and uv_r_raw is not None and cr_raw is not None and uv_r_clean is not None and uv_r_hampel is not None:
+        replaced_r_mask = np.linalg.norm(uv_r_hampel - uv_r_raw, axis=-1) > 1e-5
+        epipolar_dv_fr_px = np.abs(uv_f_clean[..., 1] - uv_r_clean[..., 1])
+        epipolar_gate_fr = np.exp(-0.5 * (epipolar_dv_fr_px / (28.0 * scale_2k)) ** 2)
+        cr_gated = np.clip(cr_raw * (0.35 + 0.65 * epipolar_gate_fr), 0.01, 1.0)
+        epipolar_gate_f = np.maximum(epipolar_gate, epipolar_gate_fr)
+        cf_gated = np.clip(cf_raw * (0.35 + 0.65 * epipolar_gate_f), 0.01, 1.0)
+    else:
+        uv_r_clean = cr_gated = replaced_r_mask = epipolar_dv_fr_px = epipolar_gate_fr = None
+        cf_gated = np.clip(cf_raw * (0.35 + 0.65 * epipolar_gate), 0.01, 1.0)
 
     stage2_cleaned_2d = {
         "uv_front_clean": uv_f_clean,
@@ -122,9 +181,18 @@ def run_latest_solver(
         "epipolar_gate": epipolar_gate,
         "replaced_front_mask": replaced_f_mask,
         "replaced_side_mask": replaced_s_mask,
+        **drift_diag,
     }
+    if has_right and uv_r_clean is not None and cr_gated is not None:
+        stage2_cleaned_2d.update({
+            "uv_right_clean": uv_r_clean,
+            "conf_right_gated": cr_gated,
+            "epipolar_dv_fr_px": epipolar_dv_fr_px,
+            "epipolar_gate_fr": epipolar_gate_fr,
+            "replaced_right_mask": replaced_r_mask,
+        })
 
-    # Stage 3: 3D Triangulation & Savitzky-Golay Smoothing
+    # Stage 3: 3D Triangulation & Whittaker Smoothing
     pts_3d_raw, trust_raw = fuse_depth_visibility(
         uv_f_clean,
         uv_s_clean,
@@ -137,6 +205,11 @@ def run_latest_solver(
         vs_raw,
         lvf_raw,
         lvs_raw,
+        uv_right=uv_r_clean,
+        conf_right=cr_gated,
+        depth_right=dr_raw,
+        visibility_right=vr_raw,
+        logvar_right=lvr_raw,
     )
     pts_3d_raw = np.asarray(pts_3d_raw, dtype=np.float64)
     trust_raw = np.asarray(trust_raw, dtype=np.float64)
@@ -150,13 +223,27 @@ def run_latest_solver(
         "pts_3d_smoothed": pts_3d_smoothed,
     }
 
-    # Stage 4: Layer 2 + Layer 3 Kinematic Reconstruction
+    # Stage 4: Layer 2 + Layer 3 Kinematic Reconstruction (+ optional Dense Surface LBS Refinement)
+    rig_skinning = studio_rig_meta.get("rig_skinning") or observations.get("rig_skinning")
+    dense_corrs = observations.get("dense_correspondences")
+    if dense_corrs is None and dense_surface_enabled() and rig_skinning is not None and "dense_views_all" in observations:
+        dv_all = observations["dense_views_all"]
+        if isinstance(dv_all, dict):
+            dense_corrs = match_dense_surface_correspondences(dv_all, rig_skinning, calib)
+        else:
+            dense_corrs = [
+                match_dense_surface_correspondences(dv, rig_skinning, calib)[0]
+                for dv in dv_all
+            ]
     frames_pred, stage4_diag = reconstruct_frames_with_kind_solvers(
         pts_3d=pts_3d_smoothed,
         trust=trust_raw,
         bone_names=bone_names,
         classified_bones=classified_bones,
         depth_scale=depth_scale,
+        dense_correspondences=dense_corrs if dense_surface_enabled() else None,
+        rig_skinning=rig_skinning if dense_surface_enabled() else None,
+        calib=calib,
     )
 
     elapsed_ms = (time.perf_counter() - t0) * 1000.0

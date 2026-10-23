@@ -1,9 +1,14 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "game-studio",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Local projects, immutable assets, canvases and character production for Codex.",
-  "keywords": ["games", "assets", "canvas", "local"],
+  "keywords": [
+    "games",
+    "assets",
+    "canvas",
+    "local"
+  ],
   "extensions": {
     "com.openai": {
       "onboardingSkill": "./skills/setup/SKILL.md",

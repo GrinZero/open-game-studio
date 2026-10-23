@@ -13,6 +13,11 @@
       "epochs",
       "auto_shutdown_after"
     ],
+    "reexam_only": [
+      "monster_id",
+      "rerender_exam",
+      "auto_shutdown_after"
+    ],
     "generate_actions_batch": [
       "monster_id",
       "actions_csv",

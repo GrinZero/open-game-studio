@@ -151,3 +151,10 @@
 - `npm run build` 和 41 项测试通过。`node scripts/category-smoke.mjs` 使用隔离登记库，HTTP 与真实 stdio MCP/AppBridge 内嵌界面均通过分组、折叠、搜索、手动分类持久化、刷新、版本不变、用途筛选及画布筛选隔离验收。截图 `var/qa/categories-http.png`、`var/qa/categories-mcp.png`。
 - 已核实 LaunchAgent 和安装缓存 MCP 配置指向缓存外 runtime，4310 端口和 `.game-studio` 登记库保留。仅同步修改过的 UI／共享分类源码、HTTP／MCP 产物及本文档；无服务端变更，未重启服务或重装插件。备份 `hot-update-backups/20261011-191159-asset-categories`。安装缓存的真实 stdio MCP 读取到与源码一致的内嵌 HTML，并成功校验原模型文件。新开隐藏验证页打开「星铸者 → 林谷遗迹」，显示角色 1、装备 6、植被 6，DOM 版本为 `usage-v1`；前后快照确认资产和所有画布内容完全一致。
 - 原主窗口未暴露为当前会话的 MCP／IAB 标签，Computer Use 禁止操作 Codex 应用。重新打开工作台的 app 请求返回 queued，仍无法确认原主窗口已刷新。新验证页已生效不能代表旧主窗口已热更新；用户需重新打开工作台。
+
+## 2026-10-23：v0.1.8 发布验证
+
+- 汇总 Monster 骨骼分类、姿态特征与训练、动作先验、复考接口、Colab 配置，以及逐帧多视角轮廓审查和姿态桥接；Monster 离线包版本为 0.2.1。
+- `npm run build`、`npm run check:distribution`、70 项工作台测试、25 项 Monster CPU 检查、8 项逐帧审查测试与文档检查通过。逐帧测试在临时 Python 环境中运行，包含 NumPy、Pillow、OpenCV 和 SciPy；未执行 GPU 训练或真实 Blender 动画质量验收。
+- 已核实本地 LaunchAgent、插件源与 Codex 安装缓存均使用稳定 runtime；插件登记为 0.1.8 并启用。HTTP 服务重载，新安装缓存的 MCP 握手返回 0.1.8，内嵌 HTML 与构建文件一致。项目登记保留。
+- 已在本聊天侧栏观察到新版工作台。原生主窗口受 Computer Use 访问限制，无法证明此前打开的主窗口已刷新；已有 MCP 连接也不能以新连接握手代替验证。

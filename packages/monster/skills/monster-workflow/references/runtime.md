@@ -4,16 +4,29 @@
 
 [SOP 快照](workflow-and-audit.md) 来自用户指定的 `star-maker/docs/开发管理/MonsterStudio完整流程与用户审计规范.md`。该快照随技能分发；不要求目标机器存在原 star-maker 仓库。规范中的质量要求和用户关卡保持原意。
 
-SOP §7.1 的旧 Cell 1 向 `MonsterStudio/src` 同步代码，已改为直接从 GitHub 拉取 `packages/monster`（或解包可选的本地部署包）至 `/content/monster-releases/`，不覆盖 Drive 的原 `src` 备份。Notebook 仍按 Cell 1 → 2 → 3 → 4 准备和启动，并在 Cell 5 提供了实时任务进度监控面板（显示当前阶段、轮次、批次、loss、GPU 状态与预计剩余时间，自动定时刷新）；Cell 1 默认启用 `H3_PROFILE="full"`（BF16/FP16 满血权重）与默认 `1344×768` 分辨率，并提供 `ENABLE_2K_RESOLUTION`（`MONSTER_ENABLE_2K=1`，切换为 `2560×1440` 双视图拼合＝单面板 `1280×1440`）特性开关；Cell 2 使用独立 SkinTokens/bpy 环境（`studio_bpy_worker.py` 默认启用 Cycles 硬件 GPU 光追＋`scene.cycles.denoising_use_gpu=True` GPU OpenImageDenoise＋`use_persistent_data=True` 常驻显存＋`/dev/shm` 内存盘暂存＋表面可见性静态拓扑缓存），Cell 3 准备 ComfyUI/H3 及 2K 两阶段潜空间超分与分块精修节点/权重（`Comfyui_Minimax_h3_latent_Upscaler` + `minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors`；`dinov2_pose_trainer.py` 默认启用冻结主干融合 SDPA 注意力、CUDA TF32 / `cudnn.benchmark`、`persistent_workers=True` 异步 DataLoader 与批量 `torch.inference_mode()` 推理），Worker 监听 7865、写入 Drive 登记文件并在控制台输出一行 `connect` 配对命令。
+SOP §7.1 的旧 Cell 1 向 `MonsterStudio/src` 同步代码，已改为直接从 GitHub 拉取 `packages/monster`（或解包可选的本地部署包）至 `/content/monster-releases/`，不覆盖 Drive 的原 `src` 备份。Notebook 仍按 Cell 1 → 2 → 3 → 4 准备和启动，并在 Cell 5 提供了实时任务进度监控面板（显示当前阶段、轮次、批次、loss、GPU 状态与预计剩余时间，自动定时刷新）；Cell 1 默认启用 `H3_PROFILE="full"`（BF16/FP16 满血权重）、默认双视图 `[Front | Side]` 与 `1344×768` 分辨率、默认启用 `ENABLE_MOCAP_PRIORS=True`（`MONSTER_ENABLE_MOCAP_PRIORS=1`，启用置信度自适应 1-Euro 滤波、躯干刚性簇 ICP 根姿态、球窝/铰链/扭转关节分类先验、接触感知脚部钉扎及父子骨向量结构损失），并提供 `ENABLE_2K_RESOLUTION`（`MONSTER_ENABLE_2K=1`，切换为 `2560×1440` 双视图拼合＝单面板 `1280×1440`）、`ENABLE_3VIEW_STUDIO`（`MONSTER_ENABLE_3VIEW=1`，三视图 AB 测试总开关：切换为单画布正视居中三联画 `[Left | Front | Right]`，768P 下 `1344×768`＝单面板 `448×768 × 3`，2K 下 `2688×1440`＝单面板 `896×1440 × 3`）以及 `ENABLE_DENSE_SURFACE=False`（默认关闭 `MONSTER_ENABLE_DENSE_SURFACE=0`；显式设为 `True` 时开启稠密表面坐标＋不确定度门控＋Stage 6 Warm-Start 可微 LBS 叶骨轴向扭转精修）特性开关；Cell 2 使用独立 SkinTokens/bpy 环境（`studio_bpy_worker.py` 默认启用 Cycles 硬件 GPU 光追＋`scene.cycles.denoising_use_gpu=True` GPU OpenImageDenoise＋`use_persistent_data=True` 常驻显存＋`/dev/shm` 内存盘暂存＋表面可见性静态拓扑缓存），Cell 3 准备 ComfyUI/H3 及 2K 两阶段潜空间超分与分块精修节点/权重（`Comfyui_Minimax_h3_latent_Upscaler` + `minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors`；`dinov2_pose_trainer.py` 默认启用冻结主干融合 SDPA 注意力、CUDA TF32 / `cudnn.benchmark`、`persistent_workers=True` 异步 DataLoader 与批量 `torch.inference_mode()` 推理），Worker 监听 7865、写入 Drive 登记文件并在控制台输出一行 `connect` 配对命令。
 
-## 本机开发与云端部署
+## 本机固化 SOP 执行器与云端部署
 
 操作前定位包含 `packages/monster/package.json` 的源码仓库或已安装运行目录，核实 npm workspace；不要在任意游戏项目或只有技能的插件缓存目录执行这些命令。
 
 ```sh
 npm run monster:check
 npm run monster:package
+npm run monster:sop -- --help
 ```
+
+全流程 SOP 的本地执行层已固化在 [monster_sop.py](../scripts/monster_sop.py)，包含 7 个标准子命令，Agent 应直接调用这些固定脚本而非临时手写 Python/Blender/FFmpeg 代码：
+
+| 子命令 | 固化脚本 | 覆盖 SOP 阶段与核心职责 |
+| --- | --- | --- |
+| `gate` | [sop_gate.py](../scripts/sop_gate.py) | 维护 `reviews.json` + `stage_state.json`，计算 SHA-256 指纹，校验 `<KIND>_<SIDE>_<GROUP>_<INDEX>` 规范骨骼命名门禁，执行 `G1`/`G2`/`G3`/`final_batch` 下游硬门禁断言与 10 类变更分级失效推导 |
+| `preflight` | [sop_preflight.py](../scripts/sop_preflight.py) | 阶段一工作区与 Git 红线守卫（阻断未获 `final_batch` 批准前写入 `art_source/` 或受管清单）、7 项模型体检、装饰拆离备份 `decorations_manifest.json`、预绑定骨骼规范命名门禁与 U1 Google Drive 持久同步 |
+| `g1-pack` | [sop_g1_pack.py](../scripts/sop_g1_pack.py) | 阶段二 4 候选装饰恢复、强制 `<KIND>_<SIDE>_<GROUP>_<INDEX>` 骨骼规范命名重命名与核验表、16 张标准八面体（Octahedral）骨骼叠加图、4 类怪物形态同动作对照视频与 `g1_review.html` 生成 |
+| `g2-pack` | [sop_g2_pack.py](../scripts/sop_g2_pack.py) | 阶段三自动校验 G1 硬门禁、按锁定原生分辨率与双/三视图排布采样 `pose_001`～`pose_050`、2D 标签叠加图、单屏 50 缩略图总览 `g2_50_overview.jpg`、异常重抽日志 `rejection_redraw_log.json` 与交互式 `g2_review.html` |
+| `g3-exam` | [sop_g3_exam.py](../scripts/sop_g3_exam.py) | 阶段四自动校验 G1+G2 硬门禁、U2 增量持久化同步（比对 SHA-256 跳过未改动 `.blend`）、严格区分 `3d_gt` / `2d_only` / `unlabeled_video` 三类边界（绝不编造 MPJPE/SO(3)）、生成并排对照视频与 `g3_review.html` |
+| `deliver` | [sop_delivery.py](../scripts/sop_delivery.py) | 阶段五自动校验 G3 硬门禁、3 次重试极线同步失败硬终止阻断、当批独立清单 `batch_manifest.json` 过滤、本地 GLB 回读与 `:loop` 首尾接缝跳变检测（`compute_loop_seam_metrics`）及 `delivery_review.html` |
+| `colab-guard` | [sop_colab_guard.py](../scripts/sop_colab_guard.py) | 阶段六跨会话租约表 `active_sessions.json`、阶段前置释放校验（仅允许在 `stage1_candidates_fetched` 或 `final_batch_approved` 释放，视频审阅/迭代期间硬阻断释放）与安全下线核验 |
 
 日常可直接通过 GitHub 的 **Open in Colab** 打开 `packages/monster/notebooks/colab.ipynb` 启动云端 Worker，无需手动打包或上传 `.tar.gz`。如需测试本地未提交改动，再使用 `packages/monster/dist/` 下的打包归档。同步本机插件运行目录不会切换已有 Colab 实例。任务忙碌时不可切换代码版本。
 
@@ -21,29 +34,28 @@ npm run monster:package
 
 ## 实际 API 与边界
 
-先检查所部署版本的 `contracts/protocol.json`、Worker 源码与实际 endpoint，不根据文件里存在某个函数就假定它已注册。迁移基线的协议版本为 1，提供 `heartbeat`、`rig_candidates`、`train_monster_probe`、`generate_actions_batch`、`shutdown`。
+先检查所部署版本的 `contracts/protocol.json`、Worker 源码与实际 endpoint。当前协议版本为 1，提供 `heartbeat`、`rig_candidates`、`train_monster_probe`、`reexam_only`、`generate_actions_batch`、`shutdown` 共 6 个注册端点。
 
-`integration/monster_client.py` 提供 Python 客户端和 `npm run monster:call`（首次调用自动准备 `packages/monster/.venv`，且默认自动发现本机 Google Drive 挂载的 `endpoint_registry.json` 或 `var/monster/endpoint_registry.json`）。认证是 Gradio 用户名/密码；登记文件的 `token` 作为密码使用，不是 Bearer Token。登记文件是私密运行数据，不加入 Git 或审阅材料。客户端在真实心跳上核对协议版本，不能只看可能过期的登记文件。状态查询会重置旧看门狗计时，不能据此假定自动释放已禁用。
+`integration/monster_client.py` 提供 Python 客户端和 `npm run monster:call`（首次调用自动准备 `packages/monster/.venv`，且默认自动发现本机 Google Drive 挂载的 `endpoint_registry.json` 或 `var/monster/endpoint_registry.json`）。认证是 Gradio 用户名/密码；登记文件的 `token` 作为密码使用，不是 Bearer Token。登记文件是私密运行数据，不加入 Git 或审阅材料。客户端在真实心跳上核对协议版本，不能只看可能过期的登记文件。
 
-本机可执行一次配对或状态查询：
+本机可执行状态查询或零重训快速复考：
 
 ```sh
 npm run monster:call -- status
+npm run monster:call -- reexam --monster_id <id>
 ```
 
-当前客户端的 `rig` 和自定义 Blend 输入会使用 Gradio 临时文件上传，**不符合 SOP 的 U1/U2 持久传输要求**。正式流程须先将模型上传 Drive，并使用已验证的云端挂载路径调用方式或补齐持久路径适配；不要把现有 CLI 当作合规生产捷径。
+`rig_candidates` 支持不传临时文件、直接从 Google Drive U1 持久目录（`MyDrive/MonsterStudio/monsters/<id>/u1/rig_input_variant.glb`）读取输入并归档全部 4 套 `candidate_0..3.glb` 至 Drive。
 
-## 迁移基线尚缺的保障
+## 已固化的代码级保障与运行核查表
 
-这是基于 `v2.3-20261020004015` 提取的运行代码事实，执行时须按实际版本重新核查：
+执行时仍须核对远端实际运行的 Worker 版本是否已同步最新代码：
 
-| 要求 | 迁移基线事实 | 执行约束 |
+| 要求 | 已固化代码保障 | 运行时核查约束 |
 | --- | --- | --- |
-| 视频反馈期间保留 GPU | `ColabLifecycleGuard` 仍启用 600 秒自动释放；动作 API 默认 `auto_shutdown_after=True`，在 `finally` 释放 | 进入此阶段前实际禁用冲突的自动释放并验证；客户端传 `False` 只覆盖该次批次参数，不会禁用看门狗。不得用持续心跳伪装成已修复。尚未具备保障时保留已完成材料并报告缺口，不启动不符合约定的视频迭代 |
-| G1/G2/G3 后端门禁 | API 尚无完整用户决定/版本依赖硬门禁，部分调用会直接进入合成和训练 | Agent 按用户记录约束自己的调度；不得宣称后端已拦截，也不提前调用绕过关卡。代码层保障另行实现、测试 |
-| 四候选完整工程与 G1 材料 | 现有绑定 API 不承诺四套恢复装饰后的 Blend、同动作视频和 16 张骨骼图 | 逐项制作并核查审阅包；自动 audit 分数和候选 ZIP 不替代 G1 |
-| G3 已有视频考试 | 原训练流程包含合成的 96 帧技术考试；`api_reexam_only` 存在但未注册 | 准备独立已有视频与实际 GLB 回读重渲染链；不能把合成回归或不存在的远程端点当作 G3 |
-| 同步失败终止、烘焙分支与当批清单 | SOP §7.1 列为必改项；`bake_glb_on_cloud` 尚未控制分支，批次打包会遍历已有目录 | 生产前核查/补齐并验证相应逻辑；不能仅凭 API 成功或 ZIP 存在宣称达标 |
-| 工作台 Monster 调度与入库 | 现有 `generation_start` 仍是本机 Codex 路线，无专用 Monster 面板/自动入库 | 使用实际工具完成授权工作，产物通过现有资源导入登记；不虚构工具、按钮或状态 |
-
-编写技能不修改这些实现，也不授权为读取规范而启动 GPU、上传私有资产或关闭其他会话的实例。若用户任务需要补齐缺失能力，先完成该范围内的实现与验证；技术准备可以继续，正式阶段不能跨越尚未满足的用户关卡。
+| 视频反馈期间保留 GPU | `ColabLifecycleGuard` 默认 `idle_timeout_sec=0`（禁用 600s 空闲自毁）；`api_generate_actions_batch` 默认 `auto_shutdown_after=False`；本地 `sop_colab_guard.py` 维护跨会话租约与阶段释放前置条件 | 若远端仍运行旧版 Worker，须重新运行 Cell 1 + Cell 4 更新服务端，或通过 `heartbeat` 确认远端配置 |
+| G1/G2/G3 与骨骼命名硬门禁 | 本地 `sop_gate.py`、`sop_preflight.py`、`sop_g1_pack.py`、`sop_g2_pack.py`、`sop_g3_exam.py`、`sop_delivery.py` 在入口自动执行 `assert_gate` 与 `validate_canonical_rig_bone_names` 硬拦截 | 严禁绕过 `monster_sop.py` 直接调用底层渲染或烘焙函数跳过用户关卡 |
+| 四候选完整工程与 G1 材料 | `api_rig_candidates` 自动归档 `candidate_0..3.glb` 至 Drive；`sop_g1_pack.py` 自动完成装饰恢复、规范重命名、16 张八面体骨骼图、同动作对照视频与 `g1_review.html` | 自动 audit 分数和候选 ZIP 不替代用户 G1 审批 |
+| G3 已有视频考试与快速复考 | `api_reexam_only` 已在协议与 Gradio 端点正式注册；`api_train_monster_probe` 覆写前自动备份 `backups/dinov2_head_<ts>.pt`；`sop_g3_exam.py` 严格按三类边界生成报告 | 严禁编造无真值视频的 MPJPE / SO(3) 数值 |
+| 同步失败硬终止、烘焙分支与当批清单 | `pipeline_runner.py` 在 3 次重试极线同步均失败时抛出 `RuntimeError` 硬终止，禁止将失步视频送入 `bake_ik`；`bake_glb_on_cloud` 控制云端烘焙分支；ZIP 仅打包当批动作并写入 `batch_manifest.json` | 生产交付时运行 `monster_sop.py deliver` 完成本地 GLB 回读与 `:loop` 首尾接缝核验 |
+| 工作台 Monster 调度与入库 | 在 `final_batch` 获用户明确批准前，`sop_preflight.py` 拦截任何写入 `art_source/` 或受管清单的操作 | 最终验收通过后再导入正式项目资源目录 |

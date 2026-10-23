@@ -126,10 +126,11 @@ class MonsterClient:
             raise ValueError(f"Expected an existing {suffix} file")
         return self._file(str(path))
 
-    def rig_candidates(self, identity, input_glb, run_auto_audit=True):
+    def rig_candidates(self, identity, input_glb=None, run_auto_audit=True):
         identity = monster_id(identity)
+        uploaded = self._upload(input_glb, ".glb") if input_glb else None
         return self._client.predict(
-            identity, self._upload(input_glb, ".glb"), run_auto_audit,
+            identity, uploaded, run_auto_audit,
             api_name="/rig_candidates",
         )
 
@@ -144,12 +145,19 @@ class MonsterClient:
             api_name="/train_monster_probe",
         )
 
-    def generate_actions_batch(self, identity, actions, *, auto_shutdown_after=False):
+    def reexam_only(self, identity, *, rerender_exam=False, auto_shutdown_after=False):
+        identity = monster_id(identity)
+        return self._client.predict(
+            identity, bool(rerender_exam), bool(auto_shutdown_after),
+            api_name="/reexam_only",
+        )
+
+    def generate_actions_batch(self, identity, actions, *, bake_glb_on_cloud=True, auto_shutdown_after=False):
         identity = monster_id(identity)
         if not isinstance(actions, str) or not actions.strip():
             raise ValueError("At least one action is required")
         # Keep the runtime alive until callers have downloaded and adopted the bundle.
-        return self._client.predict(identity, actions, True, auto_shutdown_after,
+        return self._client.predict(identity, actions, bool(bake_glb_on_cloud), bool(auto_shutdown_after),
                                     api_name="/generate_actions_batch")
 
     def shutdown(self, reason="local_scheduler_explicit_shutdown"):
@@ -166,14 +174,18 @@ def main():
     sub.add_parser("status")
     rig = sub.add_parser("rig")
     rig.add_argument("monster_id")
-    rig.add_argument("input_glb")
+    rig.add_argument("input_glb", nargs="?", default=None, help="Optional local GLB (omit to use U1 Drive-synced GLB)")
     train = sub.add_parser("train")
     train.add_argument("monster_id")
     train.add_argument("--samples", type=int, default=5000)
     train.add_argument("--epochs", type=int, default=15)
+    reexam = sub.add_parser("reexam")
+    reexam.add_argument("monster_id")
+    reexam.add_argument("--rerender", action="store_true")
     animate = sub.add_parser("animate")
     animate.add_argument("monster_id")
     animate.add_argument("actions")
+    animate.add_argument("--no-cloud-bake", action="store_true")
     sub.add_parser("shutdown")
     args = parser.parse_args()
     if args.operation == "connect":
@@ -191,8 +203,12 @@ def main():
         result = client.rig_candidates(args.monster_id, args.input_glb)
     elif args.operation == "train":
         result = client.train_monster_probe(args.monster_id, num_samples=args.samples, epochs=args.epochs)
+    elif args.operation == "reexam":
+        result = client.reexam_only(args.monster_id, rerender_exam=args.rerender)
     elif args.operation == "animate":
-        result = client.generate_actions_batch(args.monster_id, args.actions)
+        result = client.generate_actions_batch(
+            args.monster_id, args.actions, bake_glb_on_cloud=not args.no_cloud_bake
+        )
     else:
         result = client.shutdown()
     print(json.dumps(result, ensure_ascii=False, indent=2))

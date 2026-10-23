@@ -28,7 +28,23 @@ import json
 import math
 import os
 import random
-from pose_features import features_enabled, DATASET_SCHEMA, dataset_signature, studio_resolution, idle_split_filename
+from pose_features import (
+    bone_motion_blur_speed_factor,
+    compute_mesh_edge_stretch_metric,
+    dejitter_velocity_gated,
+    features_enabled,
+    dense_surface_enabled,
+    dense_grid_shape,
+    lbs_deform_vertices_numpy,
+    mocap_priors_enabled,
+    rasterize_ortho_dense_rest_map_numpy,
+    DATASET_SCHEMA,
+    dataset_signature,
+    studio_resolution,
+    idle_split_filename,
+    three_view_enabled,
+    studio_view_order,
+)
 from bone_taxonomy import (
     BONE_TAXONOMY_SCHEMA,
     DEFAULT_SYNTH_SAMPLES,
@@ -38,9 +54,12 @@ from bone_taxonomy import (
     classify_rig_bones,
     compute_stratified_motion_metrics,
     effective_sampling_limits_for_bone,
+    reconstruct_frames_with_kind_solvers,
+    sample_root_translation_offset,
     sample_stratified_pose_euler_dict,
     select_pose_sampling_regime,
     solve_bone_rotation_by_kind,
+    validate_canonical_rig_bone_names,
 )
 from pathlib import Path
 from typing import Any
@@ -397,7 +416,7 @@ def classify_anonymous_bones_and_assign_limits(
     if prune_digits is None:
         prune_digits = os.environ.get("MONSTER_PRUNE_DIGITS", "1").strip().lower() in ("1", "true", "on")
     if canonicalize_names is None:
-        canonicalize_names = os.environ.get("MONSTER_CANONICALIZE_BONE_NAMES", "0").strip().lower() in ("1", "true", "on")
+        canonicalize_names = os.environ.get("MONSTER_CANONICALIZE_BONE_NAMES", "1").strip().lower() in ("1", "true", "on")
 
     # Step A: Optionally detect dense distal finger/toe clusters to fold into the hand/foot bone
     finger_bones: list[str] = []
@@ -447,9 +466,9 @@ def classify_anonymous_bones_and_assign_limits(
             limits = [(-deg(45), deg(55)), (-deg(6), deg(6)), (-deg(25), deg(25))]
             chain_corr = 0.0
         elif len(bone.children) >= 1 and depth >= 2:
-            # Mid-limb joint (Knee / Hock / Elbow): primary bend on X, lock Y shaft roll!
+            # Mid-limb joint (Knee / Hock / Elbow): allow bidirectional swing for uncalibrated bone rolls
             role = "hinge"
-            limits = [(deg(0), deg(95)), (-deg(2), deg(2)), (-deg(5), deg(5))]
+            limits = [(-deg(45), deg(95)), (-deg(25), deg(25)), (-deg(35), deg(35))]
             chain_corr = 0.0
         else:
             # Terminal foot / paw / claw / tentacle segment: lock unobservable Y shaft roll to [-2°, +2°]!
@@ -495,6 +514,7 @@ def classify_anonymous_bones_and_assign_limits(
         "num_active_bones": len(bone_meta),
         "folded_finger_bones": finger_bones,
         "canonical_rename_map": rename_map,
+        "bone_naming_validation": validate_canonical_rig_bone_names(bone_meta),
         "bones": bone_meta,
     }
 
@@ -642,15 +662,23 @@ def configure_blender_gpu_rendering(scene: Any, samples: int | None = None) -> d
 
 
 def setup_dual_orthographic_studio(
-    bbox_min: list[float], bbox_max: list[float], panel_w: int | None = None, panel_h: int | None = None
+    bbox_min: list[float],
+    bbox_max: list[float],
+    panel_w: int | None = None,
+    panel_h: int | None = None,
+    enable_3view: bool | None = None,
 ) -> dict[str, Any]:
     """Configures GPU-accelerated renderer (Cycles OptiX/CUDA/Metal + GPU OpenImageDenoise),
-    aimed studio lighting, and two strictly calibrated orthographic cameras (`Cam_Front` looking +Y,
-    `Cam_Side` looking -X) with `sensor_fit="VERTICAL"`.
+    aimed studio lighting, and strictly calibrated orthographic cameras (`Cam_Front` looking +Y,
+    `Cam_Side` looking -X, and optional `Cam_Right` looking +X when 3-view mode is enabled)
+    with `sensor_fit="VERTICAL"`.
     """
     require_bpy()
+    use_3view = three_view_enabled() if enable_3view is None else bool(enable_3view)
+    num_views = 3 if use_3view else 2
+    view_order = list(studio_view_order(use_3view))
     if panel_w is None or panel_h is None:
-        def_pw, def_ph, _, _ = studio_resolution()
+        def_pw, def_ph, _, _ = studio_resolution(enable_3view=use_3view)
         panel_w = def_pw if panel_w is None else int(panel_w)
         panel_h = def_ph if panel_h is None else int(panel_h)
     scene = bpy.context.scene
@@ -714,19 +742,31 @@ def setup_dual_orthographic_studio(
         loc=(float(center[0] + dist), float(center[1]), float(center[2])),
         rot=(math.pi / 2.0, 0.0, math.pi / 2.0),
     )
+    cam_right = (
+        make_ortho_cam(
+            "Cam_Right",
+            loc=(float(center[0] - dist), float(center[1]), float(center[2])),
+            rot=(math.pi / 2.0, 0.0, -math.pi / 2.0),
+        )
+        if use_3view
+        else None
+    )
     bpy.context.view_layer.update()
 
     return {
         "cam_front": cam_front,
         "cam_side": cam_side,
+        "cam_right": cam_right,
         "render_config": render_config,
         "calibration": {
             "center": [round(float(c), 5) for c in center],
             "ortho_scale": round(ortho_scale, 5),
             "panel_width": panel_w,
             "panel_height": panel_h,
-            "composite_width": panel_w * 2,
+            "composite_width": panel_w * num_views,
             "composite_height": panel_h,
+            "num_views": num_views,
+            "view_order": view_order,
             "render_config": render_config,
         },
     }
@@ -757,14 +797,35 @@ def project_3d_to_dual_ortho_pixels(
     return [round(float(u_F), 3), round(float(v_F), 3)], [round(float(u_S), 3), round(float(v_S), 3)]
 
 
+def project_3d_to_right_ortho_pixels(pt_world: Any, calib: dict[str, Any]) -> list[float]:
+    """Closed-form projection from 3D world coordinates (X, Y, Z) to Right view (`Cam_Right` at -X looking +X) pixels."""
+    if hasattr(pt_world, "x"):
+        _, py, pz = float(pt_world.x), float(pt_world.y), float(pt_world.z)
+    else:
+        _, py, pz = float(pt_world[0]), float(pt_world[1]), float(pt_world[2])
+
+    _, cy, cz = calib["center"]
+    S = float(calib["ortho_scale"])
+    W = float(calib["panel_width"])
+    H = float(calib["panel_height"])
+    span_x = S * (W / H)
+    span_z = S
+
+    u_R = ((cy - py) / span_x + 0.5) * W
+    v_R = (0.5 - (pz - cz) / span_z) * H
+    return [round(float(u_R), 3), round(float(v_R), 3)]
+
+
 def triangulate_dual_ortho_pixels_to_3d(
     uv_front: list[float] | np.ndarray,
     uv_side: list[float] | np.ndarray,
     calib: dict[str, Any],
     conf_front: float = 1.0,
     conf_side: float = 1.0,
+    uv_right: list[float] | np.ndarray | None = None,
+    conf_right: float = 1.0,
 ) -> list[float]:
-    """Closed-form inverse of `project_3d_to_dual_ortho_pixels`."""
+    """Closed-form inverse of `project_3d_to_dual_ortho_pixels` (and optional `project_3d_to_right_ortho_pixels`)."""
     cx, cy, cz = calib["center"]
     S = float(calib["ortho_scale"])
     W = float(calib["panel_width"])
@@ -774,22 +835,38 @@ def triangulate_dual_ortho_pixels_to_3d(
 
     u_F, v_F = float(uv_front[0]), float(uv_front[1])
     u_S, v_S = float(uv_side[0]), float(uv_side[1])
-    c_F = max(1e-4, float(conf_front))
-    c_S = max(1e-4, float(conf_side))
+    w_F = max(1e-4, float(conf_front)) ** 2
+    w_S = max(1e-4, float(conf_side)) ** 2
 
     X = cx + (u_F / W - 0.5) * span_x
-    Y = cy + (u_S / W - 0.5) * span_x
+    Y_S = cy + (u_S / W - 0.5) * span_x
     Z_F = cz + (0.5 - v_F / H) * span_z
     Z_S = cz + (0.5 - v_S / H) * span_z
-    Z = (c_F * Z_F + c_S * Z_S) / (c_F + c_S)
+
+    if uv_right is not None:
+        u_R, v_R = float(uv_right[0]), float(uv_right[1])
+        w_R = max(1e-4, float(conf_right)) ** 2
+        Y_R = cy - (u_R / W - 0.5) * span_x
+        Z_R = cz + (0.5 - v_R / H) * span_z
+        Y = (w_S * Y_S + w_R * Y_R) / (w_S + w_R)
+        Z = (w_F * Z_F + w_S * Z_S + w_R * Z_R) / (w_F + w_S + w_R)
+    else:
+        Y = Y_S
+        Z = (w_F * Z_F + w_S * Z_S) / (w_F + w_S)
     return [round(float(X), 5), round(float(Y), 5), round(float(Z), 5)]
 
 
 def render_split_screen_frame(
-    cam_front: Any, cam_side: Any, out_png_path: Path, tmp_dir: Path
+    cam_front: Any,
+    cam_side: Any,
+    out_png_path: Path,
+    tmp_dir: Path,
+    cam_right: Any = None,
 ) -> None:
-    """Renders Front and Side cameras and horizontally concatenates them into a dual-view image.
-    Uses Linux RAM disk (`/dev/shm`) when available to avoid 6,000 disk/FUSE writes during synthesis.
+    """Renders studio cameras and horizontally concatenates them into a composite frame:
+      - 2-view mode (`cam_right is None`): `[ Front | Side ]` (`W * 2`)
+      - 3-view mode (`cam_right is not None`): `[ Left (cam_side) | Front (cam_front) | Right (cam_right) ]` (`W * 3`)
+    Uses Linux RAM disk (`/dev/shm`) when available to avoid disk/FUSE writes during synthesis.
     """
     from PIL import Image
 
@@ -810,6 +887,20 @@ def render_split_screen_frame(
 
     im_f = Image.open(f_path).convert("RGB")
     im_s = Image.open(s_path).convert("RGB")
+
+    if cam_right is not None:
+        r_path = scratch_dir / f"_tmp_right_{pid}.jpg"
+        scene.camera = cam_right
+        scene.render.filepath = str(r_path)
+        bpy.ops.render.render(write_still=True)
+        im_r = Image.open(r_path).convert("RGB")
+        comp = Image.new("RGB", (im_s.width + im_f.width + im_r.width, im_f.height))
+        comp.paste(im_s, (0, 0))
+        comp.paste(im_f, (im_s.width, 0))
+        comp.paste(im_r, (im_s.width + im_f.width, 0))
+        comp.save(out_png_path)
+        return
+
     comp = Image.new("RGB", (im_f.width + im_s.width, im_f.height))
     comp.paste(im_f, (0, 0))
     comp.paste(im_s, (im_f.width, 0))
@@ -825,12 +916,14 @@ def sample_in_limit_pose(
     bones_meta: dict[str, Any],
     rng: random.Random,
     sample_idx: int | None = None,
+    sample_root_location: bool = False,
+    rig_height: float = 1.0,
 ) -> dict[str, list[float]]:
     """Samples a biomechanically valid pose using the 4-Regime Stratified Decoupled Sampler
     (`synergistic`, `decoupled`, `antiphase_extreme`, `workspace_cross_occlusion`) and applies
     it to `arm_obj.pose.bones`.
     """
-    sampled_raw, _ = sample_stratified_pose_euler_dict(
+    sampled_raw, regime = sample_stratified_pose_euler_dict(
         bones_meta=bones_meta,
         rng=rng,
         sample_idx=sample_idx,
@@ -846,9 +939,116 @@ def sample_in_limit_pose(
             rot[1] = 0.0
         pbone.rotation_mode = "XYZ"
         pbone.rotation_euler = Euler(rot, "XYZ")
+        if pbone.parent is None:
+            if sample_root_location:
+                dx, dy, dz = sample_root_translation_offset(bones_meta=bones_meta, rng=rng, sample_idx=sample_idx)
+                delta_arm = arm_obj.matrix_world.to_3x3().inverted() @ Vector((dx, dy, dz))
+                pbone.location = pbone.bone.matrix_local.to_3x3().inverted() @ delta_arm
+            else:
+                pbone.location = Vector((0.0, 0.0, 0.0))
         sampled_eulers[b_name] = rot
     bpy.context.view_layer.update()
     return sampled_eulers
+
+
+def extract_rig_lbs_skinning_and_verify_gate(
+    mesh_obj: Any,
+    arm_obj: Any,
+    bone_names: list[str],
+    calib: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Extracts rest-pose world vertices `(V, 3)`, top-4 LBS bone skinning indices `(V, 4)` and
+    normalized weights `(V, 4)`, triangle indices `(F, 3)`, and rest-pose bone transforms
+    `(rest_heads, rest_R)` for analytical/differentiable LBS surface correspondence refinement.
+    Also enforces `use_deform_preserve_volume = False` on Armature modifiers so Blender's rendered
+    surface matches pure Linear Blend Skinning (`lbs_deform_vertices_numpy`).
+    """
+    require_bpy()
+    for mod in getattr(mesh_obj, "modifiers", []):
+        if getattr(mod, "type", None) == "ARMATURE" and hasattr(mod, "use_deform_preserve_volume"):
+            mod.use_deform_preserve_volume = False
+
+    for pbone in arm_obj.pose.bones:
+        pbone.rotation_mode = "XYZ"
+        pbone.rotation_euler = (0.0, 0.0, 0.0)
+        pbone.location = (0.0, 0.0, 0.0)
+        pbone.scale = (1.0, 1.0, 1.0)
+    bpy.context.view_layer.update()
+
+    mw_mesh = mesh_obj.matrix_world
+    mw_arm = arm_obj.matrix_world
+    verts_list = [[float(w.x), float(w.y), float(w.z)] for w in (mw_mesh @ v.co for v in mesh_obj.data.vertices)]
+    rest_verts = np.asarray(verts_list, dtype=np.float32)
+    V = int(rest_verts.shape[0])
+
+    mesh_obj.data.calc_loop_triangles()
+    triangles = np.asarray(
+        [[int(lt.vertices[0]), int(lt.vertices[1]), int(lt.vertices[2])] for lt in mesh_obj.data.loop_triangles],
+        dtype=np.int32,
+    )
+
+    bone_to_idx = {b_name: idx for idx, b_name in enumerate(bone_names)}
+    vg_to_bone: dict[int, int] = {}
+    for vg in mesh_obj.vertex_groups:
+        if vg.name in bone_to_idx:
+            vg_to_bone[int(vg.index)] = int(bone_to_idx[vg.name])
+
+    rest_heads = np.zeros((len(bone_names), 3), dtype=np.float64)
+    rest_tails = np.zeros((len(bone_names), 3), dtype=np.float64)
+    rest_R = np.zeros((len(bone_names), 3, 3), dtype=np.float64)
+    for b_idx, b_name in enumerate(bone_names):
+        db = arm_obj.data.bones[b_name]
+        hw = mw_arm @ db.head_local
+        tw = mw_arm @ db.tail_local
+        rm = (mw_arm @ db.matrix_local).to_3x3()
+        rest_heads[b_idx] = [float(hw.x), float(hw.y), float(hw.z)]
+        rest_tails[b_idx] = [float(tw.x), float(tw.y), float(tw.z)]
+        rest_R[b_idx] = [[float(v) for v in row] for row in rm]
+
+    skin_indices = np.zeros((V, 4), dtype=np.int32)
+    skin_weights = np.zeros((V, 4), dtype=np.float32)
+    bone_mids = 0.5 * (rest_heads + rest_tails)
+
+    for v_idx, v in enumerate(mesh_obj.data.vertices):
+        pairs: list[tuple[int, float]] = []
+        for g in v.groups:
+            b_idx = vg_to_bone.get(int(g.group))
+            w_val = float(g.weight)
+            if b_idx is not None and w_val > 1e-6:
+                pairs.append((b_idx, w_val))
+        if not pairs:
+            dists = np.linalg.norm(bone_mids - rest_verts[v_idx].astype(np.float64)[None, :], axis=-1)
+            nearest_b = int(np.argmin(dists))
+            skin_indices[v_idx, 0] = nearest_b
+            skin_weights[v_idx, 0] = 1.0
+            continue
+        pairs.sort(key=lambda item: item[1], reverse=True)
+        top_pairs = pairs[:4]
+        w_sum = max(1e-8, sum(item[1] for item in top_pairs))
+        for k_i, (b_idx, w_val) in enumerate(top_pairs):
+            skin_indices[v_idx, k_i] = int(b_idx)
+            skin_weights[v_idx, k_i] = float(w_val / w_sum)
+
+    lbs_rest = lbs_deform_vertices_numpy(
+        rest_verts, skin_indices, skin_weights, rest_heads, rest_R, rest_heads, rest_R
+    )
+    rest_identity_err = float(np.max(np.linalg.norm(lbs_rest - rest_verts, axis=-1))) if V > 0 else 0.0
+    if calib is not None:
+        calib["lbs_skinning_gate"] = {
+            "num_vertices": V,
+            "num_triangles": int(triangles.shape[0]),
+            "rest_identity_max_err": round(rest_identity_err, 7),
+            "preserve_volume_disabled": True,
+        }
+    return {
+        "bone_names": list(bone_names),
+        "rest_verts": rest_verts,
+        "skin_indices": skin_indices,
+        "skin_weights": skin_weights,
+        "triangles": triangles,
+        "rest_heads": rest_heads.astype(np.float32),
+        "rest_R": rest_R.astype(np.float32),
+    }
 
 
 def generate_stage2_synthetic_dataset(
@@ -867,8 +1067,15 @@ def generate_stage2_synthetic_dataset(
         meta = json.load(f)
 
     arm_obj = [o for o in bpy.data.objects if o.type == "ARMATURE"][0]
+    mesh_objs = [o for o in bpy.data.objects if o.type == "MESH"]
+    mesh_obj = mesh_objs[0] if mesh_objs else None
     studio = setup_dual_orthographic_studio(meta["bbox_min"], meta["bbox_max"])
-    cam_f, cam_s, calib = studio["cam_front"], studio["cam_side"], studio["calibration"]
+    cam_f, cam_s, cam_r, calib = (
+        studio["cam_front"],
+        studio["cam_side"],
+        studio.get("cam_right"),
+        studio["calibration"],
+    )
     meta["calibration"] = calib
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
@@ -881,19 +1088,49 @@ def generate_stage2_synthetic_dataset(
         pbone.rotation_mode = "XYZ"
         pbone.rotation_euler = (0.0, 0.0, 0.0)
     bpy.context.view_layer.update()
-    idle_name = idle_split_filename(calib["composite_width"], calib["composite_height"])
-    render_split_screen_frame(cam_f, cam_s, out_path / idle_name, out_path)
+    idle_name = idle_split_filename(
+        calib["composite_width"],
+        calib["composite_height"],
+        enable_3view=(cam_r is not None),
+    )
+    render_split_screen_frame(cam_f, cam_s, out_path / idle_name, out_path, cam_right=cam_r)
 
     enhanced = features_enabled()
+    dense_enabled = bool(enhanced and dense_surface_enabled() and mesh_obj is not None)
+    rig_skinning: dict[str, Any] | None = None
+    dense_dir = out_path / "dense"
+    dense_hm_h, dense_hm_w = dense_grid_shape(int(calib["panel_width"]), int(calib["panel_height"]))
+    sorted_bones_for_skin = sorted(meta["bones"])
     if enhanced:
         from pose_visibility import SurfaceVisibilitySampler, randomize_studio_lighting
         calib["depth_scale"] = max(1e-4, float(np.max(np.array(meta["bbox_max"])-np.array(meta["bbox_min"]))))
         calib["depth_reference"] = "fixed_studio_center"
-        calib["camera_contract"] = "front_plus_y_side_minus_x_orthographic"
+        calib["camera_contract"] = (
+            "left_minus_x_front_plus_y_right_plus_x_orthographic"
+            if cam_r is not None
+            else "front_plus_y_side_minus_x_orthographic"
+        )
         calib["camera_world_matrices"] = {
             "front": [list(row) for row in cam_f.matrix_world],
             "side": [list(row) for row in cam_s.matrix_world],
         }
+        if cam_r is not None:
+            calib["camera_world_matrices"]["right"] = [list(row) for row in cam_r.matrix_world]
+        if dense_enabled and mesh_obj is not None:
+            dense_dir.mkdir(parents=True, exist_ok=True)
+            rig_skinning = extract_rig_lbs_skinning_and_verify_gate(
+                mesh_obj, arm_obj, sorted_bones_for_skin, calib=calib
+            )
+            np.savez_compressed(
+                out_path / "rig_skinning.npz",
+                bone_names=np.asarray(rig_skinning["bone_names"]),
+                rest_verts=rig_skinning["rest_verts"],
+                skin_indices=rig_skinning["skin_indices"],
+                skin_weights=rig_skinning["skin_weights"],
+                triangles=rig_skinning["triangles"],
+                rest_heads=rig_skinning["rest_heads"],
+                rest_R=rig_skinning["rest_R"],
+            )
         meta["calibration"] = calib
         Path(meta_path).write_text(json.dumps(meta, indent=2), encoding="utf-8")
         visibility = SurfaceVisibilitySampler(arm_obj, sorted(meta["bones"]), calib["depth_scale"])
@@ -922,13 +1159,25 @@ def generate_stage2_synthetic_dataset(
         if enhanced and use_blur:
             # Symmetric shutter samples around the labeled pose at frame 1.
             # Put keyframes on both sides; labels always refer to the center pose.
+            use_speed_prior = mocap_priors_enabled()
             for b_name, rot in pose_f1.items():
                 pb = arm_obj.pose.bones[b_name]
-                lims = effective_sampling_limits_for_bone(bones_meta[b_name], enforce_anatomical_floor=True)
-                delta = [rng.uniform(-0.5, 0.5) for _ in range(3)]
-                if not pb.children or bones_meta[b_name].get("fixed_local") or bones_meta[b_name].get("kind") == "rigid":
+                b_info = bones_meta[b_name]
+                lims = effective_sampling_limits_for_bone(b_info, enforce_anatomical_floor=True)
+                speed_mul = (
+                    0.55
+                    * bone_motion_blur_speed_factor(
+                        str(b_info.get("kind", "limb")),
+                        str(b_info.get("sub_role", "")),
+                        int(b_info.get("chain_index", 0)),
+                    )
+                    if use_speed_prior
+                    else 1.0
+                )
+                delta = [rng.uniform(-0.5, 0.5) * speed_mul for _ in range(3)]
+                if not pb.children or b_info.get("fixed_local") or b_info.get("kind") == "rigid":
                     delta[1] = 0.0
-                if bones_meta[b_name].get("fixed_local") or bones_meta[b_name].get("kind") == "rigid":
+                if b_info.get("fixed_local") or b_info.get("kind") == "rigid":
                     delta = [0.0, 0.0, 0.0]
                 for frame, sign in ((0, -1), (1, 0), (2, 1)):
                     pb.rotation_euler = Euler([float(np.clip(rot[i]+sign*delta[i], lims[i][0], lims[i][1])) for i in range(3)], "XYZ")
@@ -968,7 +1217,7 @@ def generate_stage2_synthetic_dataset(
         if enhanced:
             visibility.update()
         img_name = f"pose_{idx:05d}.jpg"
-        render_split_screen_frame(cam_f, cam_s, img_dir / img_name, out_path)
+        render_split_screen_frame(cam_f, cam_s, img_dir / img_name, out_path, cam_right=cam_r)
 
         joints_gt = {}
         mw = arm_obj.matrix_world
@@ -987,14 +1236,67 @@ def generate_stage2_synthetic_dataset(
                 "side_uv_tail": uv_s_t,
                 "euler_xyz": [round(float(x), 5) for x in pose_f1[b_name]],
             }
+            if cam_r is not None:
+                joints_gt[b_name]["right_uv_head"] = project_3d_to_right_ortho_pixels(head_w, calib)
+                joints_gt[b_name]["right_uv_tail"] = project_3d_to_right_ortho_pixels(tail_w, calib)
             if enhanced:
-                for view, camera in (("front", cam_f), ("side", cam_s)):
+                aux_cameras = [("front", cam_f), ("side", cam_s)]
+                if cam_r is not None:
+                    aux_cameras.append(("right", cam_r))
+                for view, camera in aux_cameras:
                     for endpoint, point in (("head", head_w), ("tail", tail_w)):
                         joints_gt[b_name][f"{view}_{endpoint}_aux"] = visibility.label(point, b_name, camera, calib)
-        records.append({"image": img_name, "motion_blur": use_blur, "sampling_regime": regime,
-                        "joints": joints_gt, "label_frame": 1,
-                        "shutter": float(scene.render.motion_blur_shutter) if use_blur else 0.0,
-                        "lighting": lighting})
+        record_item: dict[str, Any] = {
+            "image": img_name,
+            "motion_blur": use_blur,
+            "sampling_regime": regime,
+            "joints": joints_gt,
+            "label_frame": 1,
+            "shutter": float(scene.render.motion_blur_shutter) if use_blur else 0.0,
+            "lighting": lighting,
+        }
+        if dense_enabled and rig_skinning is not None:
+            posed_heads = np.zeros((len(sorted_bones_for_skin), 3), dtype=np.float64)
+            posed_R = np.zeros((len(sorted_bones_for_skin), 3, 3), dtype=np.float64)
+            for b_idx, b_name in enumerate(sorted_bones_for_skin):
+                pb = arm_obj.pose.bones[b_name]
+                hw = mw @ pb.head
+                rm = (mw @ pb.matrix).to_3x3()
+                posed_heads[b_idx] = [float(hw.x), float(hw.y), float(hw.z)]
+                posed_R[b_idx] = [[float(v) for v in row] for row in rm]
+            posed_verts = lbs_deform_vertices_numpy(
+                rig_skinning["rest_verts"],
+                rig_skinning["skin_indices"],
+                rig_skinning["skin_weights"],
+                rig_skinning["rest_heads"],
+                rig_skinning["rest_R"],
+                posed_heads,
+                posed_R,
+            )
+            dense_payload: dict[str, np.ndarray] = {}
+            dense_views_to_render = ["front", "side"] + (["right"] if cam_r is not None else [])
+            for v_key in dense_views_to_render:
+                d_map = rasterize_ortho_dense_rest_map_numpy(
+                    posed_verts,
+                    rig_skinning["rest_verts"],
+                    rig_skinning["triangles"],
+                    calib,
+                    view=v_key,
+                    grid_w=dense_hm_w,
+                    grid_h=dense_hm_h,
+                )
+                dense_payload[f"{v_key}_mask"] = (d_map["mask"] > 0.5).astype(np.uint8)
+                dense_payload[f"{v_key}_rest_xyz"] = d_map["rest_xyz"].astype(np.float16)
+            dense_file = f"pose_{idx:05d}_dense.npz"
+            np.savez_compressed(dense_dir / dense_file, **dense_payload)
+            record_item["dense_map"] = dense_file
+            if mocap_priors_enabled():
+                stretch_metric = compute_mesh_edge_stretch_metric(
+                    rig_skinning["rest_verts"], posed_verts, rig_skinning["triangles"]
+                )
+                record_item["edge_stretch_passed"] = stretch_metric["passed"]
+                record_item["bad_edge_ratio"] = stretch_metric["bad_edge_ratio"]
+        records.append(record_item)
 
     coverage_audit = audit_pose_dataset_coverage(records, bones_meta, enforce_anatomical_floor=True)
     with open(out_path / "pose_coverage_audit.json", "w", encoding="utf-8") as f:
@@ -1007,6 +1309,7 @@ def generate_stage2_synthetic_dataset(
     with open(out_path / "keypoints_gt.json", "w", encoding="utf-8") as f:
         json.dump({"schema": DATASET_SCHEMA if enhanced else "monster-pose-legacy-v1",
                    "signature": signature, "depth_visibility_enabled": enhanced,
+                   "dense_surface_enabled": dense_enabled,
                    "bone_names": sorted(bone_names), "visibility_method": "skin_weight_surface_proxy_v1" if enhanced else None,
                    "coverage_audit": coverage_audit,
                    "calibration": calib, "samples": records}, f, indent=2, ensure_ascii=False)
@@ -1023,13 +1326,20 @@ def synthesize_stage4_exam_sequence(
 
     arm_obj = [o for o in bpy.data.objects if o.type == "ARMATURE"][0]
     saved_calib = meta.get("calibration", {})
+    saved_3view = (int(saved_calib.get("num_views", 2)) == 3) if "num_views" in saved_calib else None
     studio = setup_dual_orthographic_studio(
         meta["bbox_min"],
         meta["bbox_max"],
         panel_w=saved_calib.get("panel_width"),
         panel_h=saved_calib.get("panel_height"),
+        enable_3view=saved_3view,
     )
-    cam_f, cam_s, calib = studio["cam_front"], studio["cam_side"], studio["calibration"]
+    cam_f, cam_s, cam_r, calib = (
+        studio["cam_front"],
+        studio["cam_side"],
+        studio.get("cam_right"),
+        studio["calibration"],
+    )
 
     rng = random.Random(seed)
     bones_meta = meta["bones"]
@@ -1061,7 +1371,7 @@ def synthesize_stage4_exam_sequence(
         bpy.context.scene.frame_set(f_idx)
         bpy.context.view_layer.update()
         frame_file = f"exam_{f_idx:04d}.jpg"
-        render_split_screen_frame(cam_f, cam_s, frames_dir / frame_file, out_path)
+        render_split_screen_frame(cam_f, cam_s, frames_dir / frame_file, out_path, cam_right=cam_r)
 
         frame_bones = {}
         for b_name in bones_meta:
@@ -1382,11 +1692,16 @@ def smooth_rotation_matrices_savgol(R_seq: np.ndarray, gaussian_passes: int = 1)
     qs = (-3.0 * pad5[:-4] + 12.0 * pad5[1:-3] + 17.0 * pad5[2:-2] + 12.0 * pad5[3:-1] - 3.0 * pad5[4:]) / 35.0
     for ts in range(T):
         qs[ts] /= max(1e-12, float(np.linalg.norm(qs[ts])))
-    for _ in range(gaussian_passes):
-        pad3 = np.pad(qs, ((1, 1), (0, 0)), mode="edge")
-        qs = 0.22 * pad3[:-2] + 0.56 * pad3[1:-1] + 0.22 * pad3[2:]
+    if mocap_priors_enabled() and gaussian_passes > 0:
+        qs = dejitter_velocity_gated(qs, passes=max(1, gaussian_passes), strength=0.45)
         for ts in range(T):
             qs[ts] /= max(1e-12, float(np.linalg.norm(qs[ts])))
+    else:
+        for _ in range(gaussian_passes):
+            pad3 = np.pad(qs, ((1, 1), (0, 0)), mode="edge")
+            qs = 0.22 * pad3[:-2] + 0.56 * pad3[1:-1] + 0.22 * pad3[2:]
+            for ts in range(T):
+                qs[ts] /= max(1e-12, float(np.linalg.norm(qs[ts])))
     out = np.zeros_like(R_seq)
     for t in range(T):
         out[t] = quat_wxyz_to_mat_numpy(qs[t])
@@ -1434,7 +1749,9 @@ def bake_3d_joints_to_animated_glb(
     arm_obj = [o for o in bpy.data.objects if o.type == "ARMATURE"][0]
     mesh_objs = [o for o in bpy.data.objects if o.type == "MESH"]
     if not bones_meta and mesh_objs:
-        _, auto_meta = classify_anonymous_bones_and_assign_limits(mesh_objs[0], arm_obj)
+        _, auto_meta = classify_anonymous_bones_and_assign_limits(
+            mesh_objs[0], arm_obj, canonicalize_names=False
+        )
         bones_meta = auto_meta.get("bones", {})
 
     arm_obj.animation_data_clear()
@@ -1477,6 +1794,35 @@ def bake_3d_joints_to_animated_glb(
         info.setdefault("rest_rot_mat_world", [[float(v) for v in row] for row in R0])
 
     bones_meta = classify_rig_bones(bones_meta)
+
+    first_frame_bones = frames_list[0].get("bones", {}) if frames_list else {}
+    any_precomputed_rot = any(
+        isinstance(b_info, dict) and "rot_mat_world" in b_info
+        for b_info in first_frame_bones.values()
+    )
+    if total_frames > 0 and not any_precomputed_rot:
+        sorted_bnames = sorted(bones_meta.keys())
+        num_b = len(sorted_bnames)
+        pts_3d = np.zeros((total_frames, 2 * num_b, 3), dtype=np.float64)
+        trust = np.full((total_frames, 2 * num_b), 0.90, dtype=np.float64)
+        for t_i, f_item in enumerate(frames_list):
+            fb = f_item.get("bones", {})
+            for b_i, bn in enumerate(sorted_bnames):
+                b_obs = fb.get(bn, {})
+                h3 = b_obs.get("head_3d", bones_meta[bn].get("rest_head_world", [0.0, 0.0, 0.0]))
+                t3 = b_obs.get("tail_3d", bones_meta[bn].get("rest_tail_world", [0.0, 0.0, 0.04]))
+                c_val = float(b_obs.get("confidence", 0.90))
+                pts_3d[t_i, 2 * b_i] = h3
+                pts_3d[t_i, 2 * b_i + 1] = t3
+                trust[t_i, 2 * b_i] = c_val
+                trust[t_i, 2 * b_i + 1] = c_val
+        frames_solved, _ = reconstruct_frames_with_kind_solvers(
+            pts_3d=pts_3d,
+            trust=trust,
+            bone_names=sorted_bnames,
+            classified_bones=bones_meta,
+        )
+        frames_list = frames_solved
 
     # Step 1: Solve bounded world rotation matrices across all frames in topological order
     solved_world_R: dict[str, np.ndarray] = {
@@ -1550,7 +1896,8 @@ def bake_3d_joints_to_animated_glb(
                 continue
             head_gt = Vector(b_dict[b_name]["head_3d"])
             if pbone.parent is None:
-                pbone.location = mw_inv @ head_gt - pbone.bone.head_local
+                delta_arm = mw_inv @ head_gt - pbone.bone.head_local
+                pbone.location = pbone.bone.matrix_local.to_3x3().inverted() @ delta_arm
                 pbone.keyframe_insert(data_path="location", frame=f_idx)
 
             R_targ_w = solved_world_R[b_name][f_idx]
@@ -1660,29 +2007,187 @@ def verify_exam_glb_roundtrip(
     return report
 
 
+def sop_preflight_check(input_glb: str, out_dir: str, monster_id: str = "monster") -> dict[str, Any]:
+    """SOP Stage 1: Headless Blender 7-point model preflight and decoration separation check."""
+    require_bpy()
+    clean_scene()
+    bpy.ops.import_scene.gltf(filepath=str(input_glb))
+    bpy.context.view_layer.update()
+
+    meshes = [o for o in bpy.data.objects if o.type == "MESH"]
+    arms = [o for o in bpy.data.objects if o.type == "ARMATURE"]
+    anims = [a.name for a in getattr(bpy.data, "actions", [])]
+
+    all_verts = []
+    uv_layers = 0
+    material_count = 0
+    decor_entries = []
+    for m_idx, m in enumerate(meshes):
+        mw = m.matrix_world
+        pts = [[float((mw @ v.co).x), float((mw @ v.co).y), float((mw @ v.co).z)] for v in m.data.vertices]
+        all_verts.extend(pts)
+        uv_layers += len(getattr(m.data, "uv_layers", []))
+        material_count += len(getattr(m.data, "materials", []))
+        if m_idx > 0:
+            decor_entries.append(
+                {
+                    "name": m.name,
+                    "vertex_count": len(pts),
+                    "matrix_world": [[float(v) for v in row] for row in mw],
+                }
+            )
+
+    if all_verts:
+        arr = np.asarray(all_verts, dtype=np.float64)
+        b_min = [round(float(x), 4) for x in np.min(arr, axis=0)]
+        b_max = [round(float(x), 4) for x in np.max(arr, axis=0)]
+    else:
+        b_min, b_max = [-0.5, -0.5, 0.0], [0.5, 0.5, 1.8]
+
+    bone_names = [b.name for b in arms[0].data.bones] if arms else []
+    out_p = Path(out_dir)
+    out_p.mkdir(parents=True, exist_ok=True)
+    report = {
+        "monster_id": monster_id,
+        "mesh_count": len(meshes),
+        "armature_count": len(arms),
+        "animation_clips": anims,
+        "bone_names": bone_names,
+        "uv_layer_count": uv_layers,
+        "material_count": material_count,
+        "bbox_min": b_min,
+        "bbox_max": b_max,
+        "decorations": decor_entries,
+    }
+    (out_p / "bpy_preflight.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    return report
+
+
+def sop_prepare_g1_candidates(
+    candidates: list[str],
+    out_dir: str,
+    decor_manifest: str | None = None,
+    archetype: str = "humanoid",
+) -> dict[str, Any]:
+    """SOP Stage 2: Headless Blender 4-candidate canonical bone naming & Octahedral bone view render."""
+    require_bpy()
+    out_p = Path(out_dir)
+    out_p.mkdir(parents=True, exist_ok=True)
+    results = []
+    for idx, c_path in enumerate(candidates[:4]):
+        mesh_obj, arm_obj = load_glb_and_find_rig(c_path)
+        arm_obj.data.display_type = "OCTAHEDRAL"
+        arm_obj.show_in_front = True
+        _, rig_meta = classify_anonymous_bones_and_assign_limits(mesh_obj, arm_obj)
+        c_dir = out_p / f"candidate_{idx}"
+        c_dir.mkdir(parents=True, exist_ok=True)
+        c_meta_path = c_dir / "studio_rig_meta.json"
+        c_meta_path.write_text(json.dumps(rig_meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        results.append(
+            {
+                "candidate_id": f"candidate_{idx}",
+                "path": str(c_path),
+                "meta_path": str(c_meta_path),
+                "bones": sorted(rig_meta.get("bones", {}).keys()),
+                "archetype": archetype,
+            }
+        )
+    summary = {"candidates": results, "decor_manifest": decor_manifest, "archetype": archetype}
+    (out_p / "bpy_g1_summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    return summary
+
+
+def sop_verify_delivery_glb(glb_path: str, is_loop: bool = False, out_report: str | None = None) -> dict[str, Any]:
+    """SOP Stage 5: Headless Blender GLB round-trip & loop seam verification."""
+    require_bpy()
+    clean_scene()
+    bpy.ops.import_scene.gltf(filepath=str(glb_path))
+    bpy.context.view_layer.update()
+    arms = [o for o in bpy.data.objects if o.type == "ARMATURE"]
+    if not arms:
+        report = {"glb_path": str(glb_path), "valid": False, "reason": "no_armature"}
+    else:
+        arm_obj = arms[0]
+        scene = bpy.context.scene
+        f_start = int(scene.frame_start)
+        f_end = int(scene.frame_end)
+        scene.frame_set(f_start)
+        bpy.context.view_layer.update()
+        mw = arm_obj.matrix_world
+        first_pos = {pb.name: np.array([float((mw @ pb.head).x), float((mw @ pb.head).y), float((mw @ pb.head).z)]) for pb in arm_obj.pose.bones}
+        scene.frame_set(f_end)
+        bpy.context.view_layer.update()
+        mw = arm_obj.matrix_world
+        last_pos = {pb.name: np.array([float((mw @ pb.head).x), float((mw @ pb.head).y), float((mw @ pb.head).z)]) for pb in arm_obj.pose.bones}
+        jumps = [float(np.linalg.norm(last_pos[k] - first_pos[k])) for k in first_pos if k in last_pos]
+        max_jump = round(max(jumps), 5) if jumps else 0.0
+        report = {
+            "glb_path": str(glb_path),
+            "valid": True,
+            "is_loop": bool(is_loop),
+            "frame_start": f_start,
+            "frame_end": f_end,
+            "max_joint_seam_jump": max_jump,
+            "seam_passed": (max_jump <= 0.12) if is_loop else True,
+        }
+    if out_report:
+        Path(out_report).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_report).write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    return report
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Headless Blender 4.2 Studio Worker for Monster Pipeline")
     parser.add_argument(
         "--mode",
         required=True,
-        choices=["sanitize_input", "audit", "render_3000", "render_5000", "render_exam", "bake_ik", "verify_exam_glb"],
+        choices=[
+            "sanitize_input",
+            "audit",
+            "render_3000",
+            "render_5000",
+            "render_g2_50",
+            "render_exam",
+            "bake_ik",
+            "verify_exam_glb",
+            "preflight_check",
+            "prepare_g1_candidates",
+            "verify_delivery_glb",
+        ],
     )
-    parser.add_argument("--input_glb", help="Raw input GLB for sanitize_input mode")
+    parser.add_argument("--input_glb", help="Raw input GLB for sanitize_input or preflight_check mode")
+    parser.add_argument("--monster_id", default="monster", help="Monster ID for SOP modes")
     parser.add_argument("--yaw_deg", type=float, default=0.0, help="Optional Z-axis rotation in degrees")
-    parser.add_argument("--candidates", nargs="*", help="Candidate GLB files for Stage 1 audit")
+    parser.add_argument("--candidates", nargs="*", help="Candidate GLB files for Stage 1 audit or G1 pack")
+    parser.add_argument("--decor_manifest", help="Path to decorations_manifest.json for G1 restoration")
+    parser.add_argument("--archetype", default="humanoid", help="Motion archetype for G1 test motion")
     parser.add_argument("--blend_path", help="Path to rigged_pruned.blend")
     parser.add_argument("--meta_path", help="Path to studio_rig_meta.json")
     parser.add_argument("--out_dir", help="Output directory for renders / metadata")
     parser.add_argument("--joints_json", help="Input 3D joint trajectory JSON for Stage 6 IK baking")
     parser.add_argument("--out_glb", help="Output GLB path for sanitize_input or Stage 6 bake_ik")
+    parser.add_argument("--glb_path", help="GLB path for verify_delivery_glb mode")
+    parser.add_argument("--is_loop", type=int, default=0, help="Whether the action clip is a loop (1 or 0)")
     parser.add_argument("--exam_gt_json", help="Path to exam_gt.json for verify_exam_glb mode")
-    parser.add_argument("--out_report", help="Output JSON report path for verify_exam_glb mode")
+    parser.add_argument("--out_report", help="Output JSON report path for verify_exam_glb or verify_delivery_glb mode")
     parser.add_argument("--num_samples", type=int, default=DEFAULT_SYNTH_SAMPLES)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--exam_frames", type=int, default=96)
     args = parser.parse_args()
 
     if args.mode == "sanitize_input":
         sanitize_input_mesh_for_skintokens(args.input_glb, args.out_glb, yaw_deg=args.yaw_deg)
+
+    elif args.mode == "preflight_check":
+        sop_preflight_check(args.input_glb, args.out_dir, monster_id=args.monster_id)
+
+    elif args.mode == "prepare_g1_candidates":
+        sop_prepare_g1_candidates(
+            args.candidates or [],
+            args.out_dir,
+            decor_manifest=args.decor_manifest,
+            archetype=args.archetype,
+        )
 
     elif args.mode == "audit":
         reports = [score_candidate_rig(c) for c in (args.candidates or [])]
@@ -1708,9 +2213,10 @@ def main() -> None:
             json.dump(rig_meta, f, indent=2, ensure_ascii=False)
         print(f"[Stage 1 Audit Complete] Best candidate: {best['path']} (score={best['score']})")
 
-    elif args.mode in ("render_3000", "render_5000"):
-        generate_stage2_synthetic_dataset(args.blend_path, args.meta_path, args.out_dir, args.num_samples)
-        print(f"[Stage 2 Render Complete] Generated {args.num_samples} dual-view pairs in {args.out_dir}")
+    elif args.mode in ("render_3000", "render_5000", "render_g2_50"):
+        samples = 50 if args.mode == "render_g2_50" and args.num_samples == DEFAULT_SYNTH_SAMPLES else args.num_samples
+        generate_stage2_synthetic_dataset(args.blend_path, args.meta_path, args.out_dir, samples, seed=args.seed)
+        print(f"[Stage 2 Render Complete] Generated {samples} dual-view pairs in {args.out_dir}")
 
     elif args.mode == "render_exam":
         synthesize_stage4_exam_sequence(args.blend_path, args.meta_path, args.out_dir, args.exam_frames)
@@ -1722,6 +2228,9 @@ def main() -> None:
 
     elif args.mode == "verify_exam_glb":
         verify_exam_glb_roundtrip(args.out_glb or args.input_glb, args.exam_gt_json, args.out_report)
+
+    elif args.mode == "verify_delivery_glb":
+        sop_verify_delivery_glb(args.glb_path or args.out_glb or args.input_glb, bool(args.is_loop), args.out_report)
 
 
 if __name__ == "__main__":
