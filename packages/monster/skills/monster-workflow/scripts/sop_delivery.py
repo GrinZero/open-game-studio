@@ -28,17 +28,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 SCRIPT_DIR = Path(__file__).resolve().parent
-MONSTER_ROOT = SCRIPT_DIR.parents[2]
-WORKER_DIR = MONSTER_ROOT / "worker"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
-if str(WORKER_DIR) not in sys.path:
-    sys.path.insert(0, str(WORKER_DIR))
 
 from sop_gate import (  # noqa: E402
+    MONSTER_ROOT,
+    WORKER_DIR,
     assert_gate,
     load_ledger,
     mark_awaiting_review,
@@ -46,6 +42,7 @@ from sop_gate import (  # noqa: E402
     save_ledger,
     sha256_file,
 )
+import numpy as np  # noqa: E402
 from sop_preflight import (  # noqa: E402
     _find_bpy_python,
     resolve_scratch_dirs,

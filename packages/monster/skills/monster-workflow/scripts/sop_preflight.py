@@ -33,23 +33,21 @@ from pathlib import Path
 from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-MONSTER_ROOT = SCRIPT_DIR.parents[2]
-WORKER_DIR = MONSTER_ROOT / "worker"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
-if str(WORKER_DIR) not in sys.path:
-    sys.path.insert(0, str(WORKER_DIR))
 
-from bone_taxonomy import (  # noqa: E402
-    classify_rig_bones,
-    validate_canonical_rig_bone_names,
-)
 from sop_gate import (  # noqa: E402
+    MONSTER_ROOT,
+    WORKER_DIR,
     derive_invalidations,
     load_ledger,
     now_taipei_iso,
     save_ledger,
     sha256_file,
+)
+from bone_taxonomy import (  # noqa: E402
+    classify_rig_bones,
+    validate_canonical_rig_bone_names,
 )
 
 FORBIDDEN_INTERMEDIATE_PATTERNS = (

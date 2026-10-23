@@ -29,19 +29,19 @@ from pathlib import Path
 from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-MONSTER_ROOT = SCRIPT_DIR.parents[2]
-REPO_ROOT = MONSTER_ROOT.parents[1]
-INTEGRATION_DIR = MONSTER_ROOT / "integration"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
-if str(INTEGRATION_DIR) not in sys.path:
-    sys.path.insert(0, str(INTEGRATION_DIR))
 
 from sop_gate import (  # noqa: E402
+    MONSTER_ROOT,
     load_ledger,
     now_taipei_iso,
     save_ledger,
 )
+REPO_ROOT = MONSTER_ROOT.parents[1]
+INTEGRATION_DIR = MONSTER_ROOT / "integration"
+if str(INTEGRATION_DIR) not in sys.path:
+    sys.path.insert(0, str(INTEGRATION_DIR))
 from sop_preflight import resolve_scratch_dirs  # noqa: E402
 
 VALID_RELEASE_REASONS = (

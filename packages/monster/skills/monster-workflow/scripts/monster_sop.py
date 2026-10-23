@@ -15,6 +15,7 @@ needs to write ad-hoc Python/Blender/FFmpeg/JSON glue code:
 
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
 
@@ -22,22 +23,38 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-import sop_colab_guard  # noqa: E402
-import sop_delivery  # noqa: E402
-import sop_g1_pack  # noqa: E402
-import sop_g2_pack  # noqa: E402
-import sop_g3_exam  # noqa: E402
-import sop_gate  # noqa: E402
-import sop_preflight  # noqa: E402
 
-DISPATCH = {
-    "gate": sop_gate.main,
-    "preflight": sop_preflight.main,
-    "g1-pack": sop_g1_pack.main,
-    "g2-pack": sop_g2_pack.main,
-    "g3-exam": sop_g3_exam.main,
-    "deliver": sop_delivery.main,
-    "colab-guard": sop_colab_guard.main,
+def _ensure_venv_site_packages() -> None:
+    """Adds `packages/monster/.venv` site-packages to `sys.path` when invoked via system `python3`."""
+    try:
+        import numpy  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    candidate_roots = [
+        SCRIPT_DIR.parents[2],  # packages/monster
+        Path.home() / ".local/share/codex-integrations/game-studio-local/runtime/packages/monster",
+        Path("/Users/bugyaluwang/project/codex-game-studio/packages/monster"),
+    ]
+    for root in candidate_roots:
+        venv_lib = root / ".venv" / "lib"
+        if venv_lib.is_dir():
+            for sp in sorted(venv_lib.glob("python*/site-packages")):
+                if sp.is_dir() and str(sp) not in sys.path:
+                    sys.path.insert(0, str(sp))
+
+
+_ensure_venv_site_packages()
+
+DISPATCH_MODULES = {
+    "gate": "sop_gate",
+    "preflight": "sop_preflight",
+    "g1-pack": "sop_g1_pack",
+    "g2-pack": "sop_g2_pack",
+    "g3-exam": "sop_g3_exam",
+    "deliver": "sop_delivery",
+    "colab-guard": "sop_colab_guard",
 }
 
 
@@ -62,11 +79,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     cmd = args[0]
     rest = args[1:]
-    if cmd not in DISPATCH:
+    if cmd not in DISPATCH_MODULES:
         print(f"Unknown SOP command: {cmd!r}\n", file=sys.stderr)
         print_usage()
         return 1
-    return int(DISPATCH[cmd](rest))
+    mod = importlib.import_module(DISPATCH_MODULES[cmd])
+    return int(mod.main(rest))
 
 
 if __name__ == "__main__":

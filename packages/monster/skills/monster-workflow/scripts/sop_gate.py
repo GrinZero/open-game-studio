@@ -28,7 +28,29 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-MONSTER_ROOT = SCRIPT_DIR.parents[2]
+
+
+def resolve_monster_root(script_dir: Path = SCRIPT_DIR) -> Path:
+    """Locates `packages/monster` whether invoked from `packages/monster/skills/...`,
+    `<repo>/skills/...`, `plugins/game-studio/skills/...`, or `~/.agents/skills/...`.
+    """
+    candidates = [
+        script_dir.parents[2],  # packages/monster/skills/monster-workflow/scripts -> packages/monster
+        script_dir.parents[2] / "packages" / "monster",  # <repo>/skills/monster-workflow/scripts -> <repo>/packages/monster
+        script_dir.parents[4] / "runtime" / "packages" / "monster",  # plugins/game-studio/skills/... -> runtime/packages/monster
+        Path.home() / ".local/share/codex-integrations/game-studio-local/runtime/packages/monster",
+        Path("/Users/bugyaluwang/project/codex-game-studio/packages/monster"),
+    ]
+    for cand in candidates:
+        if (cand / "worker" / "bone_taxonomy.py").is_file():
+            for sp in sorted((cand / ".venv" / "lib").glob("python*/site-packages")):
+                if sp.is_dir() and str(sp) not in sys.path:
+                    sys.path.insert(0, str(sp))
+            return cand.resolve()
+    return script_dir.parents[2]
+
+
+MONSTER_ROOT = resolve_monster_root(SCRIPT_DIR)
 WORKER_DIR = MONSTER_ROOT / "worker"
 if str(WORKER_DIR) not in sys.path:
     sys.path.insert(0, str(WORKER_DIR))

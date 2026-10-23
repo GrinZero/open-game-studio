@@ -26,16 +26,21 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 SCRIPT_DIR = Path(__file__).resolve().parent
-MONSTER_ROOT = SCRIPT_DIR.parents[2]
-WORKER_DIR = MONSTER_ROOT / "worker"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
-if str(WORKER_DIR) not in sys.path:
-    sys.path.insert(0, str(WORKER_DIR))
 
+from sop_gate import (  # noqa: E402
+    MONSTER_ROOT,
+    WORKER_DIR,
+    assert_gate,
+    load_ledger,
+    mark_awaiting_review,
+    now_taipei_iso,
+    save_ledger,
+    sha256_json,
+)
+import numpy as np  # noqa: E402
 from bone_taxonomy import (  # noqa: E402
     audit_pose_dataset_coverage,
     classify_rig_bones,
@@ -47,14 +52,6 @@ from bone_taxonomy import (  # noqa: E402
 from pose_features import (  # noqa: E402
     studio_resolution,
     studio_view_order,
-)
-from sop_gate import (  # noqa: E402
-    assert_gate,
-    load_ledger,
-    mark_awaiting_review,
-    now_taipei_iso,
-    save_ledger,
-    sha256_json,
 )
 from sop_preflight import (  # noqa: E402
     _find_bpy_python,
