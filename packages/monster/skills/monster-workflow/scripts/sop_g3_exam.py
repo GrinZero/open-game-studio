@@ -89,6 +89,7 @@ def sync_u2_to_drive(
 
     src_blend = work_dir / "g1_candidates" / f"candidate_{selected_cid}_full.blend"
     src_meta = work_dir / "g1_candidates" / f"candidate_{selected_cid}_rig_meta.json"
+    src_limits = work_dir / "joint_limits.json"
     if not src_blend.is_file() or not src_meta.is_file():
         raise FileNotFoundError(f"G1 选定候选完整绑定文件缺失: {src_blend} 或 {src_meta}")
 
@@ -96,17 +97,22 @@ def sync_u2_to_drive(
     m_drive.mkdir(parents=True, exist_ok=True)
     dst_blend = m_drive / "rigged_pruned.blend"
     dst_meta = m_drive / "studio_rig_meta.json"
+    dst_limits = m_drive / "joint_limits.json"
 
     blend_hash = sha256_file(src_blend)
     meta_hash = sha256_file(src_meta)
+    limits_hash = sha256_file(src_limits) if src_limits.is_file() else None
 
     blend_unchanged = dst_blend.is_file() and sha256_file(dst_blend) == blend_hash
     meta_unchanged = dst_meta.is_file() and sha256_file(dst_meta) == meta_hash
+    limits_unchanged = bool(limits_hash and dst_limits.is_file() and sha256_file(dst_limits) == limits_hash)
 
     if not blend_unchanged:
         shutil.copy2(src_blend, dst_blend)
     if not meta_unchanged:
         shutil.copy2(src_meta, dst_meta)
+    if src_limits.is_file() and not limits_unchanged:
+        shutil.copy2(src_limits, dst_limits)
 
     exam_synced_to = None
     if exam_video_path:
@@ -125,22 +131,28 @@ def sync_u2_to_drive(
         "synced_at": now_taipei_iso(),
         "skipped_unchanged_blend": blend_unchanged,
         "skipped_unchanged_meta": meta_unchanged,
+        "skipped_unchanged_joint_limits": limits_unchanged,
         "drive_blend": str(dst_blend),
         "blend_sha256": blend_hash,
         "drive_meta": str(dst_meta),
         "meta_sha256": meta_hash,
+        "drive_joint_limits": str(dst_limits) if src_limits.is_file() else None,
+        "joint_limits_sha256": limits_hash,
         "drive_exam_video": exam_synced_to,
     }
     (m_drive / "u2_manifest.json").write_text(
         json.dumps(u2_manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
 
+    fp_update: dict[str, Any] = {
+        "selected_candidate_blend_sha256": blend_hash,
+        "rig_meta_sha256": meta_hash,
+    }
+    if limits_hash:
+        fp_update["joint_limits_sha256"] = limits_hash
     derive_invalidations(
         ledger,
-        new_fingerprints={
-            "selected_candidate_blend_sha256": blend_hash,
-            "rig_meta_sha256": meta_hash,
-        },
+        new_fingerprints=fp_update,
     )
     ledger.setdefault("transfers", {})["U2"] = u2_manifest
     save_ledger(ledger, project_root=proj, drive_root=drv)

@@ -51,15 +51,22 @@ from bone_taxonomy import (
     DEFAULT_SYNTH_SAMPLES,
     G1_SYNC_VIEWS,
     G1_VIEWS,
+    JOINT_LIMITS_SCHEMA,
+    apply_joint_limits_profile,
+    audit_boundary_exploration_coverage,
     audit_pose_dataset_coverage,
     build_bounded_local_euler_rotation,
     canonicalize_rig_bone_names_in_blender,
     classify_rig_bones,
     compute_stratified_motion_metrics,
     effective_sampling_limits_for_bone,
+    probe_rig_joint_limits,
     reconstruct_frames_with_kind_solvers,
+    resolve_joint_limits_profile_from_paths,
+    sample_boundary_exploration_pose_euler_dict,
     sample_root_translation_offset,
     sample_stratified_pose_euler_dict,
+    select_g2_boundary_regime,
     select_pose_sampling_regime,
     solve_bone_rotation_by_kind,
     synthesize_archetype_pose_eulers,
@@ -490,6 +497,7 @@ def classify_anonymous_bones_and_assign_limits(
             "rest_length": round(float(vec.length), 5),
             "rest_rot_mat_world": [[round(float(v), 5) for v in row] for row in (mw_arm @ bone.matrix_local).to_3x3()],
             "limits_rad": [[round(lo, 4), round(hi, 4)] for (lo, hi) in limits],
+            "limits_source": "stage1_heuristic",
             "chain_corr": chain_corr,
         }
 
@@ -951,16 +959,19 @@ def sample_in_limit_pose(
     sample_idx: int | None = None,
     sample_root_location: bool = False,
     rig_height: float = 1.0,
+    joint_limits_profile: dict[str, Any] | None = None,
+    boundary_exploration: bool = False,
 ) -> dict[str, list[float]]:
-    """Samples a biomechanically valid pose using the 4-Regime Stratified Decoupled Sampler
-    (`synergistic`, `decoupled`, `antiphase_extreme`, `workspace_cross_occlusion`) and applies
-    it to `arm_obj.pose.bones`.
+    """Samples a biomechanically valid pose using either the 4-Regime Stratified Decoupled Sampler
+    or the 5-Regime Stratified Boundary-Exploration Sampler and applies it to `arm_obj.pose.bones`.
     """
-    sampled_raw, regime = sample_stratified_pose_euler_dict(
+    sampled_raw, _regime = sample_stratified_pose_euler_dict(
         bones_meta=bones_meta,
         rng=rng,
         sample_idx=sample_idx,
         enforce_anatomical_floor=True,
+        joint_limits_profile=joint_limits_profile,
+        boundary_exploration=boundary_exploration,
     )
     sampled_eulers: dict[str, list[float]] = {}
     for b_name, raw in sampled_raw.items():
@@ -974,7 +985,13 @@ def sample_in_limit_pose(
         pbone.rotation_euler = Euler(rot, "XYZ")
         if pbone.parent is None:
             if sample_root_location:
-                dx, dy, dz = sample_root_translation_offset(bones_meta=bones_meta, rng=rng, sample_idx=sample_idx)
+                dx, dy, dz = sample_root_translation_offset(
+                    bones_meta=bones_meta,
+                    rng=rng,
+                    sample_idx=sample_idx,
+                    joint_limits_profile=joint_limits_profile,
+                    boundary_exploration=boundary_exploration,
+                )
                 delta_arm = arm_obj.matrix_world.to_3x3().inverted() @ Vector((dx, dy, dz))
                 pbone.location = pbone.bone.matrix_local.to_3x3().inverted() @ delta_arm
             else:
@@ -1084,12 +1101,86 @@ def extract_rig_lbs_skinning_and_verify_gate(
     }
 
 
+def _resolve_joint_limits_profile(
+    meta: dict[str, Any],
+    meta_path: str | None = None,
+    limits_path: str | None = None,
+    *extra_paths: str | Path | None,
+) -> tuple[dict[str, Any] | None, Path | None]:
+    """Resolves `joint_limits.json` from explicit `--limits_path` or adjacent to `studio_rig_meta.json`,
+    and applies it in-memory to `meta["bones"]`.
+    """
+    profile, cand_str = resolve_joint_limits_profile_from_paths(
+        limits_path,
+        meta_path,
+        *extra_paths,
+        fallback_profile=meta.get("joint_limits_profile") if isinstance(meta, dict) else None,
+    )
+    if isinstance(profile, dict) and isinstance(meta.get("bones"), dict):
+        meta["bones"] = apply_joint_limits_profile(
+            meta["bones"],
+            profile,
+            bbox_min=meta.get("bbox_min"),
+            bbox_max=meta.get("bbox_max"),
+        )
+        return profile, (Path(cand_str) if cand_str else None)
+    return None, None
+
+
+def sop_probe_joint_limits(
+    blend_path: str,
+    meta_path: str,
+    out_limits_path: str | None = None,
+    monster_id: str = "monster",
+    archetype: str = "humanoid",
+) -> dict[str, Any]:
+    """Headless Blender worker mode (`--mode probe_joint_limits`) that runs the Geometric & LBS
+    Axis Probe on `rigged_pruned.blend` + `studio_rig_meta.json` and writes `joint_limits.json`.
+    """
+    require_bpy()
+    bpy.ops.wm.open_mainfile(filepath=str(blend_path))
+    with open(meta_path, "r", encoding="utf-8") as f:
+        meta = json.load(f)
+
+    arm_objs = [o for o in bpy.data.objects if o.type == "ARMATURE"]
+    mesh_objs = [o for o in bpy.data.objects if o.type == "MESH"]
+    arm_obj = arm_objs[0] if arm_objs else None
+    mesh_obj = mesh_objs[0] if mesh_objs else None
+
+    rig_skinning: dict[str, Any] | None = None
+    if arm_obj is not None and mesh_obj is not None and isinstance(meta.get("bones"), dict):
+        try:
+            rig_skinning = extract_rig_lbs_skinning_and_verify_gate(
+                mesh_obj, arm_obj, sorted(meta["bones"])
+            )
+        except Exception:
+            rig_skinning = None
+
+    profile = probe_rig_joint_limits(
+        meta.get("bones", {}),
+        monster_id=monster_id or str(meta.get("monster_id", "monster")),
+        archetype=archetype or str(meta.get("archetype", "humanoid")),
+        bbox_min=meta.get("bbox_min"),
+        bbox_max=meta.get("bbox_max"),
+        rig_skinning=rig_skinning,
+        lbs_evaluator_fn=lbs_deform_vertices_numpy if rig_skinning is not None else None,
+        stretch_metric_fn=compute_mesh_edge_stretch_metric if rig_skinning is not None else None,
+    )
+    target_limits = Path(out_limits_path) if out_limits_path else (Path(meta_path).parent / "joint_limits.json")
+    target_limits.parent.mkdir(parents=True, exist_ok=True)
+    target_limits.write_text(json.dumps(profile, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"[Joint Limits Probe Complete] Wrote {target_limits} ({len(profile.get('bones', {}))} bones)")
+    return profile
+
+
 def generate_stage2_synthetic_dataset(
     blend_path: str,
     meta_path: str,
     out_dir: str,
     num_samples: int = DEFAULT_SYNTH_SAMPLES,
     seed: int = 42,
+    limits_path: str | None = None,
+    boundary_exploration: bool = False,
 ) -> None:
     """Renders the Stage 2 synthetic dataset (default 5,000 stratified decoupled dual-view images)
     and verifies the dataset with `audit_pose_dataset_coverage`.
@@ -1098,6 +1189,9 @@ def generate_stage2_synthetic_dataset(
     bpy.ops.wm.open_mainfile(filepath=str(blend_path))
     with open(meta_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
+    joint_limits_profile, resolved_limits_path = _resolve_joint_limits_profile(
+        meta, meta_path=meta_path, limits_path=limits_path
+    )
 
     arm_obj = [o for o in bpy.data.objects if o.type == "ARMATURE"][0]
     mesh_objs = [o for o in bpy.data.objects if o.type == "MESH"]
@@ -1178,6 +1272,8 @@ def generate_stage2_synthetic_dataset(
         bbox_min=meta.get("bbox_min"),
         bbox_max=meta.get("bbox_max"),
     )
+    if joint_limits_profile is not None:
+        bones_meta = apply_joint_limits_profile(bones_meta, joint_limits_profile)
     bone_names = list(bones_meta.keys())
     records = []
 
@@ -1187,8 +1283,20 @@ def generate_stage2_synthetic_dataset(
         arm_obj.animation_data_create()
         scene.frame_set(1)
 
-        regime = select_pose_sampling_regime(idx, rng)
-        pose_f1 = sample_in_limit_pose(arm_obj, bones_meta, rng, sample_idx=idx)
+        regime = (
+            select_g2_boundary_regime(idx, rng, total_samples=num_samples)
+            if boundary_exploration
+            else select_pose_sampling_regime(idx, rng)
+        )
+        pose_f1 = sample_in_limit_pose(
+            arm_obj,
+            bones_meta,
+            rng,
+            sample_idx=idx,
+            sample_root_location=bool(boundary_exploration or joint_limits_profile is not None),
+            joint_limits_profile=joint_limits_profile,
+            boundary_exploration=boundary_exploration,
+        )
         if enhanced and use_blur:
             # Symmetric shutter samples around the labeled pose at frame 1.
             # Put keyframes on both sides; labels always refer to the center pose.
@@ -1331,7 +1439,15 @@ def generate_stage2_synthetic_dataset(
                 record_item["bad_edge_ratio"] = stretch_metric["bad_edge_ratio"]
         records.append(record_item)
 
-    coverage_audit = audit_pose_dataset_coverage(records, bones_meta, enforce_anatomical_floor=True)
+    coverage_audit = audit_pose_dataset_coverage(
+        records, bones_meta, enforce_anatomical_floor=not boundary_exploration
+    )
+    if boundary_exploration:
+        coverage_audit["boundary_exploration_audit"] = audit_boundary_exploration_coverage(
+            records, bones_meta, joint_limits_profile=joint_limits_profile
+        )
+    if resolved_limits_path is not None:
+        coverage_audit["joint_limits_path"] = str(resolved_limits_path)
     with open(out_path / "pose_coverage_audit.json", "w", encoding="utf-8") as f:
         json.dump(coverage_audit, f, indent=2, ensure_ascii=False)
     if not coverage_audit.get("passed", False):
@@ -1344,18 +1460,29 @@ def generate_stage2_synthetic_dataset(
                    "signature": signature, "depth_visibility_enabled": enhanced,
                    "dense_surface_enabled": dense_enabled,
                    "bone_names": sorted(bone_names), "visibility_method": "skin_weight_surface_proxy_v1" if enhanced else None,
+                   "joint_limits_schema": joint_limits_profile.get("schema") if isinstance(joint_limits_profile, dict) else None,
+                   "joint_limits_profile": joint_limits_profile,
                    "coverage_audit": coverage_audit,
                    "calibration": calib, "samples": records}, f, indent=2, ensure_ascii=False)
 
 
 def synthesize_stage4_exam_sequence(
-    blend_path: str, meta_path: str, out_dir: str, total_frames: int = 96, key_step: int = 12, seed: int = 100
+    blend_path: str,
+    meta_path: str,
+    out_dir: str,
+    total_frames: int = 96,
+    key_step: int = 12,
+    seed: int = 100,
+    limits_path: str | None = None,
 ) -> None:
     """Synthesizes a smooth, continuous constrained random animation sequence (96 frames = 4s @ 24 FPS)."""
     require_bpy()
     bpy.ops.wm.open_mainfile(filepath=str(blend_path))
     with open(meta_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
+    joint_limits_profile, _ = _resolve_joint_limits_profile(
+        meta, meta_path=meta_path, limits_path=limits_path
+    )
 
     arm_obj = [o for o in bpy.data.objects if o.type == "ARMATURE"][0]
     saved_calib = meta.get("calibration", {})
@@ -1381,7 +1508,13 @@ def synthesize_stage4_exam_sequence(
 
     for f_idx in range(0, total_frames + 1, key_step):
         bpy.context.scene.frame_set(f_idx)
-        sample_in_limit_pose(arm_obj, bones_meta, rng)
+        sample_in_limit_pose(
+            arm_obj,
+            bones_meta,
+            rng,
+            sample_idx=f_idx // max(1, key_step),
+            joint_limits_profile=joint_limits_profile,
+        )
         for pbone in arm_obj.pose.bones:
             pbone.keyframe_insert(data_path="rotation_euler", frame=f_idx)
 
@@ -1420,7 +1553,17 @@ def synthesize_stage4_exam_sequence(
         gt_trajectory.append({"frame": f_idx, "image": frame_file, "bones": frame_bones})
 
     with open(out_path / "exam_gt.json", "w", encoding="utf-8") as f:
-        json.dump({"calibration": calib, "frames": gt_trajectory}, f, indent=2, ensure_ascii=False)
+        json.dump(
+            {
+                "calibration": calib,
+                "bones_meta": bones_meta,
+                "joint_limits_profile": joint_limits_profile,
+                "frames": gt_trajectory,
+            },
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
 
 
 # ==============================================================================
@@ -1747,6 +1890,7 @@ def bake_3d_joints_to_animated_glb(
     out_glb_path: str,
     fps: int = 24,
     meta_path: str | None = None,
+    limits_path: str | None = None,
 ) -> None:
     """Retargets triangulated 3D joint trajectories onto the Blender Armature in parent-to-child
     topological order using:
@@ -1827,6 +1971,15 @@ def bake_3d_joints_to_animated_glb(
         info.setdefault("rest_rot_mat_world", [[float(v) for v in row] for row in R0])
 
     bones_meta = classify_rig_bones(bones_meta)
+    joint_limits_profile, _ = resolve_joint_limits_profile_from_paths(
+        limits_path,
+        meta_path,
+        blend_path,
+        joints_3d_json,
+        fallback_profile=traj_data.get("joint_limits_profile") if isinstance(traj_data, dict) else None,
+    )
+    if joint_limits_profile is not None:
+        bones_meta = apply_joint_limits_profile(bones_meta, joint_limits_profile)
 
     first_frame_bones = frames_list[0].get("bones", {}) if frames_list else {}
     any_precomputed_rot = any(
@@ -2743,7 +2896,7 @@ def _create_g1_cameras(
         cam_data.ortho_scale = float(ortho_scale)
         cam_obj = bpy.data.objects.new(f"G1_Cam_{view_name}", cam_data)
         cam_obj.location = loc
-        cam_obj.rotation_euler = rot
+        cam_obj.rotation_euler = (Vector(center.tolist()) - cam_obj.location).to_track_quat("-Z", "Y").to_euler()
         bpy.context.collection.objects.link(cam_obj)
         cams[view_name] = cam_obj
 
@@ -3015,6 +3168,28 @@ def sop_prepare_g1_candidates(
     static_w, static_h = 640, 640
     panel_w, panel_h = 640, 360
 
+    # Fit one shared camera volume to the entire test motion, so raised limbs and
+    # head ornaments remain visible without reframing individual candidates.
+    motion_bmins, motion_bmaxs = [shared_bmin], [shared_bmax]
+    for c_info in results:
+        bpy.ops.wm.open_mainfile(filepath=str(c_info["blend_path"]))
+        arm = next(o for o in bpy.context.scene.objects if o.type == "ARMATURE")
+        meshes = _preflight_scene_meshes()
+        meta = json.loads(Path(c_info["meta_path"]).read_text(encoding="utf-8"))["bones"]
+        for frame_index in range(total_frames):
+            for name, values in synthesize_archetype_pose_eulers(meta, archetype, frame_index, total_frames).items():
+                bone = arm.pose.bones.get(name)
+                if bone is not None:
+                    bone.rotation_mode = "XYZ"
+                    bone.rotation_euler = Euler(tuple(float(v) for v in values), "XYZ")
+            bpy.context.view_layer.update()
+            vertices, _ = _extract_deformed_world_vertices_and_triangles(meshes, collect_triangles=False)
+            if len(vertices):
+                motion_bmins.append(np.min(vertices, axis=0))
+                motion_bmaxs.append(np.max(vertices, axis=0))
+    motion_bmin = np.min(np.stack(motion_bmins), axis=0)
+    motion_bmax = np.max(np.stack(motion_bmaxs), axis=0)
+
     # panel_cache[(view, frame_idx)][cand_idx] -> uint8 (panel_h, panel_w, 4)
     panel_cache: dict[tuple[str, int], dict[int, np.ndarray]] = {
         (v, f_idx): {} for v in G1_SYNC_VIEWS for f_idx in range(total_frames)
@@ -3061,7 +3236,7 @@ def sop_prepare_g1_candidates(
             static_views_rendered.append(out_png.name)
 
         # Now evaluate real mesh deformation across the archetype motion timeline and render sync panels
-        sync_cams = _create_g1_cameras(shared_bmin, shared_bmax, panel_w, panel_h, padding=1.46)
+        sync_cams = _create_g1_cameras(motion_bmin, motion_bmax, panel_w, panel_h, padding=1.46)
         rest_verts, triangles = _extract_deformed_world_vertices_and_triangles(mesh_objs, collect_triangles=True)
         total_verts, unweighted_verts = _count_unweighted_vertices(mesh_objs, arm_obj)
 
@@ -3260,6 +3435,7 @@ def main() -> None:
         choices=[
             "sanitize_input",
             "audit",
+            "probe_joint_limits",
             "render_3000",
             "render_5000",
             "render_g2_50",
@@ -3280,6 +3456,7 @@ def main() -> None:
     parser.add_argument("--archetype", default="humanoid", help="Motion archetype for G1 test motion")
     parser.add_argument("--blend_path", help="Path to rigged_pruned.blend")
     parser.add_argument("--meta_path", help="Path to studio_rig_meta.json")
+    parser.add_argument("--limits_path", help="Path to joint_limits.json (monster-joint-limits-v1)")
     parser.add_argument("--out_dir", help="Output directory for renders / metadata")
     parser.add_argument("--joints_json", help="Input 3D joint trajectory JSON for Stage 6 IK baking")
     parser.add_argument("--out_glb", help="Output GLB path for sanitize_input or Stage 6 bake_ik")
@@ -3337,17 +3514,46 @@ def main() -> None:
             json.dump(rig_meta, f, indent=2, ensure_ascii=False)
         print(f"[Stage 1 Audit Complete] Best candidate: {best['path']} (score={best['score']})")
 
+    elif args.mode == "probe_joint_limits":
+        sop_probe_joint_limits(
+            args.blend_path,
+            args.meta_path,
+            out_limits_path=args.limits_path or args.out_report,
+            monster_id=args.monster_id,
+            archetype=args.archetype,
+        )
+
     elif args.mode in ("render_3000", "render_5000", "render_g2_50"):
         samples = 50 if args.mode == "render_g2_50" and args.num_samples == DEFAULT_SYNTH_SAMPLES else args.num_samples
-        generate_stage2_synthetic_dataset(args.blend_path, args.meta_path, args.out_dir, samples, seed=args.seed)
+        generate_stage2_synthetic_dataset(
+            args.blend_path,
+            args.meta_path,
+            args.out_dir,
+            samples,
+            seed=args.seed,
+            limits_path=args.limits_path,
+            boundary_exploration=(args.mode == "render_g2_50"),
+        )
         print(f"[Stage 2 Render Complete] Generated {samples} dual-view pairs in {args.out_dir}")
 
     elif args.mode == "render_exam":
-        synthesize_stage4_exam_sequence(args.blend_path, args.meta_path, args.out_dir, args.exam_frames)
+        synthesize_stage4_exam_sequence(
+            args.blend_path,
+            args.meta_path,
+            args.out_dir,
+            args.exam_frames,
+            limits_path=args.limits_path,
+        )
         print(f"[Stage 4 Exam Sequence Complete] Rendered {args.exam_frames} continuous frames in {args.out_dir}")
 
     elif args.mode == "bake_ik":
-        bake_3d_joints_to_animated_glb(args.blend_path, args.joints_json, args.out_glb, meta_path=args.meta_path)
+        bake_3d_joints_to_animated_glb(
+            args.blend_path,
+            args.joints_json,
+            args.out_glb,
+            meta_path=args.meta_path,
+            limits_path=args.limits_path,
+        )
         print(f"[Stage 6 IK Bake Complete] Exported {args.out_glb}")
 
     elif args.mode == "verify_exam_glb":

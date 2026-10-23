@@ -28,6 +28,14 @@ Monster 是 Open Game Studio monorepo 中的角色绑定、姿态训练与动作
 
 代码从 `/content/monster-releases/` 加载，临时计算文件仍在 `/content/monster-studio/`，持久数据仍在 `MyDrive/MonsterStudio/`。旧 `src/` 备份不会被覆盖，也不会被当作新的代码来源。Cell 1/4 在已有任务忙碌时拒绝重载；空闲时关闭旧 Gradio App 再加载新版本。安装器不改动模型缓存、训练结果或项目文件。
 
+### SkinTokens 依赖缓存
+
+`bootstrap-skintokens.sh` 通过 `uv_cache_session.py` 管理缓存生命周期。Drive 在 `SkinTokens/cache/uv_snapshots/<兼容性键>/` 保存不可变归档与校验记录；启动时校验归档并恢复到 VM 本地的 `/content/skintokens-service/cache_local/uv`，所有 `uv` 安装与锁操作都在本地执行。键包含 Python/CUDA/PyTorch、uv 版本及上游固定提交。
+
+安装进程退出后才打包新增缓存、上传并实际读回校验；缓存未改变时跳过回存。安装中断不会发布正在写入的归档，损坏的新快照会回退到旧的有效快照。已有本地缓存不会被旧快照覆盖。模型权重与编译好的 FlashAttention wheel 继续使用 Drive 中既有的持久目录；不自动清理历史归档，也不把缓存或凭据打进发布包。此方式沿用 [uv 官方跨运行恢复与保存缓存的做法](https://docs.astral.sh/uv/guides/integration/github/#caching)，并避开 DriveFS 的原子锁限制。
+
+通过分段恢复取得的 PyTorch wheel 可保存在 `SkinTokens/cache/wheels/py311-torch291-cu130/`。启动脚本优先将它复制到 VM 并校验固定版本的官方 SHA-256，再交给 uv 安装；缺失或损坏时使用原固定上游索引。这样不会因本地文件与索引 URL 的缓存键不同而再次下载大文件。
+
 ## 在本机连接与调用（零配置环境与自动发现）
 
 本机不安装 CUDA、torch 或 bpy。首次执行 `npm run monster:call` 时，[`run-python.mjs`](scripts/run-python.mjs) 会自动在 `packages/monster/.venv` 创建虚拟环境并安装 `gradio_client`，无需手动建环境或设置 `MONSTER_PYTHON`。

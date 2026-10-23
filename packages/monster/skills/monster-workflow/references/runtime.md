@@ -16,14 +16,15 @@ npm run monster:package
 npm run monster:sop -- --help
 ```
 
-全流程 SOP 的本地执行层已固化在 [monster_sop.py](../scripts/monster_sop.py)，包含 7 个标准子命令，各子命令与能力如下；脚本复用与按需补充原则见 [Monster 工作流](../SKILL.md)：
+全流程 SOP 的本地执行层已固化在 [monster_sop.py](../scripts/monster_sop.py)，包含 8 个标准子命令，各子命令与能力如下；脚本复用与按需补充原则见 [Monster 工作流](../SKILL.md)：
 
 | 子命令 | 固化脚本 | 覆盖 SOP 阶段与核心职责 |
 | --- | --- | --- |
 | `gate` | [sop_gate.py](../scripts/sop_gate.py) | 维护 `reviews.json` + `stage_state.json`，计算 SHA-256 指纹，校验 `<KIND>_<SIDE>_<GROUP>_<INDEX>` 规范骨骼命名门禁，执行 `G1`/`G2`/`G3`/`final_batch` 下游硬门禁断言与 10 类变更分级失效推导 |
 | `preflight` | [sop_preflight.py](../scripts/sop_preflight.py) | 阶段一工作区与 Git 红线守卫（阻断未获 `final_batch` 批准前写入 `art_source/` 或受管清单）、7 项模型体检、装饰拆离备份 `decorations_manifest.json`、预绑定骨骼规范命名门禁与 U1 Google Drive 持久同步 |
 | `g1-pack` | [sop_g1_pack.py](../scripts/sop_g1_pack.py) | 阶段二 4 候选装饰恢复、强制 `<KIND>_<SIDE>_<GROUP>_<INDEX>` 骨骼规范命名重命名与核验表、16 张标准八面体（Octahedral）骨骼叠加图、4 类怪物形态同动作对照视频与 `g1_review.html` 生成 |
-| `g2-pack` | [sop_g2_pack.py](../scripts/sop_g2_pack.py) | 阶段三自动校验 G1 硬门禁、按锁定原生分辨率与双/三视图排布采样 `pose_001`～`pose_050`、2D 标签叠加图、单屏 50 缩略图总览 `g2_50_overview.jpg`、异常重抽日志 `rejection_redraw_log.json` 与交互式 `g2_review.html` |
+| `joint-limits` | [sop_joint_limits.py](../scripts/sop_joint_limits.py) | G1 通过后几何轴向世界空间语义探测＋LBS 蒙皮拉伸安全上限测算（`probe`），以及 Agent 专属定制 `scratch/work/<id>/joint_limits.json`（`apply`/`show`，Schema `monster-joint-limits-v1`），定义动作无关的完整生理运动包络与全局 `ROOT` 旋转/平移范围（修改仅失效 G2/G3，保留 G1） |
+| `g2-pack` | [sop_g2_pack.py](../scripts/sop_g2_pack.py) | 阶段三自动校验 G1 硬门禁、加载 `joint_limits.json` 并按锁定原生分辨率与双/三视图排布执行 5 模态分层边界探索随机采样生成 `pose_001`～`pose_050`、2D 标签叠加图、单屏 50 缩略图总览 `g2_50_overview.jpg`、双侧边界触达率审计、异常重抽日志 `rejection_redraw_log.json` 与交互式 `g2_review.html` |
 | `g3-exam` | [sop_g3_exam.py](../scripts/sop_g3_exam.py) | 阶段四自动校验 G1+G2 硬门禁、U2 增量持久化同步（比对 SHA-256 跳过未改动 `.blend`）、严格区分 `3d_gt` / `2d_only` / `unlabeled_video` 三类边界（绝不编造 MPJPE/SO(3)）、生成并排对照视频与 `g3_review.html` |
 | `deliver` | [sop_delivery.py](../scripts/sop_delivery.py) | 阶段五自动校验 G3 硬门禁、3 次重试极线同步失败硬终止阻断、当批独立清单 `batch_manifest.json` 过滤、本地 GLB 回读与 `:loop` 首尾接缝跳变检测（`compute_loop_seam_metrics`）及 `delivery_review.html` |
 | `colab-guard` | [sop_colab_guard.py](../scripts/sop_colab_guard.py) | 阶段六跨会话租约表 `active_sessions.json`、阶段前置释放校验（仅允许在 `stage1_candidates_fetched` 或 `final_batch_approved` 释放，视频审阅/迭代期间硬阻断释放）与安全下线核验 |
@@ -48,6 +49,8 @@ npm run monster:sop -- preflight --monster-id <id> --project-root <project> --re
 日常可直接通过 GitHub 的 **Open in Colab** 打开 `packages/monster/notebooks/colab.ipynb` 启动云端 Worker，无需手动打包或上传 `.tar.gz`。如需测试本地未提交改动，再使用 `packages/monster/dist/` 下的打包归档。同步本机插件运行目录不会切换已有 Colab 实例。任务忙碌时不可切换代码版本。
 
 持久数据沿用 `MyDrive/MonsterStudio/monsters/<monster_id>/`，环境缓存沿用 `SkinTokens/` 和 `MonsterStudio/cache/h3_models/`。模型持久传输遵循 U1/U2；只改脚本、关节范围、seed、提示词不重传模型，新增考试视频单独持久化。
+
+SkinTokens 的 `uv` 活动缓存使用 VM 本地目录；`scripts/uv_cache_session.py` 在启动时从 Drive 的 `SkinTokens/cache/uv_snapshots/<兼容性键>/` 恢复已核验归档，等待安装进程退出后再回存新增缓存并读回核验。已有本地缓存不覆盖，缓存未改变不重复上传，归档按不可变批次保留且不自动清理；FlashAttention wheel 与模型权重继续复用既有 Drive 缓存。仅修改缓存脚本不切换正在忙碌的 Worker，也不产生新的模型审计通过状态。
 
 ## 实际 API 与边界
 

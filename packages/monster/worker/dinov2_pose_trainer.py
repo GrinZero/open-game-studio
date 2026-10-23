@@ -47,10 +47,12 @@ from pose_features import (
 from bone_taxonomy import (
     BONE_TAXONOMY_SCHEMA,
     _build_default_rest_rot_matrix,
+    apply_joint_limits_profile,
     classify_rig_bones,
     clean_uv_short_gaps_hampel,
     compute_stratified_motion_metrics,
     reconstruct_frames_with_kind_solvers,
+    resolve_joint_limits_profile_from_paths,
     savgol_smooth_array,
     short_gap_fill_1d_or_nd,
     whittaker_smooth_trajectory,
@@ -618,6 +620,19 @@ def train_monster_dinov2_probe(
         raise ValueError("epochs and batch_size must be positive")
     configure_torch_gpu_acceleration()
     meta = json.loads(Path(meta_path).read_text())
+    joint_limits_profile, _ = resolve_joint_limits_profile_from_paths(
+        meta_path,
+        synth_dir,
+        out_ckpt,
+        fallback_profile=meta.get("joint_limits_profile") if isinstance(meta, dict) else None,
+    )
+    if isinstance(meta.get("bones"), dict) and joint_limits_profile is not None:
+        meta["bones"] = apply_joint_limits_profile(
+            meta["bones"],
+            joint_limits_profile,
+            bbox_min=meta.get("bbox_min"),
+            bbox_max=meta.get("bbox_max"),
+        )
     bone_names = sorted(meta["bones"])
     num_keypoints = len(bone_names)*2
     enhanced = features_enabled()
@@ -778,6 +793,7 @@ def train_monster_dinov2_probe(
     target = Path(out_ckpt)
     target.parent.mkdir(parents=True, exist_ok=True)
     checkpoint = {"bone_names": bone_names, "bones_meta": meta["bones"], "num_keypoints": num_keypoints,
+                  "joint_limits_profile": joint_limits_profile,
                   "calibration": ds.calib, "num_views": ds.num_views, "view_order": list(ds.view_order),
                   "head_state_dict": model.head.state_dict(),
                   "depth_visibility_enabled": enhanced, "dense_surface_enabled": dense_enabled,
@@ -890,6 +906,7 @@ def evaluate_epipolar_consistency_and_triangulate(
     logvar_right_all=None,
     dense_correspondences: list[dict[str, np.ndarray]] | None = None,
     rig_skinning: dict[str, Any] | None = None,
+    joint_limits_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Pure-math Epipolar Consistency Gate (`|v_F(t) - v_S(t)| < 18px` & `corr > 0.82`),
     5-frame Hampel 2D tracking spike rejection, squared-confidence 3D ray triangulation,
@@ -1089,6 +1106,8 @@ def evaluate_epipolar_consistency_and_triangulate(
                         pts_3d[:, k, dim] = 0.22 * p3[:-2] + 0.56 * p3[1:-1] + 0.22 * p3[2:]
 
     classified_meta = classify_rig_bones(bones_meta) if bones_meta else None
+    if classified_meta and joint_limits_profile is not None:
+        classified_meta = apply_joint_limits_profile(classified_meta, joint_limits_profile)
     if enhanced and classified_meta:
         depth_scale = float(calib.get("depth_scale", max(1e-4, S)))
         frames_out, taxonomy_diag = reconstruct_frames_with_kind_solvers(
@@ -1126,6 +1145,7 @@ def evaluate_epipolar_consistency_and_triangulate(
             "vertical_trajectory_corr": round(v_corr, 4),
             "calibration": calib,
             "bones_meta": classified_meta,
+            "joint_limits_profile": joint_limits_profile,
             "taxonomy_diagnostics": taxonomy_diag,
             "frames": frames_out,
         }
@@ -1175,7 +1195,9 @@ def evaluate_epipolar_consistency_and_triangulate(
         frames_out.append({"frame": t, "bones": b_map})
 
     if classified_meta:
-        reconstruct_frame_so3_rotations_from_keypoints(frames_out, classified_meta)
+        reconstruct_frame_so3_rotations_from_keypoints(
+            frames_out, classified_meta, joint_limits_profile=joint_limits_profile
+        )
 
     return {
         "bone_taxonomy_schema": BONE_TAXONOMY_SCHEMA,
@@ -1185,6 +1207,7 @@ def evaluate_epipolar_consistency_and_triangulate(
         "vertical_trajectory_corr": round(v_corr, 4),
         "calibration": calib,
         "bones_meta": classified_meta,
+        "joint_limits_profile": joint_limits_profile,
         "frames": frames_out,
     }
 
@@ -1203,6 +1226,13 @@ def infer_dual_view_frames(
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     bone_names: list[str] = ckpt["bone_names"]
     bones_meta: dict[str, Any] | None = ckpt.get("bones_meta")
+    joint_limits_profile, _ = resolve_joint_limits_profile_from_paths(
+        ckpt_path,
+        frame_paths[0] if frame_paths else None,
+        fallback_profile=ckpt.get("joint_limits_profile") if isinstance(ckpt, dict) else None,
+    )
+    if isinstance(bones_meta, dict) and joint_limits_profile is not None:
+        bones_meta = apply_joint_limits_profile(bones_meta, joint_limits_profile)
     calib: dict[str, Any] = ckpt["calibration"]
     num_views = int(ckpt.get("num_views", calib.get("num_views", 3 if len(calib.get("view_order", ())) == 3 else 2)))
     default_order = ("left", "front", "right") if num_views == 3 else ("front", "side")
@@ -1354,6 +1384,7 @@ def infer_dual_view_frames(
         conf_right_all=conf_right_all,
         dense_correspondences=dense_correspondences,
         rig_skinning=rig_skinning,
+        joint_limits_profile=joint_limits_profile,
         **aux_arrays,
     )
 
@@ -1362,6 +1393,7 @@ def reconstruct_frame_so3_rotations_from_keypoints(
     frames_pred: list[dict[str, Any]],
     bones_meta: dict[str, Any] | None,
     gt_first_frame_bones: dict[str, Any] | None = None,
+    joint_limits_profile: dict[str, Any] | None = None,
 ) -> None:
     """Reconstructs each bone's 3x3 world rotation matrix `rot_mat_world` in parent-to-child
     topological order using Bounded Local-Euler + Multi-Child Observability & Rigid Child-Head
@@ -1381,6 +1413,8 @@ def reconstruct_frame_so3_rotations_from_keypoints(
     bone_names = list(frames_pred[0]["bones"].keys())
     topo_names = list(bone_names)
     meta_dict: dict[str, Any] = classify_rig_bones({b: dict((bones_meta or {}).get(b, {})) for b in bone_names})
+    if joint_limits_profile is not None:
+        meta_dict = apply_joint_limits_profile(meta_dict, joint_limits_profile)
     topo_names.sort(key=lambda b: int(meta_dict.get(b, {}).get("depth", 0)))
 
     # Always reconstruct children_map from parent links so legacy metadata without "children" works!
@@ -1472,15 +1506,28 @@ def evaluate_stage4_studio_exam(ckpt_path: str, exam_dir: str, out_report: str) 
         gt_data = json.load(f)
 
     ckpt_meta = None
+    ckpt_limits_profile = None
     if HAS_TORCH and Path(ckpt_path).exists():
         ckpt_obj = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         ckpt_meta = ckpt_obj.get("bones_meta")
+        ckpt_limits_profile = ckpt_obj.get("joint_limits_profile")
+    joint_limits_profile, _ = resolve_joint_limits_profile_from_paths(
+        ckpt_path,
+        exam_dir,
+        fallback_profile=ckpt_limits_profile or gt_data.get("joint_limits_profile"),
+    )
+    if ckpt_meta is None and isinstance(gt_data.get("bones_meta"), dict):
+        ckpt_meta = gt_data["bones_meta"]
+    if isinstance(ckpt_meta, dict) and joint_limits_profile is not None:
+        ckpt_meta = apply_joint_limits_profile(ckpt_meta, joint_limits_profile)
 
     frame_files = [exam_path / "exam_frames" / item["image"] for item in gt_data["frames"]]
     pred_res = infer_dual_view_frames(ckpt_path, frame_files)
 
     first_gt_bones = gt_data["frames"][0]["bones"] if gt_data.get("frames") else None
-    reconstruct_frame_so3_rotations_from_keypoints(pred_res["frames"], ckpt_meta, first_gt_bones)
+    reconstruct_frame_so3_rotations_from_keypoints(
+        pred_res["frames"], ckpt_meta, first_gt_bones, joint_limits_profile=joint_limits_profile
+    )
 
     pred_traj_path = exam_path / "exam_pred_traj.json"
     with open(pred_traj_path, "w", encoding="utf-8") as f:

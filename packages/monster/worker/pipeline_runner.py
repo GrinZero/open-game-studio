@@ -256,6 +256,7 @@ def register_new_monster(monster_id: str, input_glb: Path, num_synth: int = 5000
 
     blend_path = monster_drive / "rigged_pruned.blend"
     meta_path = monster_drive / "studio_rig_meta.json"
+    limits_path = monster_drive / "joint_limits.json"
     ckpt_path = monster_drive / "dinov2_head.pt"
     exam_report_path = monster_drive / "exam_report.json"
 
@@ -279,6 +280,23 @@ def register_new_monster(monster_id: str, input_glb: Path, num_synth: int = 5000
             str(meta_path),
         ]
     )
+    if not limits_path.exists():
+        run_cmd(
+            [
+                py_bpy,
+                str(bpy_worker),
+                "--mode",
+                "probe_joint_limits",
+                "--blend_path",
+                str(blend_path),
+                "--meta_path",
+                str(meta_path),
+                "--limits_path",
+                str(limits_path),
+                "--monster_id",
+                str(monster_id),
+            ]
+        )
 
     # Stage 2: Render 3,000 Constrained Poses (50% with inter-frame shutter motion blur)
     synth_dir = monster_work / "synth_3000"
@@ -292,6 +310,8 @@ def register_new_monster(monster_id: str, input_glb: Path, num_synth: int = 5000
             str(blend_path),
             "--meta_path",
             str(meta_path),
+            "--limits_path",
+            str(limits_path),
             "--out_dir",
             str(synth_dir),
             "--num_samples",
@@ -333,6 +353,8 @@ def register_new_monster(monster_id: str, input_glb: Path, num_synth: int = 5000
             str(blend_path),
             "--meta_path",
             str(meta_path),
+            "--limits_path",
+            str(limits_path),
             "--out_dir",
             str(exam_dir),
             "--exam_frames",
@@ -368,6 +390,7 @@ def reexam_existing_monster(monster_id: str, rerender_exam: bool = False) -> dic
     monster_work = WORK_ROOT / "work" / monster_id
     blend_path = monster_drive / "rigged_pruned.blend"
     meta_path = monster_drive / "studio_rig_meta.json"
+    limits_path = monster_drive / "joint_limits.json"
     ckpt_path = monster_drive / "dinov2_head.pt"
     exam_dir = monster_work / "studio_exam"
     exam_report_path = monster_drive / "exam_report.json"
@@ -379,22 +402,23 @@ def reexam_existing_monster(monster_id: str, rerender_exam: bool = False) -> dic
     py_bpy = str(SKINTOKENS_PY) if SKINTOKENS_PY.exists() else sys.executable
 
     if rerender_exam or not (exam_dir / "exam_gt.json").exists():
-        run_cmd(
-            [
-                py_bpy,
-                str(bpy_worker),
-                "--mode",
-                "render_exam",
-                "--blend_path",
-                str(blend_path),
-                "--meta_path",
-                str(meta_path),
-                "--out_dir",
-                str(exam_dir),
-                "--exam_frames",
-                "96",
-            ]
-        )
+        render_exam_cmd = [
+            py_bpy,
+            str(bpy_worker),
+            "--mode",
+            "render_exam",
+            "--blend_path",
+            str(blend_path),
+            "--meta_path",
+            str(meta_path),
+            "--out_dir",
+            str(exam_dir),
+            "--exam_frames",
+            "96",
+        ]
+        if limits_path.exists():
+            render_exam_cmd.extend(["--limits_path", str(limits_path)])
+        run_cmd(render_exam_cmd)
 
     run_cmd(
         [
@@ -413,22 +437,23 @@ def reexam_existing_monster(monster_id: str, rerender_exam: bool = False) -> dic
 
     pred_traj_json = exam_dir / "exam_pred_traj.json"
     if pred_traj_json.exists() and blend_path.exists():
-        run_cmd(
-            [
-                py_bpy,
-                str(bpy_worker),
-                "--mode",
-                "bake_ik",
-                "--blend_path",
-                str(blend_path),
-                "--meta_path",
-                str(meta_path),
-                "--joints_json",
-                str(pred_traj_json),
-                "--out_glb",
-                str(reexam_glb_path),
-            ]
-        )
+        bake_cmd = [
+            py_bpy,
+            str(bpy_worker),
+            "--mode",
+            "bake_ik",
+            "--blend_path",
+            str(blend_path),
+            "--meta_path",
+            str(meta_path),
+            "--joints_json",
+            str(pred_traj_json),
+            "--out_glb",
+            str(reexam_glb_path),
+        ]
+        if limits_path.exists():
+            bake_cmd.extend(["--limits_path", str(limits_path)])
+        run_cmd(bake_cmd)
         run_cmd(
             [
                 py_bpy,
@@ -942,22 +967,24 @@ def animate_monster_actions(
         free_comfyui_vram()
         if bake_glb_on_cloud:
             out_glb = anim_out_dir / f"{action_name}_animated.glb"
-            run_cmd(
-                [
-                    py_bpy,
-                    str(bpy_worker),
-                    "--mode",
-                    "bake_ik",
-                    "--blend_path",
-                    str(blend_path),
-                    "--meta_path",
-                    str(monster_drive / "studio_rig_meta.json"),
-                    "--joints_json",
-                    str(traj_json),
-                    "--out_glb",
-                    str(out_glb),
-                ]
-            )
+            bake_cmd = [
+                py_bpy,
+                str(bpy_worker),
+                "--mode",
+                "bake_ik",
+                "--blend_path",
+                str(blend_path),
+                "--meta_path",
+                str(monster_drive / "studio_rig_meta.json"),
+                "--joints_json",
+                str(traj_json),
+                "--out_glb",
+                str(out_glb),
+            ]
+            limits_path = monster_drive / "joint_limits.json"
+            if limits_path.exists():
+                bake_cmd.extend(["--limits_path", str(limits_path)])
+            run_cmd(bake_cmd)
             completed_glbs.append(out_glb.name)
             print(f"[PHASE B COMPLETE] Exported animated 3D asset: {out_glb}")
     return completed_glbs

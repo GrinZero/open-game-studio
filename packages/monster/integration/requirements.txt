@@ -1,2 +1,4 @@
 # CPU-only client; do not install the GPU worker's dependencies locally.
 gradio-client>=1.4.0,<2
+# G1 review videos carry candidate, view and frame labels on every panel.
+Pillow>=10.1,<14

@@ -1718,7 +1718,31 @@ class MonsterSopExecutionSuiteTests(unittest.TestCase):
                 ])
                 self.assertEqual(rc_g1, 0)
 
-                # 3. Stage 3 G2 50-pose Pack
+                # 2b. Post-G1 Joint Limits Probe & Agent Customizer
+                rc_jl_probe = monster_sop.main([
+                    "joint-limits",
+                    "--monster-id", "troll_01",
+                    "--project-root", str(proj_root),
+                    "--drive-root", str(drive_root),
+                    "probe",
+                    "--archetype", "humanoid",
+                ])
+                self.assertEqual(rc_jl_probe, 0)
+                rc_jl_apply = monster_sop.main([
+                    "joint-limits",
+                    "--monster-id", "troll_01",
+                    "--project-root", str(proj_root),
+                    "--drive-root", str(drive_root),
+                    "apply",
+                    "--set-bone", "SPINE_C_00_01=-28:32,-20:20,-35:35",
+                    "--set-root-pitch", "-24:24",
+                    "--set-root-roll", "-18:18",
+                    "--set-root-yaw", "-180:180",
+                    "--notes", "Agent 定制动作无关完整运动包络",
+                ])
+                self.assertEqual(rc_jl_apply, 0)
+
+                # 3. Stage 3 G2 50-pose Pack (Boundary Exploration)
                 with patch.object(sop_g2_pack, "_worker_command", return_value=None):
                     g2_rep = sop_g2_pack.build_g2_review_pack(
                         monster_id="troll_01",
@@ -1728,6 +1752,8 @@ class MonsterSopExecutionSuiteTests(unittest.TestCase):
                         drive_root=drive_root,
                     )
                 self.assertEqual(g2_rep["num_poses"], 50)
+                self.assertTrue(g2_rep["boundary_exploration_passed"])
+                self.assertTrue(Path(g2_rep["joint_limits_path"]).is_file())
                 self.assertTrue(Path(g2_rep["overview_jpg"]).is_file())
                 self.assertTrue(Path(g2_rep["review_html"]).is_file())
 
@@ -1848,6 +1874,168 @@ class MonsterSopExecutionSuiteTests(unittest.TestCase):
         finally:
             os.environ.pop("MONSTER_SKIP_PS_SCAN", None)
             sys.path.remove(scripts_dir)
+
+    def test_post_g1_joint_limits_probe_customizer_and_g2_boundary_exploration(self):
+        import math
+        import random
+
+        sys.path.insert(0, str(ROOT / "worker"))
+        try:
+            import bone_taxonomy as tax
+
+            raw_bones = {
+                "ROOT_C_00_00": {
+                    "parent": None,
+                    "rest_head_world": [0.0, 0.0, 0.50],
+                    "rest_tail_world": [0.0, 0.0, 0.65],
+                    "rest_length": 0.15,
+                    "limits_rad": [[-0.2, 0.2], [-0.2, 0.2], [-0.2, 0.2]],
+                    "limits_source": "stage1_heuristic",
+                },
+                "SPINE_C_00_01": {
+                    "parent": "ROOT_C_00_00",
+                    "rest_head_world": [0.0, 0.0, 0.65],
+                    "rest_tail_world": [0.0, 0.0, 0.90],
+                    "rest_length": 0.25,
+                },
+                "LIMB_L_01_00": {
+                    "parent": "SPINE_C_00_01",
+                    "rest_head_world": [0.10, 0.0, 0.85],
+                    "rest_tail_world": [0.28, 0.0, 0.72],
+                    "rest_length": 0.22,
+                },
+                "LIMB_L_01_01": {
+                    "parent": "LIMB_L_01_00",
+                    "rest_head_world": [0.28, 0.0, 0.72],
+                    "rest_tail_world": [0.42, -0.05, 0.56],
+                    "rest_length": 0.21,
+                },
+                "LIMB_R_01_00": {
+                    "parent": "SPINE_C_00_01",
+                    "rest_head_world": [-0.10, 0.0, 0.85],
+                    "rest_tail_world": [-0.28, 0.0, 0.72],
+                    "rest_length": 0.22,
+                },
+                "LIMB_R_01_01": {
+                    "parent": "LIMB_R_01_00",
+                    "rest_head_world": [-0.28, 0.0, 0.72],
+                    "rest_tail_world": [-0.42, -0.05, 0.56],
+                    "rest_length": 0.21,
+                },
+            }
+            classified = tax.classify_rig_bones(
+                raw_bones, bbox_min=[-0.5, -0.4, 0.0], bbox_max=[0.5, 0.4, 1.2]
+            )
+            # 1. Verify stage1_heuristic limits are upgraded to canonical defaults during classify_rig_bones
+            self.assertEqual(classified["ROOT_C_00_00"]["limits_source"], "canonical_default")
+
+            # 2. Run Geometric & LBS Axis Probe
+            profile = tax.probe_rig_joint_limits(
+                classified,
+                monster_id="behemoth_01",
+                archetype="humanoid",
+                bbox_min=[-0.5, -0.4, 0.0],
+                bbox_max=[0.5, 0.4, 1.2],
+            )
+            self.assertEqual(profile["schema"], tax.JOINT_LIMITS_SCHEMA)
+            self.assertIn("root_motion", profile)
+            self.assertIn("LIMB_L_01_00", profile["bones"])
+            self.assertIn("rx", profile["bones"]["LIMB_L_01_00"]["axis_semantics"])
+
+            # 3. Apply custom Agent-authored narrower limits on SPINE_C_00_01 and verify
+            # effective_sampling_limits_for_bone respects agent_custom without expanding to 65% floor
+            profile["bones"]["SPINE_C_00_01"]["limits_deg"] = {
+                "rx": [-12.0, 14.0],
+                "ry": [-8.0, 8.0],
+                "rz": [-10.0, 10.0],
+            }
+            profile["bones"]["SPINE_C_00_01"]["source"] = "agent_custom"
+            applied = tax.apply_joint_limits_profile(classified, profile)
+            eff_spine = tax.effective_sampling_limits_for_bone(
+                applied["SPINE_C_00_01"], enforce_anatomical_floor=True
+            )
+            self.assertAlmostEqual(math.degrees(eff_spine[0][0]), -12.0, places=1)
+            self.assertAlmostEqual(math.degrees(eff_spine[0][1]), 14.0, places=1)
+
+            # 4. Run 50-pose Stratified Boundary-Exploration Random Suite and verify dual-sided boundary coverage
+            rng = random.Random(42)
+            samples = []
+            regimes_seen = set()
+            for idx in range(50):
+                eulers, regime, b_info = tax.sample_boundary_exploration_pose_euler_dict(
+                    applied,
+                    rng=rng,
+                    sample_idx=idx,
+                    total_samples=50,
+                    joint_limits_profile=profile,
+                )
+                regimes_seen.add(regime)
+                # Every sampled angle must stay strictly within configured limits
+                for b_n, rot in eulers.items():
+                    lims = tax.effective_sampling_limits_for_bone(applied[b_n])
+                    for ax_i in range(3):
+                        self.assertGreaterEqual(rot[ax_i], lims[ax_i][0] - 1e-4)
+                        self.assertLessEqual(rot[ax_i], lims[ax_i][1] + 1e-4)
+                samples.append({"sampling_regime": regime, "joints": eulers, "boundary_info": b_info})
+
+            self.assertEqual(len(regimes_seen), 5)
+            b_audit = tax.audit_boundary_exploration_coverage(samples, applied)
+            self.assertTrue(b_audit["passed"])
+            self.assertEqual(b_audit["dual_boundary_touch_rate"], 1.0)
+
+            # 5. Verify downstream kinematic solver & triangulation coupling with joint_limits.json
+            with tempfile.TemporaryDirectory() as tmp_d:
+                lim_file = Path(tmp_d) / "joint_limits.json"
+                profile["bones"]["LIMB_L_01_01"]["limits_deg"] = {
+                    "rx": [-10.0, 10.0],
+                    "ry": [-5.0, 5.0],
+                    "rz": [-8.0, 8.0],
+                }
+                profile["bones"]["LIMB_L_01_01"]["source"] = "agent_custom"
+                lim_file.write_text(json.dumps(profile), encoding="utf-8")
+
+                resolved_prof, resolved_path = tax.resolve_joint_limits_profile_from_paths(
+                    Path(tmp_d) / "studio_rig_meta.json"
+                )
+                self.assertIsNotNone(resolved_prof)
+                self.assertEqual(Path(resolved_path), lim_file)
+
+                coupled_bones = tax.apply_joint_limits_profile(classified, resolved_prof)
+                bone_names = sorted(coupled_bones.keys())
+                T = 6
+                pts_3d = tax.np.zeros((T, 2 * len(bone_names), 3), dtype=tax.np.float64)
+                trust = tax.np.full((T, 2 * len(bone_names)), 0.95, dtype=tax.np.float64)
+                for b_i, bn in enumerate(bone_names):
+                    pts_3d[:, 2 * b_i] = coupled_bones[bn]["rest_head_world"]
+                    pts_3d[:, 2 * b_i + 1] = coupled_bones[bn]["rest_tail_world"]
+                # Deflect LIMB_L_01_01 tail strongly in +Z/+Y (well beyond 10 deg)
+                l_idx = bone_names.index("LIMB_L_01_01")
+                pts_3d[:, 2 * l_idx + 1] = tax.np.array([0.42, 0.25, 0.92], dtype=tax.np.float64)
+
+                frames_solved, diag = tax.reconstruct_frames_with_kind_solvers(
+                    pts_3d=pts_3d,
+                    trust=trust,
+                    bone_names=bone_names,
+                    classified_bones=coupled_bones,
+                )
+                self.assertLessEqual(diag["final_limit_max_violation_rad"], 1e-4)
+                R_parent = tax.np.asarray(frames_solved[-1]["bones"]["LIMB_L_01_00"]["rot_mat_world"])
+                R_child = tax.np.asarray(frames_solved[-1]["bones"]["LIMB_L_01_01"]["rot_mat_world"])
+                v0_p = tax.np.asarray(coupled_bones["LIMB_L_01_00"]["rest_tail_world"]) - tax.np.asarray(
+                    coupled_bones["LIMB_L_01_00"]["rest_head_world"]
+                )
+                v0_c = tax.np.asarray(coupled_bones["LIMB_L_01_01"]["rest_tail_world"]) - tax.np.asarray(
+                    coupled_bones["LIMB_L_01_01"]["rest_head_world"]
+                )
+                R_rest_p = tax._build_default_rest_rot_matrix(v0_p / float(tax.np.linalg.norm(v0_p)))
+                R_rest_c = tax._build_default_rest_rot_matrix(v0_c / float(tax.np.linalg.norm(v0_c)))
+                R_init_c = R_parent @ (R_rest_p.T @ R_rest_c)
+                eul_c = tax.matrix_to_euler_xyz_numpy(R_init_c.T @ R_child)
+                self.assertLessEqual(abs(math.degrees(float(eul_c[0]))), 10.05)
+                self.assertLessEqual(abs(math.degrees(float(eul_c[1]))), 5.05)
+                self.assertLessEqual(abs(math.degrees(float(eul_c[2]))), 8.05)
+        finally:
+            sys.path.remove(str(ROOT / "worker"))
 
 
 if __name__ == "__main__":

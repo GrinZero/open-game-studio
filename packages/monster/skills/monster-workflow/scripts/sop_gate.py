@@ -336,6 +336,13 @@ def derive_invalidations(
     ):
         mark(["G2", "G3", "final_batch"], "G2 采样策略签名或固定 seed 变更（保留 G1，自动失效 G2/G3）")
 
+    if (
+        old_fp.get("joint_limits_sha256")
+        and cur_fp.get("joint_limits_sha256")
+        and old_fp["joint_limits_sha256"] != cur_fp["joint_limits_sha256"]
+    ):
+        mark(["G2", "G3", "final_batch"], "joint_limits.json 关节角度限制变更（保留 G1，自动失效 G2/G3 及下游）")
+
     if old_cfg and new_studio_config:
         old_res_view = (old_cfg.get("composite_width"), old_cfg.get("composite_height"), old_cfg.get("num_views"))
         cur_res_view = (cur_cfg.get("composite_width"), cur_cfg.get("composite_height"), cur_cfg.get("num_views"))

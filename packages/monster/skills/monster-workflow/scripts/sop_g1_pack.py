@@ -171,6 +171,7 @@ def _encode_sync_comparison_video(
     out_mp4: Path,
     frame_images: list[Path],
     fps: int = 24,
+    candidate_view: str | None = None,
 ) -> Path:
     """Encodes a real MP4 video from `frame_images` via `ffmpeg` and validates MP4 box integrity.
     Never writes a 24-byte `ftyp` placeholder stub.
@@ -185,6 +186,28 @@ def _encode_sync_comparison_video(
         raise RuntimeError("缺少 ffmpeg 运行时，无法编码真实 G1/G3 同步对比 MP4 视频")
 
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
+    # Keep identification inside the video when it is viewed outside the review page.
+    if candidate_view is not None:
+        from PIL import Image, ImageDraw, ImageFont
+
+        with tempfile.TemporaryDirectory(prefix="monster_g1_labels_") as temp:
+            labelled_frames = []
+            for index, frame_path in enumerate(frame_images):
+                with Image.open(frame_path) as source:
+                    frame = source.convert("RGB")
+                draw = ImageDraw.Draw(frame)
+                font = ImageFont.load_default(size=20)
+                for candidate_id in range(4):
+                    x = (candidate_id % 2) * (frame.width // 2) + 12
+                    y = (candidate_id // 2) * (frame.height // 2) + 12
+                    label = f"Candidate {candidate_id} | {candidate_view} | Frame {index + 1:03d}/{len(frame_images):03d}"
+                    bounds = draw.textbbox((x, y), label, font=font)
+                    draw.rectangle((bounds[0]-6, bounds[1]-4, bounds[2]+6, bounds[3]+4), fill=(12, 18, 26))
+                    draw.text((x, y), label, font=font, fill="white")
+                target = Path(temp) / f"sync_frame_{index + 1:04d}.png"
+                frame.save(target)
+                labelled_frames.append(target)
+            return _encode_sync_comparison_video(out_mp4, labelled_frames, fps=fps)
     pattern = str(Path(frame_images[0]).parent / "sync_frame_%04d.png")
 
     codec_attempts = [
@@ -577,7 +600,7 @@ def build_g1_review_pack(
 
                 mp4_name = f"g1_candidates_sync_{v_name}.mp4"
                 staged_mp4 = stage_dir / mp4_name
-                _encode_sync_comparison_video(staged_mp4, frame_images, fps=eff_fps)
+                _encode_sync_comparison_video(staged_mp4, frame_images, fps=eff_fps, candidate_view=v_name)
                 box_rep = _validate_mp4_file(staged_mp4)
 
                 dest_mp4 = checks_dir / mp4_name

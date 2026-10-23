@@ -27,6 +27,7 @@ Architecture:
 from __future__ import annotations
 
 import copy
+import json
 import math
 import re
 import sys
@@ -51,6 +52,7 @@ from mocap_priors import (  # noqa: E402
 )
 
 BONE_TAXONOMY_SCHEMA = "monster-bone-taxonomy-v2"
+JOINT_LIMITS_SCHEMA = "monster-joint-limits-v1"
 DEFAULT_SYNTH_SAMPLES = 5000
 
 POSE_SAMPLING_REGIMES: tuple[str, ...] = (
@@ -58,6 +60,14 @@ POSE_SAMPLING_REGIMES: tuple[str, ...] = (
     "decoupled",
     "antiphase_extreme",
     "workspace_cross_occlusion",
+)
+
+G2_BOUNDARY_REGIMES: tuple[str, ...] = (
+    "in_phase_boundary_extension",
+    "antiphase_fold_boundary",
+    "cross_occlusion_twist_boundary",
+    "full_body_dynamic_root_boundary",
+    "quasi_uniform_interior_coverage",
 )
 
 CANONICAL_KINDS: tuple[str, ...] = (
@@ -617,7 +627,8 @@ def classify_rig_bones(
         grp = bone_group_id.get(b, 0)
         c_idx = bone_chain_idx.get(b, 1)
         is_leaf = len(children_map[b]) == 0
-        has_custom_limits = bool(info.get("limits_rad"))
+        lim_src = str(info.get("limits_source", ""))
+        has_custom_limits = bool(info.get("limits_rad")) and lim_src != "stage1_heuristic"
         def_lims, def_corr, def_fixed = default_limits_and_corr_for_kind(k, sub, is_leaf=is_leaf)
 
         info["kind"] = k
@@ -633,7 +644,9 @@ def classify_rig_bones(
         info["is_primary"] = k != "digit"
         if not has_custom_limits:
             info["limits_rad"] = [[round(lo, 4), round(hi, 4)] for (lo, hi) in def_lims]
-        if "chain_corr" not in info or info["chain_corr"] is None:
+            if not lim_src or lim_src == "stage1_heuristic":
+                info["limits_source"] = "canonical_default"
+        if "chain_corr" not in info or info["chain_corr"] is None or lim_src == "stage1_heuristic":
             info["chain_corr"] = 0.0 if has_custom_limits else def_corr
 
     return meta
@@ -1298,6 +1311,7 @@ def solve_bone_rotation_by_kind(
 
     # 3. Limb Solver: Gimbal-Free Swing-Twist + Palm Centroid Swing (`hand_hub`) + Child-Pivot Swing-Twist (`forearm_hinge`)
     if kind == "limb":
+        explicit_custom = lims_override is not None or str(info.get("limits_source", "")) in ("agent_custom", "probe_initial")
         h_b_obs = np.array(obs_lookup.get(b_name, b_data)["head_3d"], dtype=np.float64)
         t_b_obs = np.array(obs_lookup.get(b_name, b_data)["tail_3d"], dtype=np.float64)
         obs_dir = t_b_obs - h_b_obs
@@ -1315,7 +1329,8 @@ def solve_bone_rotation_by_kind(
             # its direct swing has <0.01 deg error; otherwise fuse with the single rest-to-observed palm centroid
             # vector and damp local wrist deflection to prevent 90-degree wrist snaps from finger keypoint scatter.
             if abs(norm_obs_dir - rest_len_b) < 0.04 * rest_len_b and conf_b >= 0.98:
-                return R_init @ R_sw_self, 0.0
+                delta_self = clamp_local_delta_euler(R_sw_self, lims) if explicit_custom else R_sw_self
+                return R_init @ delta_self, 0.0
 
             v_palm_rest = (rest_t_b - rest_h_b) / rest_len_b * conf_b
             v_palm_obs = (obs_dir / max(1e-8, norm_obs_dir)) * conf_b
@@ -1346,6 +1361,8 @@ def solve_bone_rotation_by_kind(
                 R_sw_comb = R_sw_self
 
             R_sw_damped = blend_rotation_matrices_slerp(np.eye(3, dtype=np.float64), R_sw_comb, 0.68, 25.0)
+            if explicit_custom:
+                R_sw_damped = clamp_local_delta_euler(R_sw_damped, lims)
             return R_init @ R_sw_damped, 0.0
 
         if sub_role == "forearm_hinge" and len(valid_children) == 1:
@@ -1402,10 +1419,17 @@ def solve_bone_rotation_by_kind(
                         w_tau = w_clean * 1.0 + (1.0 - w_clean) * w_tau_noisy
                         max_tau = math.radians(65.0) if w_clean > 0.5 else math.radians(42.0)
                         tau = float(np.clip(w_tau * tau_raw, -max_tau, max_tau))
-                    return R_init @ build_swing_twist_local_rotation(d_loc, tau), tau
+                        if explicit_custom and (ry_hi - ry_lo) > 1e-6:
+                            tau = float(np.clip(tau, ry_lo, ry_hi))
+                    R_loc_fa = build_swing_twist_local_rotation(d_loc, tau)
+                    if explicit_custom:
+                        R_loc_fa = clamp_local_delta_euler(R_loc_fa, lims)
+                    return R_init @ R_loc_fa, tau
 
         if sub_role not in ("upper_limb", "forearm_hinge", "ball_socket"):
             R_sw = minimum_swing_matrix_numpy(np.array([0.0, 1.0, 0.0], dtype=np.float64), d_loc)
+            if explicit_custom:
+                R_sw = clamp_local_delta_euler(R_sw, lims)
             return R_init @ R_sw, 0.0
 
     # 4. Spine / Head / Jaw / Flex / Tail / Wing Solver (Bounded Local-Euler + Child Observability)
@@ -1859,15 +1883,17 @@ def reconstruct_frames_with_kind_solvers(
         info = classified_bones[n]
         raw_lims = copy.deepcopy(info["limits_rad"])
         sub = str(info.get("sub_role", ""))
-        if sub == "hand_hub":
-            max_abs = max(abs(float(pair[0])) for pair in raw_lims)
-            max_abs = max(max_abs, max(abs(float(pair[1])) for pair in raw_lims))
-            if max_abs > deg(45.0):
-                raw_lims = [[-deg(32.0), deg(32.0)], [-deg(12.0), deg(12.0)], [-deg(28.0), deg(28.0)]]
-        elif sub == "forearm_hinge":
-            max_span = max(float(pair[1]) - float(pair[0]) for pair in raw_lims)
-            if max_span > deg(130.0):
-                raw_lims = [[-math.pi, math.pi], [-math.pi, math.pi], [-math.pi, math.pi]]
+        lim_src = str(info.get("limits_source", ""))
+        if lim_src not in ("agent_custom", "probe_initial"):
+            if sub == "hand_hub":
+                max_abs = max(abs(float(pair[0])) for pair in raw_lims)
+                max_abs = max(max_abs, max(abs(float(pair[1])) for pair in raw_lims))
+                if max_abs > deg(45.0):
+                    raw_lims = [[-deg(32.0), deg(32.0)], [-deg(12.0), deg(12.0)], [-deg(28.0), deg(28.0)]]
+            elif sub == "forearm_hinge":
+                max_span = max(float(pair[1]) - float(pair[0]) for pair in raw_lims)
+                if max_span > deg(130.0):
+                    raw_lims = [[-math.pi, math.pi], [-math.pi, math.pi], [-math.pi, math.pi]]
         effective_base_limits[n] = raw_lims
 
     axial_nodes = [
@@ -2492,10 +2518,10 @@ def effective_sampling_limits_for_bone(
     info: dict[str, Any], enforce_anatomical_floor: bool = True
 ) -> list[list[float]]:
     """Returns effective `[[rx_lo, rx_hi], [ry_lo, ry_hi], [rz_lo, rz_hi]]` radians for Stage 2 pose
-    synthesis. When `enforce_anatomical_floor=True`, expands overly narrow empirical limits (e.g.,
-    a digit or limb joint that barely moved in template clips) to at least 65% of the canonical
-    anatomical envelope for its `(kind, sub_role)` so synthetic training data never has frozen-joint
-    blind spots.
+    synthesis. When `enforce_anatomical_floor=True` and `limits_source` is not `"agent_custom"` /
+    `"probe_initial"`, expands overly narrow empirical limits (e.g., a digit or limb joint that barely
+    moved in template clips) to at least 65% of the canonical anatomical envelope for its `(kind, sub_role)`.
+    Explicitly configured limits (`limits_source in ("agent_custom", "probe_initial")`) are respected as-is.
     """
     kind = str(info.get("kind", "limb"))
     if kind == "rigid" or bool(info.get("fixed_local", False)):
@@ -2503,6 +2529,8 @@ def effective_sampling_limits_for_bone(
 
     sub_role = str(info.get("sub_role", ""))
     is_leaf = not bool(info.get("children"))
+    lim_src = str(info.get("limits_source", ""))
+    explicit_custom = lim_src in ("agent_custom", "probe_initial")
     def_lims, _, _ = default_limits_and_corr_for_kind(kind, sub_role, is_leaf=is_leaf)
     raw_lims = info.get("limits_rad")
     if not isinstance(raw_lims, list) or len(raw_lims) != 3:
@@ -2512,16 +2540,522 @@ def effective_sampling_limits_for_bone(
     for ax in range(3):
         lo = float(raw_lims[ax][0])
         hi = float(raw_lims[ax][1])
-        if enforce_anatomical_floor and kind in ("digit", "limb", "flex", "tail", "wing", "head", "jaw"):
+        if (
+            enforce_anatomical_floor
+            and not explicit_custom
+            and kind in ("digit", "limb", "flex", "tail", "wing", "head", "jaw")
+        ):
             def_lo, def_hi = float(def_lims[ax][0]), float(def_lims[ax][1])
             def_span = def_hi - def_lo
             if (hi - lo) < 0.50 * def_span:
                 lo = min(lo, 0.65 * def_lo)
                 hi = max(hi, 0.65 * def_hi)
-        if is_leaf and ax == 1:
+        if is_leaf and ax == 1 and not bool(info.get("allow_leaf_twist", False)):
             lo, hi = 0.0, 0.0
         out.append([lo, hi])
     return out
+
+
+def resolve_joint_limits_profile_from_paths(
+    *search_paths: str | Path | None,
+    fallback_profile: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Resolves `joint_limits.json` (`monster-joint-limits-v1`) from explicit file paths or
+    directories/parent directories of `meta_path`, `ckpt_path`, `synth_dir`, `exam_dir`, `blend_path`,
+    falling back to `fallback_profile` when no on-disk `joint_limits.json` is found.
+    """
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def _add(p: Path) -> None:
+        key = str(p)
+        if key not in seen:
+            seen.add(key)
+            candidates.append(p)
+
+    for raw in search_paths:
+        if not raw:
+            continue
+        p = Path(raw)
+        if p.name == "joint_limits.json" or p.suffix.lower() == ".json" and "limit" in p.name.lower():
+            _add(p)
+        if p.is_dir():
+            _add(p / "joint_limits.json")
+            _add(p.parent / "joint_limits.json")
+        else:
+            _add(p.parent / "joint_limits.json")
+            _add(p.parent.parent / "joint_limits.json")
+
+    for cand in candidates:
+        if cand.is_file():
+            try:
+                profile = json.loads(cand.read_text(encoding="utf-8"))
+                if isinstance(profile, dict) and (
+                    profile.get("schema") == JOINT_LIMITS_SCHEMA or isinstance(profile.get("bones"), dict)
+                ):
+                    return profile, str(cand)
+            except Exception:
+                pass
+
+    if isinstance(fallback_profile, dict) and (
+        fallback_profile.get("schema") == JOINT_LIMITS_SCHEMA or isinstance(fallback_profile.get("bones"), dict)
+    ):
+        return copy.deepcopy(fallback_profile), None
+    return None, None
+
+
+def apply_joint_limits_profile(
+    bones_meta: dict[str, dict[str, Any]],
+    joint_limits_profile: dict[str, Any] | None = None,
+    bbox_min: list[float] | None = None,
+    bbox_max: list[float] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Merges a per-monster `joint_limits.json` deliverable (`monster-joint-limits-v1`) into `bones_meta`,
+    updating both local per-bone `limits_rad` / `limits_deg` / `chain_corr` / `fixed_local` / `limits_source`
+    and the global `ROOT` orientation & translation envelope (`global_root`).
+    """
+    first_info = next(iter(bones_meta.values())) if bones_meta else {}
+    classified = (
+        copy.deepcopy(bones_meta)
+        if ("kind" in first_info and "sub_role" in first_info and "group_id" in first_info)
+        else classify_rig_bones(bones_meta, bbox_min=bbox_min, bbox_max=bbox_max)
+    )
+    if not joint_limits_profile or not isinstance(joint_limits_profile, dict):
+        return classified
+
+    deg = math.radians
+    profile_source = str(joint_limits_profile.get("authored_by") or "agent_custom")
+    if profile_source not in ("agent_custom", "probe_initial", "canonical_default"):
+        profile_source = "agent_custom"
+
+    global_root = copy.deepcopy(joint_limits_profile.get("global_root") or {})
+    root_motion = joint_limits_profile.get("root_motion")
+    if isinstance(root_motion, dict):
+        if "translation_fraction_xyz" in root_motion and "translation_fraction_xyz" not in global_root:
+            global_root["translation_fraction_xyz"] = copy.deepcopy(root_motion["translation_fraction_xyz"])
+        if "max_translation_world_xyz" in root_motion and "max_translation_world_xyz" not in global_root:
+            global_root["max_translation_world_xyz"] = copy.deepcopy(root_motion["max_translation_world_xyz"])
+        if all(k in root_motion for k in ("global_pitch_deg", "global_yaw_deg", "global_roll_deg")) and "rotation_limits_deg" not in global_root:
+            global_root["rotation_limits_deg"] = [
+                list(root_motion["global_pitch_deg"]),
+                list(root_motion["global_yaw_deg"]),
+                list(root_motion["global_roll_deg"]),
+            ]
+    p_bones = joint_limits_profile.get("bones") or {}
+
+    roots = [b for b in sorted(classified) if classified[b].get("kind") == "root" or not classified[b].get("parent")]
+    primary_root = roots[0] if roots else (sorted(classified)[0] if classified else None)
+
+    for b_name, info in classified.items():
+        if b_name in p_bones and isinstance(p_bones[b_name], dict):
+            b_prof = p_bones[b_name]
+            if "fixed_local" in b_prof:
+                info["fixed_local"] = bool(b_prof["fixed_local"])
+            if bool(info.get("fixed_local", False)) or info.get("kind") == "rigid":
+                info["limits_deg"] = [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]
+                info["limits_rad"] = [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]
+            elif "limits_deg" in b_prof and isinstance(b_prof["limits_deg"], dict):
+                d_map = b_prof["limits_deg"]
+                ldeg = [
+                    [round(float(d_map.get(ax, [-15.0, 15.0])[0]), 2), round(float(d_map.get(ax, [-15.0, 15.0])[1]), 2)]
+                    for ax in ("rx", "ry", "rz")
+                ]
+                info["limits_deg"] = ldeg
+                info["limits_rad"] = [[round(deg(pair[0]), 4), round(deg(pair[1]), 4)] for pair in ldeg]
+            elif "limits_deg" in b_prof and isinstance(b_prof["limits_deg"], list) and len(b_prof["limits_deg"]) == 3:
+                ldeg = [[round(float(pair[0]), 2), round(float(pair[1]), 2)] for pair in b_prof["limits_deg"]]
+                info["limits_deg"] = ldeg
+                info["limits_rad"] = [[round(deg(pair[0]), 4), round(deg(pair[1]), 4)] for pair in ldeg]
+            elif "limits_rad" in b_prof and isinstance(b_prof["limits_rad"], list) and len(b_prof["limits_rad"]) == 3:
+                lrad = [[round(float(pair[0]), 4), round(float(pair[1]), 4)] for pair in b_prof["limits_rad"]]
+                info["limits_rad"] = lrad
+                info["limits_deg"] = [
+                    [round(math.degrees(pair[0]), 2), round(math.degrees(pair[1]), 2)] for pair in lrad
+                ]
+            if "chain_corr" in b_prof and b_prof["chain_corr"] is not None:
+                info["chain_corr"] = round(float(b_prof["chain_corr"]), 3)
+            if "axis_semantics" in b_prof:
+                info["axis_semantics"] = copy.deepcopy(b_prof["axis_semantics"])
+            if "probe_safe_limits_deg" in b_prof:
+                info["probe_safe_limits_deg"] = copy.deepcopy(b_prof["probe_safe_limits_deg"])
+            if "canonical_default_limits_deg" in b_prof:
+                info["canonical_default_limits_deg"] = copy.deepcopy(b_prof["canonical_default_limits_deg"])
+            if "rationale" in b_prof:
+                info["rationale"] = str(b_prof["rationale"])
+            info["limits_source"] = str(b_prof.get("limits_source") or b_prof.get("source") or profile_source)
+
+        if b_name == primary_root and global_root:
+            info["global_root"] = copy.deepcopy(global_root)
+            rot_deg = global_root.get("rotation_limits_deg")
+            if isinstance(rot_deg, list) and len(rot_deg) == 3 and b_name not in p_bones:
+                ldeg = [[round(float(pair[0]), 2), round(float(pair[1]), 2)] for pair in rot_deg]
+                info["limits_deg"] = ldeg
+                info["limits_rad"] = [[round(deg(pair[0]), 4), round(deg(pair[1]), 4)] for pair in ldeg]
+                info["limits_source"] = profile_source
+            elif "limits_deg" in info:
+                info["global_root"]["rotation_limits_deg"] = copy.deepcopy(info["limits_deg"])
+
+    return classified
+
+
+def _describe_world_motion_vector(delta_vec: np.ndarray, side: str = "C", is_axial_twist: bool = False, sign: str = "+") -> str:
+    """Translates a 3D world-space tip displacement vector `[dx, dy, dz]` (under character convention:
+    `-Y` = Forward toward Cam_Front, `+Y` = Backward, `+Z` = Up, `-Z` = Down, `+X` = Left, `-X` = Right)
+    into a deterministic anatomical motion descriptor for Agent & human review.
+    """
+    if is_axial_twist or float(np.linalg.norm(delta_vec)) < 1e-5:
+        return f"axial_twist ({sign}shaft_roll)"
+
+    u = delta_vec / float(np.linalg.norm(delta_vec))
+    dx, dy, dz = float(u[0]), float(u[1]), float(u[2])
+
+    def _axis_label(axis_idx: int, val: float) -> tuple[str, str]:
+        if axis_idx == 0:
+            coord = "+X" if val >= 0.0 else "-X"
+            if side == "L":
+                sem = "lateral_outward" if val >= 0.0 else "medial_inward"
+            elif side == "R":
+                sem = "lateral_outward" if val < 0.0 else "medial_inward"
+            else:
+                sem = "lean_left" if val >= 0.0 else "lean_right"
+            return sem, coord
+        if axis_idx == 1:
+            return ("backward" if val >= 0.0 else "forward"), ("+Y" if val >= 0.0 else "-Y")
+        return ("up" if val >= 0.0 else "down"), ("+Z" if val >= 0.0 else "-Z")
+
+    comps = sorted([(0, abs(dx), dx), (1, abs(dy), dy), (2, abs(dz), dz)], key=lambda item: item[1], reverse=True)
+    prim_sem, prim_coord = _axis_label(comps[0][0], comps[0][2])
+    if comps[1][1] >= 0.38 * comps[0][1]:
+        sec_sem, sec_coord = _axis_label(comps[1][0], comps[1][2])
+        return f"{prim_sem}_{sec_sem} ({prim_coord},{sec_coord})"
+    return f"{prim_sem} ({prim_coord})"
+
+
+def _probe_safe_ceiling_deg_for_kind(kind: str, sub_role: str = "", is_leaf: bool = False) -> list[list[float]]:
+    """Returns the upper physical probe ceiling `[[rx_lo, rx_hi], [ry_lo, ry_hi], [rz_lo, rz_hi]]` in degrees
+    before mesh-stretch clamping, representing the generous action-general envelope for a given bone role.
+    """
+    if kind == "rigid":
+        return [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]
+    if kind == "root":
+        return [[-28.0, 32.0], [-22.0, 22.0], [-25.0, 25.0]]
+    if kind == "spine":
+        return [[-22.0, 24.0], [-10.0, 10.0], [-20.0, 20.0]]
+    if kind == "head":
+        return [[-30.0, 30.0], [-28.0, 28.0], [-26.0, 26.0]]
+    if kind == "jaw":
+        return [[-4.0, 42.0], [-4.0, 4.0], [-5.0, 5.0]]
+    if kind == "tail":
+        return [[-26.0, 26.0], [-8.0, 8.0], [-24.0, 24.0]]
+    if kind == "flex":
+        return [[-32.0, 32.0], [-14.0, 14.0], [-26.0, 26.0]]
+    if kind == "wing":
+        return [[-52.0, 58.0], [-16.0, 16.0], [-45.0, 45.0]]
+    if kind == "digit":
+        ry = 0.0 if is_leaf else 5.0
+        return [[-22.0, 48.0], [-ry, ry], [-16.0, 16.0]]
+    if sub_role == "clavicle_socket":
+        return [[-26.0, 26.0], [-12.0, 12.0], [-26.0, 26.0]]
+    if sub_role in ("upper_limb", "ball_socket"):
+        return [[-70.0, 80.0], [-35.0, 35.0], [-52.0, 52.0]]
+    if sub_role == "forearm_hinge":
+        return [[-55.0, 108.0], [-42.0, 42.0], [-52.0, 52.0]]
+    if sub_role == "hand_hub":
+        return [[-42.0, 42.0], [-12.0, 12.0], [-32.0, 32.0]]
+    return [[-35.0, 40.0], [-6.0, 6.0], [-18.0, 18.0]]
+
+
+def probe_rig_joint_limits(
+    bones_meta: dict[str, dict[str, Any]],
+    bbox_min: list[float] | None = None,
+    bbox_max: list[float] | None = None,
+    rig_skinning: dict[str, Any] | None = None,
+    max_bad_edge_ratio: float = 0.02,
+    max_stretch_ratio: float = 1.80,
+    monster_id: str = "monster",
+    archetype: str = "humanoid",
+    selected_candidate_id: str = "0",
+    rig_meta_sha256: str | None = None,
+    restored_decorations: list[dict[str, Any]] | None = None,
+    lbs_evaluator_fn: Any = None,
+    stretch_metric_fn: Any = None,
+) -> dict[str, Any]:
+    """Deterministic Geometric & LBS Mesh-Stretch Joint Limits Probe.
+
+    1. Evaluates the exact world-space motion direction of `+rx / -rx`, `+ry / -ry`, `+rz / -rz`
+       for every canonical bone (`axis_semantics`) so the Agent never guesses local bone roll axes.
+    2. Sweeps each bone axis against LBS mesh deformation (when `rig_skinning` is supplied) and
+       decoration attachment constraints to determine `probe_safe_limits_deg`.
+    3. Computes the action-general `global_root` orientation (`pitch`, `roll`, `yaw`) and translation
+       envelope (`translation_fraction_xyz`) within the studio orthographic camera frustum.
+    4. Produces a complete `monster-joint-limits-v1` dictionary ready to be saved as `joint_limits.json`
+       and refined by the Agent prior to G2 50-pose boundary exploration.
+    """
+    classified = classify_rig_bones(bones_meta, bbox_min=bbox_min, bbox_max=bbox_max)
+    bone_names = sorted(classified.keys())
+    order = sorted(bone_names, key=lambda b: (int(classified[b].get("depth", 0)), b))
+
+    all_pts = []
+    for b in bone_names:
+        if "rest_head_world" in classified[b]:
+            all_pts.append(classified[b]["rest_head_world"])
+        if "rest_tail_world" in classified[b]:
+            all_pts.append(classified[b]["rest_tail_world"])
+    if bbox_min is not None and bbox_max is not None:
+        bmin = np.asarray(bbox_min, dtype=np.float64)
+        bmax = np.asarray(bbox_max, dtype=np.float64)
+    elif all_pts:
+        arr_pts = np.asarray(all_pts, dtype=np.float64)
+        bmin = np.min(arr_pts, axis=0)
+        bmax = np.max(arr_pts, axis=0)
+    else:
+        bmin = np.array([-0.45, -0.35, 0.0], dtype=np.float64)
+        bmax = np.array([0.45, 0.35, 1.15], dtype=np.float64)
+
+    span = np.maximum(1e-3, bmax - bmin)
+    rest_H: dict[str, np.ndarray] = {}
+    rest_T: dict[str, np.ndarray] = {}
+    rest_R: dict[str, np.ndarray] = {}
+    for b in bone_names:
+        info = classified[b]
+        h = np.asarray(info.get("rest_head_world", [0.0, 0.0, 0.5]), dtype=np.float64)
+        t = np.asarray(info.get("rest_tail_world", h + np.array([0.0, 0.0, 0.1])), dtype=np.float64)
+        rest_H[b] = h
+        rest_T[b] = t
+        rmat = info.get("rest_rot_mat_world")
+        if rmat is not None:
+            rest_R[b] = np.asarray(rmat, dtype=np.float64)
+        else:
+            v0 = t - h
+            d0 = v0 / max(1e-8, float(np.linalg.norm(v0)))
+            rest_R[b] = _build_default_rest_rot_matrix(d0)
+
+    # Map attached rigid/flex decorations per bone
+    decor_by_bone: dict[str, list[str]] = {}
+    for dec in restored_decorations or []:
+        if isinstance(dec, dict) and dec.get("target_bone"):
+            tb = str(dec["target_bone"])
+            decor_by_bone.setdefault(tb, []).append(f"{dec.get('name', 'decor')}({dec.get('mode', 'flex')})")
+
+    # Optional LBS mesh stretch probe setup
+    has_lbs = (
+        isinstance(rig_skinning, dict)
+        and "rest_verts" in rig_skinning
+        and "triangles" in rig_skinning
+        and "skin_indices" in rig_skinning
+        and "skin_weights" in rig_skinning
+        and len(rig_skinning["rest_verts"]) > 0
+    )
+    lbs_bone_names: list[str] = []
+    if has_lbs and rig_skinning is not None:
+        from pose_features import compute_mesh_edge_stretch_metric, lbs_deform_vertices_numpy
+
+        lbs_bone_names = [str(x) for x in rig_skinning.get("bone_names", bone_names)]
+        lbs_rest_verts = np.asarray(rig_skinning["rest_verts"], dtype=np.float64)
+        lbs_skin_indices = np.asarray(rig_skinning["skin_indices"], dtype=np.int32)
+        lbs_skin_weights = np.asarray(rig_skinning["skin_weights"], dtype=np.float64)
+        lbs_triangles = np.asarray(rig_skinning["triangles"], dtype=np.int64)
+        lbs_rest_heads = np.asarray(rig_skinning["rest_heads"], dtype=np.float64)
+        lbs_rest_R = np.asarray(rig_skinning["rest_R"], dtype=np.float64)
+        lbs_b_to_idx = {bn: i for i, bn in enumerate(lbs_bone_names)}
+
+    def _measure_max_safe_angle_deg(target_bone: str, axis_idx: int, sign_dir: float, ceiling_abs_deg: float) -> float:
+        if ceiling_abs_deg <= 1e-4 or not has_lbs or target_bone not in lbs_b_to_idx:
+            return round(float(ceiling_abs_deg), 1)
+        descendants = set()
+        stack = [target_bone]
+        while stack:
+            cur = stack.pop()
+            descendants.add(cur)
+            stack.extend(classified.get(cur, {}).get("children", []))
+
+        test_angles = [a for a in (15.0, 30.0, 45.0, 60.0, 75.0, 90.0, 105.0, 120.0) if a <= ceiling_abs_deg + 1e-3]
+        if not test_angles or test_angles[-1] < ceiling_abs_deg - 1e-3:
+            test_angles.append(float(ceiling_abs_deg))
+
+        last_safe = min(15.0, float(ceiling_abs_deg))
+        for ang_deg in test_angles:
+            ang_rad = math.radians(sign_dir * ang_deg)
+            eul = [0.0, 0.0, 0.0]
+            eul[axis_idx] = ang_rad
+            R_delta = euler_xyz_to_matrix_numpy(eul[0], eul[1], eul[2])
+
+            posed_heads = lbs_rest_heads.copy()
+            posed_R = lbs_rest_R.copy()
+            h_rot = rest_H[target_bone]
+            R_world_rot = rest_R[target_bone] @ R_delta @ rest_R[target_bone].T
+            for b_sub in descendants:
+                if b_sub in lbs_b_to_idx:
+                    bi = lbs_b_to_idx[b_sub]
+                    posed_heads[bi] = h_rot + R_world_rot @ (lbs_rest_heads[bi] - h_rot)
+                    posed_R[bi] = R_world_rot @ lbs_rest_R[bi]
+
+            posed_v = lbs_deform_vertices_numpy(
+                lbs_rest_verts,
+                lbs_skin_indices,
+                lbs_skin_weights,
+                lbs_rest_heads,
+                lbs_rest_R,
+                posed_heads,
+                posed_R,
+            )
+            stretch = compute_mesh_edge_stretch_metric(
+                lbs_rest_verts,
+                posed_v,
+                lbs_triangles,
+                max_stretch=max_stretch_ratio,
+                max_bad_ratio=max_bad_edge_ratio,
+            )
+            if stretch["passed"]:
+                last_safe = float(ang_deg)
+            else:
+                break
+        return round(float(last_safe), 1)
+
+    global_root = {
+        "rotation_limits_deg": [[-28.0, 32.0], [-22.0, 22.0], [-25.0, 25.0]],
+        "axis_labels": ["pitch_rx", "yaw_twist_ry", "roll_rz"],
+        "translation_fraction_xyz": [0.08, 0.08, 0.10],
+        "max_translation_world_xyz": [
+            round(float(0.08 * span[0]), 4),
+            round(float(0.08 * span[1]), 4),
+            round(float(0.10 * span[2]), 4),
+        ],
+        "frustum_margin_min": 0.04,
+        "rationale": (
+            "Action-general global root envelope: covers forward/backward torso pitch [-28°, +32°], "
+            "axial yaw [-22°, +22°], lateral banking roll [-25°, +25°], and 3D root shifts "
+            "[8% X, 8% Y, 10% Z] for locomotion, strikes, leaps, and hit/collapse postures without "
+            "requiring retraining when new action clips are introduced."
+        ),
+    }
+
+    bones_profile: dict[str, dict[str, Any]] = {}
+    delta_probe_rad = math.radians(15.0)
+    axis_names = ("rx", "ry", "rz")
+
+    for b in order:
+        info = classified[b]
+        kind = str(info.get("kind", "limb"))
+        sub_role = str(info.get("sub_role", ""))
+        side = str(info.get("side", "C"))
+        grp = str(info.get("group_id", "00"))
+        c_idx = int(info.get("chain_index", 1))
+        is_leaf = not bool(info.get("children"))
+        fixed_local = bool(info.get("fixed_local", kind == "rigid"))
+
+        # 1. Measure world-space semantic motion direction for +rx/-rx, +ry/-ry, +rz/-rz
+        R_b = rest_R[b]
+        v_local = R_b.T @ (rest_T[b] - rest_H[b])
+        if float(np.linalg.norm(v_local)) < 1e-5:
+            v_local = np.array([0.0, max(0.05, float(info.get("rest_length", 0.08))), 0.0], dtype=np.float64)
+
+        axis_semantics: dict[str, dict[str, str]] = {}
+        for ax_i, ax_key in enumerate(axis_names):
+            e_pos = [0.0, 0.0, 0.0]
+            e_neg = [0.0, 0.0, 0.0]
+            e_pos[ax_i] = delta_probe_rad
+            e_neg[ax_i] = -delta_probe_rad
+            d_pos = (R_b @ euler_xyz_to_matrix_numpy(*e_pos) @ v_local) - (R_b @ v_local)
+            d_neg = (R_b @ euler_xyz_to_matrix_numpy(*e_neg) @ v_local) - (R_b @ v_local)
+            is_twist = ax_i == 1 and float(np.linalg.norm(d_pos)) < 0.02 * float(np.linalg.norm(v_local))
+            axis_semantics[ax_key] = {
+                "pos": _describe_world_motion_vector(d_pos, side=side, is_axial_twist=is_twist, sign="+"),
+                "neg": _describe_world_motion_vector(d_neg, side=side, is_axial_twist=is_twist, sign="-"),
+            }
+
+        # 2. Canonical defaults vs Probe safe envelope
+        def_lims_rad, def_corr, _ = default_limits_and_corr_for_kind(kind, sub_role, is_leaf=is_leaf)
+        def_lims_deg = [[round(math.degrees(lo), 1), round(math.degrees(hi), 1)] for (lo, hi) in def_lims_rad]
+        ceil_deg = _probe_safe_ceiling_deg_for_kind(kind, sub_role, is_leaf=is_leaf)
+
+        probe_safe_deg: list[list[float]] = []
+        recommended_deg: list[list[float]] = []
+        for ax_i in range(3):
+            if fixed_local or (is_leaf and ax_i == 1):
+                probe_safe_deg.append([0.0, 0.0])
+                recommended_deg.append([0.0, 0.0])
+                continue
+            c_lo, c_hi = float(ceil_deg[ax_i][0]), float(ceil_deg[ax_i][1])
+            safe_neg = -_measure_max_safe_angle_deg(b, ax_i, -1.0, abs(c_lo)) if c_lo < 0.0 else 0.0
+            safe_pos = _measure_max_safe_angle_deg(b, ax_i, 1.0, abs(c_hi)) if c_hi > 0.0 else 0.0
+            probe_safe_deg.append([round(safe_neg, 1), round(safe_pos, 1)])
+
+            # Recommended initial envelope blends canonical baseline toward probed safe envelope (85% of safe ceiling)
+            d_lo, d_hi = float(def_lims_deg[ax_i][0]), float(def_lims_deg[ax_i][1])
+            if kind == "root":
+                rec_lo, rec_hi = float(global_root["rotation_limits_deg"][ax_i][0]), float(global_root["rotation_limits_deg"][ax_i][1])
+            else:
+                rec_lo = max(safe_neg, min(d_lo, round(0.85 * safe_neg, 1)))
+                rec_hi = min(safe_pos, max(d_hi, round(0.85 * safe_pos, 1)))
+                if b in decor_by_bone:
+                    # Slight conservative damping when rigid/flex decorations attach directly to this bone
+                    rec_lo = round(0.88 * rec_lo, 1)
+                    rec_hi = round(0.88 * rec_hi, 1)
+            recommended_deg.append([round(rec_lo, 1), round(rec_hi, 1)])
+
+        limits_rad = [[round(math.radians(pair[0]), 4), round(math.radians(pair[1]), 4)] for pair in recommended_deg]
+        decor_note = f"; attached decorations={decor_by_bone[b]}" if b in decor_by_bone else ""
+        bones_profile[b] = {
+            "kind": kind,
+            "sub_role": sub_role,
+            "side": side,
+            "group_id": grp,
+            "chain_index": c_idx,
+            "parent": info.get("parent"),
+            "is_leaf": is_leaf,
+            "fixed_local": fixed_local,
+            "axis_semantics": axis_semantics,
+            "axis_probe": axis_semantics,
+            "canonical_default_limits_deg": def_lims_deg,
+            "probe_safe_limits_deg": probe_safe_deg,
+            "safe_lbs_ceiling_deg": {
+                "rx": list(probe_safe_deg[0]),
+                "ry": list(probe_safe_deg[1]),
+                "rz": list(probe_safe_deg[2]),
+            },
+            "limits_deg": {
+                "rx": list(recommended_deg[0]),
+                "ry": list(recommended_deg[1]),
+                "rz": list(recommended_deg[2]),
+            },
+            "limits_deg_list": recommended_deg,
+            "limits_rad": limits_rad,
+            "chain_corr": round(float(def_corr), 3),
+            "limits_source": "probe_initial",
+            "source": "probe_initial",
+            "attached_decorations": decor_by_bone.get(b, []),
+            "rationale": (
+                f"Probed {kind}/{sub_role} ({side}, idx={c_idx}, LBS_measured={has_lbs})"
+                f"{decor_note}: rx={axis_semantics['rx']['pos']}, rz={axis_semantics['rz']['pos']}."
+            ),
+        }
+
+    root_motion = {
+        "global_pitch_deg": list(global_root["rotation_limits_deg"][0]),
+        "global_yaw_deg": list(global_root["rotation_limits_deg"][1]),
+        "global_roll_deg": list(global_root["rotation_limits_deg"][2]),
+        "translation_fraction_xyz": list(global_root["translation_fraction_xyz"]),
+        "max_translation_world_xyz": list(global_root["max_translation_world_xyz"]),
+        "rationale": global_root["rationale"],
+    }
+
+    return {
+        "schema": JOINT_LIMITS_SCHEMA,
+        "monster_id": monster_id,
+        "archetype": archetype,
+        "selected_candidate_id": str(selected_candidate_id),
+        "rig_meta_sha256": rig_meta_sha256,
+        "authored_by": "probe_initial",
+        "lbs_stretch_measured": has_lbs,
+        "max_bad_edge_ratio_threshold": max_bad_edge_ratio,
+        "max_stretch_ratio_threshold": max_stretch_ratio,
+        "bbox_min": [round(float(x), 5) for x in bmin],
+        "bbox_max": [round(float(x), 5) for x in bmax],
+        "global_root": global_root,
+        "root_motion": root_motion,
+        "bones": bones_profile,
+    }
 
 
 def _sample_bimodal_boundary(rng: Any, lo: float, hi: float) -> float:
@@ -2545,9 +3079,11 @@ def sample_stratified_pose_euler_dict(
     rng: Any,
     sample_idx: int | None = None,
     enforce_anatomical_floor: bool = True,
+    joint_limits_profile: dict[str, Any] | None = None,
+    boundary_exploration: bool = False,
 ) -> tuple[dict[str, list[float]], str]:
     """Samples a full-skeleton pose Euler dictionary `{bone_name: [rx, ry, rz]}` using the 4-Regime
-    Stratified Decoupled Sampler:
+    Stratified Decoupled Sampler (or the 5-Regime Boundary-Exploration Sampler when `boundary_exploration=True`):
       1. `synergistic` (40%): Per-finger independent curl factors (never a single hand-wide fixed
          scalar across all 5 fingers!) + natural intra-chain synergy.
       2. `decoupled` (30%): Zero parent-child correlation (`corr = 0.0`); every phalange and chain
@@ -2558,6 +3094,15 @@ def sample_stratified_pose_euler_dict(
          self-occlusion postures (`gather` / `prayer` / `offer`) and full forearm twist while mixing
          open, splayed, and curled individual fingers.
     """
+    if boundary_exploration:
+        eulers, reg, _ = sample_boundary_exploration_pose_euler_dict(
+            bones_meta=bones_meta,
+            rng=rng,
+            sample_idx=sample_idx,
+            joint_limits_profile=joint_limits_profile,
+            enforce_anatomical_floor=False,
+        )
+        return eulers, reg
     if not bones_meta:
         return {}, "synergistic"
 
@@ -2567,6 +3112,8 @@ def sample_stratified_pose_euler_dict(
         if ("kind" in first_info and "sub_role" in first_info and "group_id" in first_info)
         else classify_rig_bones(bones_meta)
     )
+    if joint_limits_profile is not None:
+        classified = apply_joint_limits_profile(classified, joint_limits_profile)
     regime = select_pose_sampling_regime(sample_idx, rng)
     topo_names = sorted(classified.keys(), key=lambda b: (int(classified[b].get("depth", 0)), b))
 
@@ -2701,27 +3248,55 @@ def sample_root_translation_offset(
     sample_idx: int | None = None,
     max_xy_fraction: float = 0.08,
     max_z_fraction: float = 0.10,
+    joint_limits_profile: dict[str, Any] | None = None,
+    boundary_exploration: bool = False,
 ) -> list[float]:
     """Samples a bounded 3D root translation offset `[dx, dy, dz]` in world/rig units so synthetic
     training poses cover leaping, crouching, lunging, and lateral root shifts without clipping
     outside the orthographic camera frustum.
     """
     pts: list[list[float]] = []
+    global_root_cfg: dict[str, Any] | None = None
+    if isinstance(joint_limits_profile, dict) and isinstance(joint_limits_profile.get("global_root"), dict):
+        global_root_cfg = joint_limits_profile["global_root"]
     for info in bones_meta.values():
         if "rest_head_world" in info:
             pts.append(info["rest_head_world"])
         if "rest_tail_world" in info:
             pts.append(info["rest_tail_world"])
+        if global_root_cfg is None and isinstance(info.get("global_root"), dict):
+            global_root_cfg = info["global_root"]
     if pts:
         arr = np.asarray(pts, dtype=np.float64)
         span = np.maximum(1e-3, np.ptp(arr, axis=0))
     else:
         span = np.array([1.0, 1.0, 1.0], dtype=np.float64)
 
+    fx, fy, fz = float(max_xy_fraction), float(max_xy_fraction), float(max_z_fraction)
+    if global_root_cfg is not None:
+        t_frac = global_root_cfg.get("translation_fraction_xyz")
+        if isinstance(t_frac, list) and len(t_frac) == 3:
+            fx, fy, fz = float(t_frac[0]), float(t_frac[1]), float(t_frac[2])
+
+    max_dx = float(fx * span[0])
+    max_dy = float(fy * span[1])
+    max_dz = float(fz * span[2])
+
+    if boundary_exploration:
+        g2_reg = select_g2_boundary_regime(sample_idx, rng)
+        if g2_reg == "full_body_dynamic_root_boundary":
+            return [
+                _sample_bimodal_boundary(rng, -max_dx, max_dx),
+                _sample_bimodal_boundary(rng, -max_dy, max_dy),
+                _sample_bimodal_boundary(rng, -max_dz, max_dz),
+            ]
+        return [
+            float(rng.uniform(-0.75 * max_dx, 0.75 * max_dx)),
+            float(rng.uniform(-0.75 * max_dy, 0.75 * max_dy)),
+            float(rng.uniform(-0.75 * max_dz, 0.75 * max_dz)),
+        ]
+
     regime = select_pose_sampling_regime(sample_idx, rng)
-    max_dx = float(max_xy_fraction * span[0])
-    max_dy = float(max_xy_fraction * span[1])
-    max_dz = float(max_z_fraction * span[2])
     if regime == "antiphase_extreme":
         return [
             _sample_bimodal_boundary(rng, -max_dx, max_dx),
@@ -2733,6 +3308,411 @@ def sample_root_translation_offset(
         float(rng.uniform(-max_dy, max_dy)),
         float(rng.uniform(-max_dz, max_dz)),
     ]
+
+
+def select_g2_boundary_regime(sample_idx: int | None, rng: Any, total_samples: int = 50) -> str:
+    """Selects one of the 5 G2 boundary-exploration sampling regimes:
+      - `in_phase_boundary_extension` (25%, slots 0..4): cumulative in-phase chain extension to limits
+      - `antiphase_fold_boundary`     (20%, slots 5..8): opposite parent/child limit folding & S-curves
+      - `cross_occlusion_twist_boundary` (20%, slots 9..12): cross-midline limb adduction & shaft twist limits
+      - `full_body_dynamic_root_boundary` (20%, slots 13..16): global root pitch/roll/yaw + translation boundaries
+      - `quasi_uniform_interior_coverage` (15%, slots 17..19): decoupled interior/transition coverage
+    """
+    if sample_idx is not None:
+        slot = int(sample_idx) % 20
+    else:
+        slot = int(rng.random() * 20.0)
+    if slot < 5:
+        return "in_phase_boundary_extension"
+    if slot < 9:
+        return "antiphase_fold_boundary"
+    if slot < 13:
+        return "cross_occlusion_twist_boundary"
+    if slot < 17:
+        return "full_body_dynamic_root_boundary"
+    return "quasi_uniform_interior_coverage"
+
+
+def _sample_near_bound(rng: Any, lo: float, hi: float, bound_side: str, band_ratio: float = 0.14) -> float:
+    """Samples stochastically inside the outer `band_ratio` (default 14%) near `lo` (`bound_side=='lo'`)
+    or `hi` (`bound_side=='hi'`).
+    """
+    span = hi - lo
+    if span <= 1e-8:
+        return lo
+    band = max(1e-8, float(band_ratio) * span)
+    if bound_side == "lo":
+        return float(rng.uniform(lo, min(hi, lo + band)))
+    return float(rng.uniform(max(lo, hi - band), hi))
+
+
+def inspect_pose_boundary_utilization(
+    eulers_rad: dict[str, list[float]],
+    bones_meta: dict[str, dict[str, Any]],
+    boundary_band_ratio: float = 0.15,
+    enforce_anatomical_floor: bool = False,
+) -> dict[str, Any]:
+    """Identifies which bone axes in `eulers_rad` fall within the outer `boundary_band_ratio` (default 15%)
+    of their active `[lo, hi]` limits, returning structured badges for G2 boundary inspection.
+    """
+    axis_names = ("rx", "ry", "rz")
+    boundary_joints: list[dict[str, Any]] = []
+    active_axes_count = 0
+
+    for b_name in sorted(bones_meta.keys()):
+        info = bones_meta[b_name]
+        kind = str(info.get("kind", "limb"))
+        if kind == "rigid" or bool(info.get("fixed_local", False)):
+            continue
+        is_leaf = not bool(info.get("children"))
+        lims = effective_sampling_limits_for_bone(info, enforce_anatomical_floor=enforce_anatomical_floor)
+        vals = eulers_rad.get(b_name, [0.0, 0.0, 0.0])
+        for ax_i, ax_name in enumerate(axis_names):
+            if is_leaf and ax_i == 1 and not bool(info.get("allow_leaf_twist", False)):
+                continue
+            lo, hi = float(lims[ax_i][0]), float(lims[ax_i][1])
+            span = hi - lo
+            if span <= math.radians(1.0):
+                continue
+            active_axes_count += 1
+            v = float(vals[ax_i])
+            q = float(np.clip((v - lo) / span, 0.0, 1.0))
+            if q <= boundary_band_ratio or q >= (1.0 - boundary_band_ratio):
+                bound_type = "lo" if q <= boundary_band_ratio else "hi"
+                lim_ref = lo if bound_type == "lo" else hi
+                boundary_joints.append(
+                    {
+                        "bone": b_name,
+                        "kind": kind,
+                        "axis": ax_name,
+                        "bound": bound_type,
+                        "deg": round(math.degrees(v), 1),
+                        "limit_deg": round(math.degrees(lim_ref), 1),
+                        "quantile": round(q, 3),
+                        "label": f"{b_name}.{ax_name}={round(math.degrees(v), 1)}° ({bound_type}:{round(math.degrees(lim_ref), 1)}°)",
+                    }
+                )
+
+    boundary_joints.sort(key=lambda item: min(item["quantile"], 1.0 - item["quantile"]))
+    max_util = (
+        round(max(2.0 * abs(float(item["quantile"]) - 0.5) for item in boundary_joints), 3)
+        if boundary_joints
+        else 0.5
+    )
+    return {
+        "boundary_joint_count": len(boundary_joints),
+        "active_axes_count": active_axes_count,
+        "boundary_ratio": round(len(boundary_joints) / float(max(1, active_axes_count)), 4),
+        "max_utilization": max_util,
+        "boundary_joints": boundary_joints,
+    }
+
+
+def sample_boundary_exploration_pose_euler_dict(
+    bones_meta: dict[str, dict[str, Any]],
+    rng: Any,
+    sample_idx: int | None = None,
+    num_total_samples: int = 50,
+    total_samples: int | None = None,
+    joint_limits_profile: dict[str, Any] | None = None,
+    enforce_anatomical_floor: bool = False,
+) -> tuple[dict[str, list[float]], str, dict[str, Any]]:
+    """Samples a full-skeleton pose Euler dictionary `{bone_name: [rx, ry, rz]}` specifically designed
+    for G2 50-pose boundary exploration:
+      - All 50 samples are joint full-body stochastic poses strictly bounded by `joint_limits.json`.
+      - Heavily weights the outer boundary zones (`<= lo + 0.14*span` and `>= hi - 0.14*span`) across
+        5 complementary boundary regimes (`in_phase_boundary_extension`, `antiphase_fold_boundary`,
+        `cross_occlusion_twist_boundary`, `full_body_dynamic_root_boundary`, `quasi_uniform_interior_coverage`).
+      - Deterministic rotating boundary-slot schedule guarantees that across `num_total_samples` (50),
+        every active bone axis touches both its lower 15% boundary and upper 15% boundary multiple times.
+    Returns `(sampled_eulers, regime, boundary_meta)`.
+    """
+    if not bones_meta:
+        return {}, "in_phase_boundary_extension", {"boundary_joint_count": 0, "active_axes_count": 0, "boundary_joints": []}
+
+    first_info = next(iter(bones_meta.values()))
+    classified = (
+        copy.deepcopy(bones_meta)
+        if ("kind" in first_info and "sub_role" in first_info and "group_id" in first_info)
+        else classify_rig_bones(bones_meta)
+    )
+    if joint_limits_profile is not None:
+        classified = apply_joint_limits_profile(classified, joint_limits_profile)
+
+    idx = int(sample_idx) if sample_idx is not None else int(rng.random() * max(1, num_total_samples))
+    regime = select_g2_boundary_regime(idx, rng)
+    topo_names = sorted(classified.keys(), key=lambda b: (int(classified[b].get("depth", 0)), b))
+
+    # Per-chain and per-finger target states for coordinated boundary exploration
+    chain_bound_sign: dict[tuple[str, str, str], str] = {}
+    finger_group_targets: dict[tuple[str, str], tuple[str, str]] = {}
+    for rank_i, b_name in enumerate(topo_names):
+        info = classified[b_name]
+        b_kind = str(info.get("kind", "limb"))
+        side = str(info.get("side", "C"))
+        grp = str(info.get("group_id", "00"))
+        ckey = (b_kind, side, grp)
+        if ckey not in chain_bound_sign:
+            # Deterministic parity alternation + rng tie-break so both 'lo' and 'hi' chain arches are covered
+            chain_bound_sign[ckey] = "hi" if ((idx + rank_i) % 2 == 0) else "lo"
+        if b_kind == "digit":
+            fkey = (side, grp)
+            if fkey not in finger_group_targets:
+                c_side = "hi" if ((idx + rank_i) % 2 == 0) else "lo"
+                s_side = "hi" if ((idx + rank_i // 2) % 2 == 0) else "lo"
+                finger_group_targets[fkey] = (c_side, s_side)
+
+    sampled_eulers: dict[str, list[float]] = {}
+    for rank_i, b_name in enumerate(topo_names):
+        info = classified[b_name]
+        kind = str(info.get("kind", "limb"))
+        sub_role = str(info.get("sub_role", ""))
+        side = str(info.get("side", "C"))
+        grp = str(info.get("group_id", "00"))
+        is_leaf = not bool(info.get("children"))
+
+        if kind == "rigid" or bool(info.get("fixed_local", False)):
+            sampled_eulers[b_name] = [0.0, 0.0, 0.0]
+            continue
+
+        lims = effective_sampling_limits_for_bone(info, enforce_anatomical_floor=enforce_anatomical_floor)
+        parent_name = info.get("parent")
+        has_parent = bool(parent_name and parent_name in sampled_eulers)
+        ckey = (kind, side, grp)
+        pref_bound = chain_bound_sign.get(ckey, "hi")
+
+        raw = [0.0, 0.0, 0.0]
+
+        if regime == "quasi_uniform_interior_coverage":
+            # Stratified interior quantile coverage [0.12, 0.88] with zero inter-joint coupling
+            for ax in range(3):
+                lo, hi = lims[ax]
+                span = hi - lo
+                q_lo = lo + 0.12 * span
+                q_hi = hi - 0.12 * span
+                raw[ax] = float(rng.uniform(q_lo, q_hi)) if span > 1e-8 else lo
+
+        elif regime == "in_phase_boundary_extension":
+            # Same-sign boundary bending along chains to reveal cumulative arch/extension & mesh stretch limits
+            for ax in range(3):
+                lo, hi = lims[ax]
+                b_side = pref_bound if ((ax + rank_i + idx) % 3 != 0) else ("lo" if pref_bound == "hi" else "hi")
+                if has_parent and classified.get(parent_name, {}).get("kind") == kind:  # type: ignore[arg-type]
+                    p_lims = effective_sampling_limits_for_bone(
+                        classified[parent_name], enforce_anatomical_floor=enforce_anatomical_floor  # type: ignore[index]
+                    )
+                    p_lo, p_hi = p_lims[ax]
+                    p_mid = 0.5 * (p_lo + p_hi)
+                    p_val = sampled_eulers[parent_name][ax]  # type: ignore[index]
+                    b_side = "hi" if p_val >= p_mid else "lo"
+                raw[ax] = _sample_near_bound(rng, lo, hi, b_side, band_ratio=0.14)
+
+        elif regime == "antiphase_fold_boundary":
+            # Opposite-sign parent/child boundary folding (deep crouch, elbow/knee fold, S-curve spine/tail)
+            for ax in range(3):
+                lo, hi = lims[ax]
+                b_side = "hi" if ((idx + rank_i + ax) % 2 == 0) else "lo"
+                if has_parent and kind in ("limb", "digit", "spine", "tail", "flex", "wing", "head"):
+                    p_lims = effective_sampling_limits_for_bone(
+                        classified[parent_name], enforce_anatomical_floor=enforce_anatomical_floor  # type: ignore[index]
+                    )
+                    p_lo, p_hi = p_lims[ax]
+                    p_mid = 0.5 * (p_lo + p_hi)
+                    p_val = sampled_eulers[parent_name][ax]  # type: ignore[index]
+                    b_side = "lo" if p_val >= p_mid else "hi"
+                raw[ax] = _sample_near_bound(rng, lo, hi, b_side, band_ratio=0.14)
+
+        elif regime == "cross_occlusion_twist_boundary":
+            # Push lateral limbs & digits to cross-midline adduction + axial shaft twist (ry) boundaries
+            for ax in range(3):
+                lo, hi = lims[ax]
+                if kind in ("limb", "wing"):
+                    b_side = "hi" if ((idx + rank_i + ax) % 2 == 0) else "lo"
+                    raw[ax] = _sample_near_bound(rng, lo, hi, b_side, band_ratio=0.13)
+                elif kind == "digit":
+                    c_side, s_side = finger_group_targets.get((side, grp), ("hi", "lo"))
+                    target_side = c_side if ax == 0 else (s_side if ax == 2 else ("hi" if (idx + rank_i) % 2 == 0 else "lo"))
+                    raw[ax] = _sample_near_bound(rng, lo, hi, target_side, band_ratio=0.13)
+                else:
+                    raw[ax] = _sample_bimodal_boundary(rng, lo, hi)
+
+        else:
+            # "full_body_dynamic_root_boundary": push ROOT pitch/roll/yaw and major limbs/jaws/wings to boundaries
+            for ax in range(3):
+                lo, hi = lims[ax]
+                b_side = "hi" if ((idx // 2 + rank_i + ax) % 2 == 0) else "lo"
+                if kind in ("root", "jaw", "head", "limb", "wing"):
+                    raw[ax] = _sample_near_bound(rng, lo, hi, b_side, band_ratio=0.13)
+                else:
+                    raw[ax] = _sample_bimodal_boundary(rng, lo, hi)
+
+        # Deterministic Rotating Boundary Slot Guarantee:
+        # Ensure every bone axis hits both its lower 14% and upper 14% boundary across the 50 samples
+        if regime != "quasi_uniform_interior_coverage":
+            slot_phase = (idx + rank_i * 3) % 8
+            if slot_phase == 0:
+                for ax in range(3):
+                    raw[ax] = _sample_near_bound(rng, lims[ax][0], lims[ax][1], "lo", band_ratio=0.12)
+            elif slot_phase == 4:
+                for ax in range(3):
+                    raw[ax] = _sample_near_bound(rng, lims[ax][0], lims[ax][1], "hi", band_ratio=0.12)
+
+        if is_leaf and not bool(info.get("allow_leaf_twist", False)):
+            raw[1] = 0.0
+
+        sampled_eulers[b_name] = [float(np.clip(raw[ax], lims[ax][0], lims[ax][1])) for ax in range(3)]
+
+    boundary_meta = inspect_pose_boundary_utilization(
+        sampled_eulers,
+        classified,
+        boundary_band_ratio=0.15,
+        enforce_anatomical_floor=enforce_anatomical_floor,
+    )
+    return sampled_eulers, regime, boundary_meta
+
+
+def audit_boundary_exploration_coverage(
+    samples_or_records: list[dict[str, Any]],
+    bones_meta: dict[str, dict[str, Any]],
+    joint_limits_profile: dict[str, Any] | None = None,
+    boundary_band_ratio: float = 0.15,
+) -> dict[str, Any]:
+    """Audits a G2 50-pose boundary exploration pack to verify:
+      1. 100% of sampled poses stay strictly within `joint_limits.json` (`max_limit_violation_deg == 0.0`).
+      2. High boundary touch coverage across all active bone axes (`lower_boundary_touch_ratio` and
+         `upper_boundary_touch_ratio` in the outer `boundary_band_ratio` = 15% quartiles).
+      3. Standard inter-finger and parent-child decoupling criteria (`audit_pose_dataset_coverage`).
+    """
+    first_info = next(iter(bones_meta.values())) if bones_meta else {}
+    classified = (
+        copy.deepcopy(bones_meta)
+        if ("kind" in first_info and "sub_role" in first_info and "group_id" in first_info)
+        else classify_rig_bones(bones_meta)
+    )
+    if joint_limits_profile is not None:
+        classified = apply_joint_limits_profile(classified, joint_limits_profile)
+
+    base_audit = audit_pose_dataset_coverage(
+        samples_or_records,
+        classified,
+        enforce_anatomical_floor=False,
+    )
+
+    bone_names = sorted(classified.keys())
+    N = len(samples_or_records)
+    axis_names = ("rx", "ry", "rz")
+    regime_counts: dict[str, int] = {r: 0 for r in G2_BOUNDARY_REGIMES}
+
+    eulers_by_bone: dict[str, np.ndarray] = {b: np.zeros((N, 3), dtype=np.float64) for b in bone_names}
+    for s_idx, rec in enumerate(samples_or_records):
+        reg = rec.get("sampling_regime")
+        if isinstance(reg, str):
+            regime_counts[reg] = regime_counts.get(reg, 0) + 1
+        jmap = rec.get("joints_rad", rec.get("joints", rec.get("bones", {})))
+        for b in bone_names:
+            if b in jmap:
+                val = jmap[b].get("euler_xyz", jmap[b]) if isinstance(jmap[b], dict) else jmap[b]
+                eulers_by_bone[b][s_idx] = np.asarray(val, dtype=np.float64)
+
+    total_active_axes = 0
+    lower_touched_axes = 0
+    upper_touched_axes = 0
+    both_touched_axes = 0
+    untouched_lower: list[str] = []
+    untouched_upper: list[str] = []
+    max_violation_deg = 0.0
+    per_bone_summary: dict[str, Any] = {}
+
+    for b in bone_names:
+        info = classified[b]
+        kind = str(info.get("kind", "limb"))
+        if kind == "rigid" or bool(info.get("fixed_local", False)):
+            continue
+        is_leaf = not bool(info.get("children"))
+        lims = effective_sampling_limits_for_bone(info, enforce_anatomical_floor=False)
+        arr = eulers_by_bone[b]
+        obs_deg: list[list[float]] = []
+        lims_deg: list[list[float]] = []
+        span_utils: list[float] = []
+
+        for ax_i, ax_name in enumerate(axis_names):
+            lo, hi = float(lims[ax_i][0]), float(lims[ax_i][1])
+            lims_deg.append([round(math.degrees(lo), 1), round(math.degrees(hi), 1)])
+            if N == 0:
+                obs_deg.append([0.0, 0.0])
+                continue
+            col = arr[:, ax_i]
+            obs_min, obs_max = float(np.min(col)), float(np.max(col))
+            obs_deg.append([round(math.degrees(obs_min), 1), round(math.degrees(obs_max), 1)])
+            viol = max(0.0, lo - obs_min, obs_max - hi)
+            max_violation_deg = max(max_violation_deg, math.degrees(viol))
+
+            if is_leaf and ax_i == 1 and not bool(info.get("allow_leaf_twist", False)):
+                continue
+            span = hi - lo
+            if span <= math.radians(1.0):
+                continue
+
+            total_active_axes += 1
+            util = float(np.clip((obs_max - obs_min) / span, 0.0, 1.0))
+            span_utils.append(util)
+            hit_lo = obs_min <= (lo + boundary_band_ratio * span + 1e-6)
+            hit_hi = obs_max >= (hi - boundary_band_ratio * span - 1e-6)
+            if hit_lo:
+                lower_touched_axes += 1
+            else:
+                untouched_lower.append(f"{b}.{ax_name}")
+            if hit_hi:
+                upper_touched_axes += 1
+            else:
+                untouched_upper.append(f"{b}.{ax_name}")
+            if hit_lo and hit_hi:
+                both_touched_axes += 1
+
+        per_bone_summary[b] = {
+            "kind": kind,
+            "sub_role": info.get("sub_role", ""),
+            "limits_source": info.get("limits_source", "canonical_default"),
+            "limits_deg": lims_deg,
+            "observed_min_max_deg": obs_deg,
+            "mean_span_utilization": round(float(np.mean(span_utils)), 4) if span_utils else 1.0,
+        }
+
+    denom = float(max(1, total_active_axes))
+    lo_ratio = round(lower_touched_axes / denom, 4)
+    hi_ratio = round(upper_touched_axes / denom, 4)
+    both_ratio = round(both_touched_axes / denom, 4)
+
+    boundary_failures = list(base_audit.get("failures", []))
+    if max_violation_deg > 0.05:
+        boundary_failures.append(f"Pose exceeded configured joint limits by {max_violation_deg:.2f}°")
+    if N >= 20 and both_ratio < 0.85:
+        boundary_failures.append(
+            f"Insufficient G2 boundary exploration coverage: both_boundaries_touch_ratio={both_ratio:.3f} < 0.85"
+        )
+
+    return {
+        **base_audit,
+        "schema": "monster-g2-boundary-exploration-audit-v1",
+        "regime_counts": regime_counts,
+        "dual_boundary_touch_rate": both_ratio,
+        "boundary_exploration": {
+            "boundary_band_ratio": boundary_band_ratio,
+            "total_active_axes": total_active_axes,
+            "lower_boundary_touched_axes": lower_touched_axes,
+            "upper_boundary_touched_axes": upper_touched_axes,
+            "both_boundaries_touched_axes": both_touched_axes,
+            "lower_boundary_touch_ratio": lo_ratio,
+            "upper_boundary_touch_ratio": hi_ratio,
+            "both_boundaries_touch_ratio": both_ratio,
+            "max_limit_violation_deg": round(max_violation_deg, 4),
+            "untouched_lower_axes": untouched_lower,
+            "untouched_upper_axes": untouched_upper,
+        },
+        "per_bone_boundary_summary": per_bone_summary,
+        "passed": len(boundary_failures) == 0,
+        "failures": boundary_failures,
+    }
 
 
 def audit_pose_dataset_coverage(

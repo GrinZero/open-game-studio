@@ -14,11 +14,12 @@ flowchart LR
     B --> C["2. Colab 生成 4 候选骨架<br/>（完成后默认释放实例）"]
     C --> D["3. 本地恢复完整装饰<br/>强制骨骼规范命名与随动检查"]
     D --> E{"G1 用户审计<br/>选定 1 套骨架"}
-    E -->|通过| F["4. 生成 50 个随机姿势"]
+    E -->|通过| E2["4.0 几何/LBS 轴向探测与<br/>Agent 定制 joint_limits.json"]
     E -->|返修| D
-    F --> G{"G2 用户审计<br/>随机采样策略"}
-    G -->|通过| H["U2 上传完整模型至 Drive<br/>5. 合成训练集 & 训练专属头"]
-    G -->|改脚本/模型/骨架| F
+    E2 --> F["4.1 边界探索随机采样<br/>生成 50 个随机姿势"]
+    F --> G{"G2 用户审计<br/>边界探索与随机策略"}
+    G -->|通过| H["U2 上传完整模型与 joint_limits.json<br/>5. 合成训练集 & 训练专属头"]
+    G -->|改 joint_limits/采样/模型| E2
     H --> I["6. 已有视频摄影棚考试<br/>（GLB 回读重渲染）"]
     I --> J{"G3 用户审计<br/>考试判定"}
     J -->|通过| K["7. 生产动作批量生成与重建<br/>（全部视频满意后释放实例）"]
@@ -101,15 +102,23 @@ flowchart LR
 
 ---
 
-## 4. 阶段三：50 个随机姿势小样与 G2 审计
+## 4. 阶段三：G1 后关节限制定制、50 个边界探索随机姿势小样与 G2 审计
 
-### 4.1 随机采样原则
+### 4.0 G1 通过后几何/LBS 轴向探测与 Agent 定制 `joint_limits.json`
 
-G1 用户明确选定 1 套 `selected_candidate_id` 后，仅对该套完整绑定模型运行正式合成采样器，**直接按当前锁定的目标视频生成分辨率与视角模式**（默认双视图 `[Front | Side(Left)]`：768P 拼合 `1344×768`＝单面板 `672×768`，2K 拼合 `2560×1440`＝单面板 `1280×1440`；若开启 `ENABLE_3VIEW_STUDIO=True` / `MONSTER_ENABLE_3VIEW=1` 三视图 AB 测试特性开关，则采用单视频画布正视居中三联画 `[Left(+X→-X) | Front(-Y→+Y) | Right(-X→+X)]`：768P 拼合 `1344×768`＝单面板 `448×768 × 3`，2K 拼合 `2688×1440`＝单面板 `896×1440 × 3`）生成 **50 个随机姿势**（`pose_001`～`pose_050`，每个 ID 含正交多视图原图及 2D 标签叠加图）：
+在 G1 用户选定唯一 `selected_candidate_id` 且完成 `<KIND>_<SIDE>_<GROUP>_<INDEX>` 规范命名后、进入 G2 采样前，新增**「几何与 LBS 轴向探测 + Agent 专属定制 `joint_limits.json`」**步骤（调用 `monster_sop.py joint-limits probe / apply`）：
+- **不绑定窄动作列表（保证模型通用性）**：不在这一步缩窄或锁定后续要生成的具体动作列表；`joint_limits.json`（Schema `monster-joint-limits-v1`）定义的是**该怪兽骨骼拓扑与蒙皮网格在生理和几何上能承受的完整动作无关安全运动包络（Morphological Safe Envelope）**，同时显式配置全局 `ROOT` 的俯仰/横滚/偏航范围（`global_pitch_deg`、`global_roll_deg`、`global_yaw_deg`）与三维全身位移比例（`translation_fraction_xyz`），使训练出的 DINOv2 姿态头在后续新增跳跃、受击、扑击等任意新姿势时无需重训。
+- **确定性几何与 LBS 轴向探测（`probe_rig_joint_limits`）**：自动测量每根骨骼局部 `+rx / +ry / +rz` 轴在世界空间驱动骨端移动的真实语义方向（如 `forward(+Y)`、`up(+Z)`、`inward_towards_midline`），并结合 LBS 蒙皮边长拉伸率（`bad_edge_ratio <= 0.02`、`max_stretch_ratio <= 1.80`）给出安全角度上限 `safe_lbs_ceiling_deg`。
+- **Agent 定制与版本解耦**：Agent 结合怪兽形态与探测报告定制各骨 `limits_deg` 并落盘为 `scratch/work/<monster_id>/joint_limits.json`（U2 时同步至 Drive `monsters/<monster_id>/joint_limits.json`）。修改 `joint_limits.json` 仅触发 `sampler_script_or_seed_change`（保留 G1 通过状态，仅重抽 G2 50 个小样）。
 
+### 4.1 边界探索随机采样原则（Stratified Boundary-Exploration Random Suite）
+
+G1 用户明确选定 1 套 `selected_candidate_id` 并生成/确认 `joint_limits.json` 后，仅对该套完整绑定模型运行 **5 模态分层边界探索随机采样器（`sample_boundary_exploration_pose_euler_dict`）**，**直接按当前锁定的目标视频生成分辨率与视角模式**（默认双视图 `[Front | Side(Left)]`：768P 拼合 `1344×768`＝单面板 `672×768`，2K 拼合 `2560×1440`＝单面板 `1280×1440`；若开启 `ENABLE_3VIEW_STUDIO=True` / `MONSTER_ENABLE_3VIEW=1` 三视图 AB 测试特性开关，则采用单视频画布正视居中三联画 `[Left(+X→-X) | Front(-Y→+Y) | Right(-X→+X)]`：768P 拼合 `1344×768`＝单面板 `448×768 × 3`，2K 拼合 `2688×1440`＝单面板 `896×1440 × 3`）生成 **50 个在 `joint_limits.json` 范围内充分探索边界的随机姿势**（`pose_001`～`pose_050`，每个 ID 含正交多视图原图及 2D 标签叠加图）：
+
+- **5 模态边界探索加权随机**：50 个样本全部为全身多关节联合随机姿势，按 5 类体制分层抽样：`25% in_phase_boundary_extension`（同相大开大合边界伸展/深屈）、`20% antiphase_fold_boundary`（父子反相 S 形折叠与极值扭转边界）、`20% cross_occlusion_twist_boundary`（内收横跨中轴自遮挡与前臂/掌指轴向扭转边界）、`20% full_body_dynamic_root_boundary`（全局 `ROOT` 俯仰/横滚/大角度偏航＋三维位移叠加四肢不对称边界）、`15% quasi_uniform_interior_coverage`（内部均匀覆盖过渡区）；同时通过确定性轮转边界槽位，保证每根活动骨骼的每个有效自由度在 50 个样本中均触达下界 15% 与上界 15% 极值区（`audit_boundary_exploration_coverage` 校验双侧边界触达率）。
 - **充分且稍激进的联合随机**：单样本同时随机多个关节，保留左右/前后肢体独立变化；不绑定步态模板，不要求姿势具备日常动作语义，也不要求足底贴地站稳。
-- **按结构约束严重异常**：根据当前骨架局部轴与自由度设定较宽的转动范围，仅拦截错误轴向、严重反折、几何撕裂爆炸或肢体脱离。
-- **真实抽样纪律**：记录固定 `seed`、关节范围与实际求值分布摘要；严禁反复更换 seed 挑图或手工摆拍替代随机采样输出。若启用严重异常自动重抽，须记录被拒样本原提案、原因与补样对应关系。
+- **按 `joint_limits.json` 约束严重异常**：严格在 `joint_limits.json` 设定的关节转动范围与 `ROOT` 位移范围内抽样，仅拦截错误轴向、严重反折、几何撕裂爆炸或肢体脱离。
+- **真实抽样纪律**：记录固定 `seed`、`joint_limits.json` SHA-256、逐样本触达边界的关节清单 `boundary_joints` 与实际求值分布摘要；严禁反复更换 seed 挑图或手工摆拍替代随机采样输出。若启用严重异常自动重抽，须记录被拒样本原提案、原因与补样对应关系。
 
 ### 4.2 G2 审阅展示与分级返修
 

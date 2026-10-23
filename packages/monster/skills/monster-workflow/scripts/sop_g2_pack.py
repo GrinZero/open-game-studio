@@ -38,13 +38,19 @@ from sop_gate import (  # noqa: E402
     mark_awaiting_review,
     now_taipei_iso,
     save_ledger,
+    sha256_file,
     sha256_json,
 )
 import numpy as np  # noqa: E402
 from bone_taxonomy import (  # noqa: E402
+    JOINT_LIMITS_SCHEMA,
+    apply_joint_limits_profile,
+    audit_boundary_exploration_coverage,
     audit_pose_dataset_coverage,
     classify_rig_bones,
     euler_xyz_to_matrix_numpy,
+    probe_rig_joint_limits,
+    sample_boundary_exploration_pose_euler_dict,
     sample_root_translation_offset,
     sample_stratified_pose_euler_dict,
     validate_canonical_rig_bone_names,
@@ -217,11 +223,13 @@ def build_g2_review_html(
     for idx, rec in enumerate(pose_records):
         pid = rec["pose_id"]
         regime = rec["sampling_regime"]
+        b_joints = rec.get("boundary_joints", [])
+        b_badge = f" · 边界×{len(b_joints)}" if b_joints else ""
         thumbs_html.append(
             f'<div class="thumb-card" onclick="openModal({idx})">'
             f'<img src="{html.escape(rec["overlay_rel"])}" data-raw="{html.escape(rec["raw_rel"])}" '
             f'data-overlay="{html.escape(rec["overlay_rel"])}" alt="{html.escape(pid)}"/>'
-            f'<div class="thumb-meta"><strong>{html.escape(pid)}</strong> · <span>{html.escape(regime)}</span></div>'
+            f'<div class="thumb-meta"><strong>{html.escape(pid)}</strong> · <span>{html.escape(regime)}{html.escape(b_badge)}</span></div>'
             f'</div>'
         )
 
@@ -233,6 +241,8 @@ def build_g2_review_html(
                 "raw_rel": r["raw_rel"],
                 "overlay_rel": r["overlay_rel"],
                 "root_offset": r["root_offset"],
+                "boundary_joints": r.get("boundary_joints", []),
+                "max_utilization": r.get("max_utilization", 0.0),
                 "joints_deg": {
                     k: [round(math.degrees(x), 1) for x in v]
                     for k, v in list(r["joints_rad"].items())[:24]
@@ -245,12 +255,27 @@ def build_g2_review_html(
 
     calib = summary["calibration"]
     cov = summary["coverage_audit"]
+    b_audit = cov.get("boundary_exploration_audit") or {}
+    jl_summary = summary.get("joint_limits_summary") or {}
+    jl_rows = []
+    for b_name, b_item in sorted((jl_summary.get("bones") or {}).items()):
+        ldeg = b_item.get("limits_deg") or {}
+        rx_s = f"[{ldeg.get('rx', [0, 0])[0]}°, {ldeg.get('rx', [0, 0])[1]}°]"
+        ry_s = f"[{ldeg.get('ry', [0, 0])[0]}°, {ldeg.get('ry', [0, 0])[1]}°]"
+        rz_s = f"[{ldeg.get('rz', [0, 0])[0]}°, {ldeg.get('rz', [0, 0])[1]}°]"
+        jl_rows.append(
+            f"<tr><td><code>{html.escape(b_name)}</code></td>"
+            f"<td><code>{html.escape(str(b_item.get('kind', '')))}</code></td>"
+            f"<td>{html.escape(rx_s)}</td><td>{html.escape(ry_s)}</td><td>{html.escape(rz_s)}</td>"
+            f"<td><code>{html.escape(str(b_item.get('source', 'probe_initial')))}</code></td></tr>"
+        )
+    jl_table_html = "".join(jl_rows)
 
     doc = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <title>G2 50 随机姿势审计 — {html.escape(monster_id)}</title>
+  <title>G2 50 边界探索随机姿势审计 — {html.escape(monster_id)}</title>
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #e6edf3; margin: 0; padding: 20px; }}
     .container {{ max-width: 1480px; margin: 0 auto; }}
@@ -260,6 +285,9 @@ def build_g2_review_html(
     .thumb-card:hover {{ border-color: #58a6ff; }}
     .thumb-card img {{ width: 100%; border-radius: 4px; display: block; }}
     .thumb-meta {{ font-size: 11px; color: #8b949e; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+    .limits-box {{ background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 14px 18px; margin-top: 16px; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }}
+    th, td {{ border-bottom: 1px solid #21262d; padding: 6px 8px; text-align: left; }}
     .modal {{ display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 999; align-items: center; justify-content: center; padding: 24px; }}
     .modal.open {{ display: flex; }}
     .modal-box {{ background: #161b22; border: 1px solid #30363d; border-radius: 12px; max-width: 1280px; width: 100%; padding: 20px; }}
@@ -274,17 +302,26 @@ def build_g2_review_html(
   <div class="container">
     <div class="header-bar">
       <div>
-        <h1 style="margin:0 0 6px 0;font-size:20px;">MonsterStudio · G2 50 个真实随机姿势审计 (<code>{html.escape(monster_id)}</code>)</h1>
+        <h1 style="margin:0 0 6px 0;font-size:20px;">MonsterStudio · G2 50 个边界探索随机姿势审计 (<code>{html.escape(monster_id)}</code>)</h1>
         <div style="font-size:13px;color:#8b949e;">
           选定候选：<code>candidate_{html.escape(str(summary['selected_candidate_id']))}</code> ·
           固定 Seed：<code>{summary['seed']}</code> ·
           原生分辨率：<code>{calib['composite_width']}×{calib['composite_height']}</code> (单面板 <code>{calib['panel_width']}×{calib['panel_height']}</code> · 视图 <code>{",".join(calib['view_order'])}</code>) ·
           解耦覆盖率门禁：<strong>{'PASS' if cov['passed'] else 'WARN'}</strong> ·
+          双侧边界触达率：<strong>{int(round(float(b_audit.get('dual_boundary_touch_rate', 1.0)) * 100))}%</strong> ·
+          关节限制配置：<code>{html.escape(str(jl_summary.get('schema', JOINT_LIMITS_SCHEMA)))}</code> ·
           异常重抽次数：<code>{len(summary['rejection_redraw_log'])}</code>
         </div>
       </div>
     </div>
     <div class="grid-50">{"".join(thumbs_html)}</div>
+    <details class="limits-box">
+      <summary style="cursor:pointer;font-weight:600;">查看当前怪兽关节限制表 (<code>joint_limits.json</code> · 共 {len(jl_summary.get('bones') or {})} 骨)</summary>
+      <table>
+        <thead><tr><th>规范骨骼名</th><th>Kind</th><th>RX 范围</th><th>RY 范围</th><th>RZ 范围</th><th>来源</th></tr></thead>
+        <tbody>{jl_table_html}</tbody>
+      </table>
+    </details>
   </div>
 
   <div id="pose-modal" class="modal">
@@ -313,10 +350,10 @@ def build_g2_review_html(
     function renderModal() {{
       const p = POSES[curIdx];
       document.getElementById('modal-title').textContent = p.pose_id + ' (' + (curIdx + 1) + '/50)';
-      document.getElementById('modal-regime').textContent = p.regime;
+      document.getElementById('modal-regime').textContent = p.regime + ' · 最大边界利用率 ' + Math.round((p.max_utilization || 0) * 100) + '%';
       document.getElementById('modal-img').src = showOverlay ? p.overlay_rel : p.raw_rel;
       document.getElementById('layer-btn').textContent = '切换原图 / 2D 标签图层 (当前: ' + (showOverlay ? '2D 标签叠加图' : '正交多视图原图') + ')';
-      document.getElementById('modal-joints').textContent = JSON.stringify({{root_offset: p.root_offset, joints_deg: p.joints_deg}}, null, 2);
+      document.getElementById('modal-joints').textContent = JSON.stringify({{boundary_joints: p.boundary_joints, root_offset: p.root_offset, joints_deg: p.joints_deg}}, null, 2);
     }}
     function openModal(idx) {{ curIdx = idx; document.getElementById('pose-modal').classList.add('open'); renderModal(); }}
     function closeModal() {{ document.getElementById('pose-modal').classList.remove('open'); }}
@@ -373,11 +410,30 @@ def build_g2_review_pack(
     if not val["valid"]:
         raise RuntimeError(f"G2 硬门禁阻断：选定候选骨骼未通过规范命名校验 ({val['non_canonical_bones']})")
 
+    limits_path = work_dir / "joint_limits.json"
+    if limits_path.is_file():
+        joint_limits_profile = json.loads(limits_path.read_text(encoding="utf-8"))
+    else:
+        joint_limits_profile = probe_rig_joint_limits(
+            rig_meta["bones"],
+            monster_id=monster_id,
+            archetype=str(rig_meta.get("archetype", "humanoid")),
+            bbox_min=rig_meta.get("bbox_min"),
+            bbox_max=rig_meta.get("bbox_max"),
+        )
+        joint_limits_profile["selected_candidate_id"] = selected_cid
+        joint_limits_profile["generated_at"] = now_taipei_iso()
+        limits_path.write_text(
+            json.dumps(joint_limits_profile, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
     classified = classify_rig_bones(
         rig_meta["bones"],
         bbox_min=rig_meta.get("bbox_min"),
         bbox_max=rig_meta.get("bbox_max"),
     )
+    classified = apply_joint_limits_profile(classified, joint_limits_profile)
 
     panel_w, panel_h, comp_w, comp_h = studio_resolution()
     views = list(studio_view_order())
@@ -404,6 +460,8 @@ def build_g2_review_pack(
             str(blend_path),
             "--meta_path",
             str(meta_path),
+            "--limits_path",
+            str(limits_path),
             "--out_dir",
             str(g2_dir),
             "--num_samples",
@@ -423,13 +481,20 @@ def build_g2_review_pack(
 
     for idx in range(int(num_poses)):
         pose_id = f"pose_{idx + 1:03d}"
-        eulers, regime = sample_stratified_pose_euler_dict(
+        eulers, regime, boundary_info = sample_boundary_exploration_pose_euler_dict(
             classified,
             rng=rng,
             sample_idx=idx,
-            enforce_anatomical_floor=True,
+            total_samples=int(num_poses),
+            joint_limits_profile=joint_limits_profile,
         )
-        root_off = sample_root_translation_offset(classified, rng, sample_idx=idx)
+        root_off = sample_root_translation_offset(
+            classified,
+            rng,
+            sample_idx=idx,
+            joint_limits_profile=joint_limits_profile,
+            boundary_exploration=True,
+        )
         endpoints = compute_posed_bone_endpoints_fk(classified, eulers, root_offset=root_off)
 
         raw_png = g2_dir / f"{pose_id}.png"
@@ -451,6 +516,8 @@ def build_g2_review_pack(
             "raw_rel": raw_png.name,
             "overlay_rel": ov_png.name,
             "root_offset": [round(float(x), 4) for x in root_off],
+            "boundary_joints": boundary_info.get("boundary_joints", []),
+            "max_utilization": boundary_info.get("max_utilization", 0.0),
             "joints_rad": {k: [round(float(x), 5) for x in v] for k, v in eulers.items()},
             "uv_labels": uv_labels,
         })
@@ -459,13 +526,17 @@ def build_g2_review_pack(
     build_g2_overview_grid(overlay_paths, overview_jpg)
 
     coverage_audit = audit_pose_dataset_coverage(audit_samples, classified, enforce_anatomical_floor=True)
+    boundary_audit = audit_boundary_exploration_coverage(audit_samples, classified)
+    coverage_audit["boundary_exploration_audit"] = boundary_audit
     redraw_log_path = g2_dir / "rejection_redraw_log.json"
     redraw_log_path.write_text(json.dumps(rejection_redraw_log, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
+    jl_sha = sha256_file(limits_path)
     sampler_sig = sha256_json({
         "seed": int(seed),
         "num_poses": int(num_poses),
         "selected_candidate_id": selected_cid,
+        "joint_limits_sha256": jl_sha,
         "limits": {b: classified[b].get("limits_rad") for b in sorted(classified)},
     })[:16]
 
@@ -475,8 +546,23 @@ def build_g2_review_pack(
         "seed": int(seed),
         "num_poses": int(num_poses),
         "sampler_signature": sampler_sig,
+        "joint_limits_path": str(limits_path),
+        "joint_limits_sha256": jl_sha,
+        "joint_limits_summary": {
+            "schema": joint_limits_profile.get("schema", JOINT_LIMITS_SCHEMA),
+            "root_motion": joint_limits_profile.get("root_motion"),
+            "bones": {
+                b_n: {
+                    "kind": b_v.get("kind"),
+                    "limits_deg": b_v.get("limits_deg"),
+                    "source": b_v.get("source", "probe_initial"),
+                }
+                for b_n, b_v in (joint_limits_profile.get("bones") or {}).items()
+            },
+        },
         "calibration": calib,
         "coverage_audit": coverage_audit,
+        "boundary_exploration_audit": boundary_audit,
         "rejection_redraw_log": rejection_redraw_log,
         "overview_jpg": str(overview_jpg),
         "generated_at": now_taipei_iso(),
@@ -495,11 +581,15 @@ def build_g2_review_pack(
             "selected_candidate_id": selected_cid,
             "seed": int(seed),
             "num_poses": int(num_poses),
+            "joint_limits_path": str(limits_path),
             "overview_jpg": str(overview_jpg),
             "summary_json": str(summary_path),
             "rejection_redraw_log": str(redraw_log_path),
         },
-        fingerprints={"g2_sampler_signature": sampler_sig},
+        fingerprints={
+            "g2_sampler_signature": sampler_sig,
+            "joint_limits_sha256": jl_sha,
+        },
     )
     ledger["gates"]["G2"]["seed"] = int(seed)
     save_ledger(ledger, project_root=proj, drive_root=drive_root)
@@ -510,10 +600,12 @@ def build_g2_review_pack(
         "selected_candidate_id": selected_cid,
         "seed": int(seed),
         "num_poses": len(pose_records),
+        "joint_limits_path": str(limits_path),
         "review_html": str(html_path),
         "overview_jpg": str(overview_jpg),
         "summary_json": str(summary_path),
         "coverage_passed": coverage_audit["passed"],
+        "boundary_exploration_passed": boundary_audit["passed"],
     }
 
 

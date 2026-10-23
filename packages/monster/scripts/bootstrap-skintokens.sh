@@ -6,7 +6,16 @@ UPSTREAM=273b691d35989d71cd17ff2895fdc735097b92d1
 FLASH=965c9212e6be33c821ee9f2b461564c5c91a2503
 mkdir -p "$ROOT"
 mkdir -p "$CACHE/wheels"
-export UV_CACHE_DIR="$CACHE/uv"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+export UV_CACHE_DIR="${MONSTER_UV_CACHE_DIR:-$ROOT/cache_local/uv}"
+if [ "${MONSTER_UV_CACHE_SESSION:-0}" != 1 ]; then
+  command -v uv >/dev/null || python -m pip install 'uv==0.9.5'
+  UV_VERSION="$(uv --version | awk '{print $2}')"
+  CACHE_KEY="linux-x86_64-py311-torch291-cu130-sm120-uv${UV_VERSION}-${UPSTREAM}-${FLASH}"
+  exec python "$SCRIPT_DIR/uv_cache_session.py" run \
+    --cache-dir "$UV_CACHE_DIR" --drive-root "$CACHE/uv_snapshots" --key "$CACHE_KEY" \
+    -- bash "$0" "$@"
+fi
 cd "$ROOT"
 nvidia-smi --query-gpu=name,memory.total --format=csv
 GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader)"
@@ -27,7 +36,22 @@ export CUDA_HOME=/usr/local/cuda
 export PATH="$ROOT/venv/bin:$CUDA_HOME/bin:$PATH"
 export MAX_JOBS=8 NVCC_THREADS=2 FLASH_ATTN_CUDA_ARCHS=120 TORCH_CUDA_ARCH_LIST=12.0
 export FLASH_ATTENTION_FORCE_BUILD=TRUE
-uv pip install --python "$PY" torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu130
+TORCH_REQUIREMENT="torch==2.9.1"
+TORCH_WHEEL_NAME='torch-2.9.1+cu130-cp311-cp311-manylinux_2_28_x86_64.whl'
+TORCH_DRIVE_WHEEL="$CACHE/wheels/py311-torch291-cu130/$TORCH_WHEEL_NAME"
+# Recovery downloads may originate from a local wheel rather than an index URL.
+# Keep that verified wheel reusable even when uv's URL cache key differs next boot.
+if [ -f "$TORCH_DRIVE_WHEEL" ]; then
+  mkdir -p "$ROOT/dependency_wheels"
+  TORCH_LOCAL_WHEEL="$ROOT/dependency_wheels/$TORCH_WHEEL_NAME"
+  cp "$TORCH_DRIVE_WHEEL" "$TORCH_LOCAL_WHEEL"
+  if printf '%s  %s\n' f40778951ca1533dc634b3842392641fa0b641181ff2f71d62728ef33cc36a5c "$TORCH_LOCAL_WHEEL" | sha256sum --check --status; then
+    TORCH_REQUIREMENT="$TORCH_LOCAL_WHEEL"
+  else
+    echo 'Cached Torch wheel failed the official digest check; using the pinned upstream index.' >&2
+  fi
+fi
+uv pip install --python "$PY" "$TORCH_REQUIREMENT" torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu130
 uv pip install --python "$PY" -r upstream/requirements.txt \
   transformers==4.57.6 diffusers==0.35.2 gradio==5.49.1 \
   numpy==1.26.4 scipy==1.15.3 bpy==4.2.0 lightning==2.5.5 ninja packaging psutil wheel setuptools
