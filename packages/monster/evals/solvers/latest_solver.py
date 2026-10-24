@@ -25,6 +25,7 @@ if str(WORKER_DIR) not in sys.path:
 
 from bone_taxonomy import (  # noqa: E402
     BONE_TAXONOMY_SCHEMA,
+    apply_joint_limits_profile,
     classify_rig_bones,
     clean_uv_short_gaps_hampel,
     reconstruct_frames_with_kind_solvers,
@@ -81,6 +82,14 @@ def run_latest_solver(
         bbox_max=studio_rig_meta.get("bbox_max"),
         constraints_meta=constraints_meta,
     )
+    joint_limits_profile = studio_rig_meta.get("joint_limits_profile")
+    if isinstance(joint_limits_profile, dict):
+        classified_bones = apply_joint_limits_profile(
+            classified_bones,
+            joint_limits_profile=joint_limits_profile,
+            bbox_min=studio_rig_meta.get("bbox_min"),
+            bbox_max=studio_rig_meta.get("bbox_max"),
+        )
 
     # Stage 1: Raw 2D & Aux Observations
     uv_f_raw = np.asarray(observations["uv_front_all"], dtype=np.float64)

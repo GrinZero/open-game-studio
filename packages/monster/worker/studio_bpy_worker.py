@@ -57,6 +57,7 @@ from bone_taxonomy import (
     audit_pose_dataset_coverage,
     build_bounded_local_euler_rotation,
     canonicalize_rig_bone_names_in_blender,
+    clamp_local_delta_euler,
     classify_rig_bones,
     compute_stratified_motion_metrics,
     effective_sampling_limits_for_bone,
@@ -979,7 +980,7 @@ def sample_in_limit_pose(
         if not pbone:
             continue
         rot = list(raw)
-        if not pbone.children:
+        if not pbone.children and not bool(bones_meta.get(b_name, {}).get("allow_leaf_twist", False)):
             rot[1] = 0.0
         pbone.rotation_mode = "XYZ"
         pbone.rotation_euler = Euler(rot, "XYZ")
@@ -1316,7 +1317,11 @@ def generate_stage2_synthetic_dataset(
                     else 1.0
                 )
                 delta = [rng.uniform(-0.5, 0.5) * speed_mul for _ in range(3)]
-                if not pb.children or b_info.get("fixed_local") or b_info.get("kind") == "rigid":
+                if (
+                    (not pb.children and not bool(b_info.get("allow_leaf_twist", False)))
+                    or b_info.get("fixed_local")
+                    or b_info.get("kind") == "rigid"
+                ):
                     delta[1] = 0.0
                 if b_info.get("fixed_local") or b_info.get("kind") == "rigid":
                     delta = [0.0, 0.0, 0.0]
@@ -1338,7 +1343,7 @@ def generate_stage2_synthetic_dataset(
                 if info.get("role") not in ("root", "spine") and not info.get("fixed_local") and rng.random() < 0.45:
                     lims = effective_sampling_limits_for_bone(info, enforce_anatomical_floor=True)
                     delta = [rng.uniform(-0.35, 0.35) for _ in range(3)]
-                    if not pb.children:
+                    if not pb.children and not bool(info.get("allow_leaf_twist", False)):
                         delta[1] = 0.0
                     rot2 = [
                         float(np.clip(pose_f1[b_name][i] + delta[i], lims[i][0], lims[i][1]))
@@ -1514,9 +1519,12 @@ def synthesize_stage4_exam_sequence(
             rng,
             sample_idx=f_idx // max(1, key_step),
             joint_limits_profile=joint_limits_profile,
+            sample_root_location=bool(joint_limits_profile is not None),
         )
         for pbone in arm_obj.pose.bones:
             pbone.keyframe_insert(data_path="rotation_euler", frame=f_idx)
+            if pbone.parent is None and joint_limits_profile is not None:
+                pbone.keyframe_insert(data_path="location", frame=f_idx)
 
     if arm_obj.animation_data and arm_obj.animation_data.action:
         for fc in arm_obj.animation_data.action.fcurves:
@@ -2033,6 +2041,13 @@ def bake_3d_joints_to_animated_glb(
                 continue
             if "rot_mat_world" in b_dict[b_name]:
                 R_pre = np.array(b_dict[b_name]["rot_mat_world"], dtype=np.float64)
+                if joint_limits_profile is not None and b_name in bones_meta:
+                    b_info = bones_meta[b_name]
+                    if b_info.get("kind") == "rigid" or bool(b_info.get("fixed_local", False)):
+                        R_pre = R_init
+                    elif "limits_rad" in b_info:
+                        delta_pre = clamp_local_delta_euler(R_init.T @ R_pre, b_info["limits_rad"])
+                        R_pre = R_init @ delta_pre
                 posed_R[b_name] = R_pre
                 solved_world_R[b_name][f_idx] = R_pre
                 has_precomputed_rot = True

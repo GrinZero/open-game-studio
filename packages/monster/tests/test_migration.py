@@ -2034,6 +2034,140 @@ class MonsterSopExecutionSuiteTests(unittest.TestCase):
                 self.assertLessEqual(abs(math.degrees(float(eul_c[0]))), 10.05)
                 self.assertLessEqual(abs(math.degrees(float(eul_c[1]))), 5.05)
                 self.assertLessEqual(abs(math.degrees(float(eul_c[2]))), 8.05)
+
+                # 6. Verify multi-digit claw fan (3+ digits, rest_length < 0.035) and hand_hub
+                #    reconstruct full custom joint_limits.json angles (>30 deg) instead of 2.5 deg / 25 deg caps,
+                #    and verify macro_collapse never expands custom spine/root limits.
+                claw_raw_bones = {
+                    "ROOT_C_00_00": {
+                        "parent": None,
+                        "rest_head_world": [0.0, 0.0, 0.40],
+                        "rest_tail_world": [0.0, 0.0, 0.60],
+                        "rest_length": 0.20,
+                    },
+                    "SPINE_C_00_01": {
+                        "parent": "ROOT_C_00_00",
+                        "rest_head_world": [0.0, 0.0, 0.60],
+                        "rest_tail_world": [0.0, 0.0, 0.90],
+                        "rest_length": 0.30,
+                    },
+                    "LIMB_L_01_00": {
+                        "parent": "SPINE_C_00_01",
+                        "rest_head_world": [0.15, 0.0, 0.85],
+                        "rest_tail_world": [0.35, 0.0, 0.85],
+                        "rest_length": 0.20,
+                    },
+                    "HAND_L_01_01": {
+                        "parent": "LIMB_L_01_00",
+                        "rest_head_world": [0.35, 0.0, 0.85],
+                        "rest_tail_world": [0.40, 0.0, 0.85],
+                        "rest_length": 0.05,
+                    },
+                    "DIGIT_L_01_00": {
+                        "parent": "HAND_L_01_01",
+                        "rest_head_world": [0.40, 0.02, 0.85],
+                        "rest_tail_world": [0.425, 0.02, 0.85],
+                        "rest_length": 0.025,
+                    },
+                    "DIGIT_L_02_00": {
+                        "parent": "HAND_L_01_01",
+                        "rest_head_world": [0.40, 0.0, 0.85],
+                        "rest_tail_world": [0.425, 0.0, 0.85],
+                        "rest_length": 0.025,
+                    },
+                    "DIGIT_L_03_00": {
+                        "parent": "HAND_L_01_01",
+                        "rest_head_world": [0.40, -0.02, 0.85],
+                        "rest_tail_world": [0.425, -0.02, 0.85],
+                        "rest_length": 0.025,
+                    },
+                }
+                claw_cls = tax.classify_rig_bones(
+                    claw_raw_bones, bbox_min=[-0.5, -0.4, 0.0], bbox_max=[0.5, 0.4, 1.2]
+                )
+                self.assertEqual(claw_cls["DIGIT_L_01_00"]["kind"], "digit")
+                claw_prof = tax.probe_rig_joint_limits(
+                    claw_cls,
+                    monster_id="claw_beast",
+                    archetype="humanoid",
+                    bbox_min=[-0.5, -0.4, 0.0],
+                    bbox_max=[0.5, 0.4, 1.2],
+                )
+                # Set narrow custom limits on ROOT/SPINE and wide custom limits on DIGIT/HAND
+                claw_prof["bones"]["ROOT_C_00_00"]["limits_deg"] = {"rx": [-8.0, 8.0], "ry": [-8.0, 8.0], "rz": [-8.0, 8.0]}
+                claw_prof["bones"]["ROOT_C_00_00"]["source"] = "agent_custom"
+                claw_prof["root_motion"]["global_pitch_deg"] = [-8.0, 8.0]
+                claw_prof["bones"]["SPINE_C_00_01"]["limits_deg"] = {"rx": [-10.0, 10.0], "ry": [-8.0, 8.0], "rz": [-8.0, 8.0]}
+                claw_prof["bones"]["SPINE_C_00_01"]["source"] = "agent_custom"
+                for dn in ("DIGIT_L_01_00", "DIGIT_L_02_00", "DIGIT_L_03_00"):
+                    claw_prof["bones"][dn]["limits_deg"] = {"rx": [-60.0, 45.0], "ry": [-15.0, 15.0], "rz": [-50.0, 50.0]}
+                    claw_prof["bones"][dn]["source"] = "agent_custom"
+                claw_applied = tax.apply_joint_limits_profile(claw_cls, claw_prof)
+                self.assertTrue(claw_applied["DIGIT_L_01_00"].get("allow_leaf_twist"))
+
+                c_names = sorted(claw_applied.keys())
+                T_c = 8
+                pts_c = tax.np.zeros((T_c, 2 * len(c_names), 3), dtype=tax.np.float64)
+                trust_c = tax.np.full((T_c, 2 * len(c_names)), 0.92, dtype=tax.np.float64)
+                for b_i, bn in enumerate(c_names):
+                    pts_c[:, 2 * b_i] = claw_applied[bn]["rest_head_world"]
+                    pts_c[:, 2 * b_i + 1] = claw_applied[bn]["rest_tail_world"]
+
+                # Deflect DIGIT_L_01_00 down by 42 deg in Z (from +X towards -Z)
+                d1_idx = c_names.index("DIGIT_L_01_00")
+                ang_rad = math.radians(42.0)
+                pts_c[:, 2 * d1_idx + 1] = tax.np.array(
+                    [0.40 + 0.025 * math.cos(ang_rad), 0.02, 0.85 - 0.025 * math.sin(ang_rad)],
+                    dtype=tax.np.float64,
+                )
+                # Trigger macro_collapse on SPINE_C_00_01 by lowering its observed tail Z strongly
+                sp_idx = c_names.index("SPINE_C_00_01")
+                pts_c[:, 2 * sp_idx + 1] = tax.np.array([0.0, -0.30, 0.55], dtype=tax.np.float64)
+
+                frames_c, diag_c = tax.reconstruct_frames_with_kind_solvers(
+                    pts_3d=pts_c,
+                    trust=trust_c,
+                    bone_names=c_names,
+                    classified_bones=claw_applied,
+                )
+                self.assertLessEqual(diag_c["final_limit_max_violation_rad"], 1e-4)
+
+                # Verify DIGIT_L_01_00 achieved >35 deg rotation instead of being capped at 2.5 deg
+                R_hand = tax.np.asarray(frames_c[-1]["bones"]["HAND_L_01_01"]["rot_mat_world"])
+                R_d1 = tax.np.asarray(frames_c[-1]["bones"]["DIGIT_L_01_00"]["rot_mat_world"])
+                v0_h = tax.np.asarray(claw_applied["HAND_L_01_01"]["rest_tail_world"]) - tax.np.asarray(
+                    claw_applied["HAND_L_01_01"]["rest_head_world"]
+                )
+                v0_d1 = tax.np.asarray(claw_applied["DIGIT_L_01_00"]["rest_tail_world"]) - tax.np.asarray(
+                    claw_applied["DIGIT_L_01_00"]["rest_head_world"]
+                )
+                R_rest_h = tax._build_default_rest_rot_matrix(v0_h / float(tax.np.linalg.norm(v0_h)))
+                R_rest_d1 = tax._build_default_rest_rot_matrix(v0_d1 / float(tax.np.linalg.norm(v0_d1)))
+                R_init_d1 = R_hand @ (R_rest_h.T @ R_rest_d1)
+                delta_d1 = R_init_d1.T @ R_d1
+                geod_d1_deg = math.degrees(
+                    math.acos(max(-1.0, min(1.0, (float(tax.np.trace(delta_d1)) - 1.0) * 0.5)))
+                )
+                geod_d1_world_deg = math.degrees(
+                    math.acos(max(-1.0, min(1.0, (float(tax.np.trace(R_rest_d1.T @ R_d1)) - 1.0) * 0.5)))
+                )
+                self.assertGreater(geod_d1_deg, 28.0)
+                self.assertGreater(geod_d1_world_deg, 40.0)
+
+                # Verify SPINE_C_00_01 did NOT exceed its custom [-10, 10] deg limit despite macro_collapse
+                R_root_w = tax.np.asarray(frames_c[-1]["bones"]["ROOT_C_00_00"]["rot_mat_world"])
+                R_sp_w = tax.np.asarray(frames_c[-1]["bones"]["SPINE_C_00_01"]["rot_mat_world"])
+                v0_rt = tax.np.asarray(claw_applied["ROOT_C_00_00"]["rest_tail_world"]) - tax.np.asarray(
+                    claw_applied["ROOT_C_00_00"]["rest_head_world"]
+                )
+                v0_sp = tax.np.asarray(claw_applied["SPINE_C_00_01"]["rest_tail_world"]) - tax.np.asarray(
+                    claw_applied["SPINE_C_00_01"]["rest_head_world"]
+                )
+                R_rest_rt = tax._build_default_rest_rot_matrix(v0_rt / float(tax.np.linalg.norm(v0_rt)))
+                R_rest_sp = tax._build_default_rest_rot_matrix(v0_sp / float(tax.np.linalg.norm(v0_sp)))
+                R_init_sp = R_root_w @ (R_rest_rt.T @ R_rest_sp)
+                eul_sp = tax.matrix_to_euler_xyz_numpy(R_init_sp.T @ R_sp_w)
+                self.assertLessEqual(abs(math.degrees(float(eul_sp[0]))), 10.05)
         finally:
             sys.path.remove(str(ROOT / "worker"))
 

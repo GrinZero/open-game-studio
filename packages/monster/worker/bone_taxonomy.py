@@ -1296,6 +1296,32 @@ def solve_bone_rotation_by_kind(
     if kind == "digit":
         R_sw = minimum_swing_matrix_numpy(np.array([0.0, 1.0, 0.0], dtype=np.float64), d_loc)
         delta_raw = clamp_local_delta_euler(R_sw, lims)
+        has_custom_digit_lims = str(info.get("limits_source", "")) in ("agent_custom", "probe_initial")
+        if has_custom_digit_lims:
+            conf_d = float(
+                obs_lookup.get(b_name, b_data).get("tail_conf", obs_lookup.get(b_name, b_data).get("confidence", 0.9))
+            )
+            if conf_d < 0.35:
+                max_lim_deg = max(
+                    15.0,
+                    math.degrees(
+                        max(
+                            abs(rx_lims[0]),
+                            abs(rx_lims[1]),
+                            abs(ry_lo),
+                            abs(ry_hi),
+                            abs(rz_lims[0]),
+                            abs(rz_lims[1]),
+                        )
+                    ),
+                )
+                delta_raw = clamp_local_delta_euler(
+                    blend_rotation_matrices_slerp(
+                        np.eye(3, dtype=np.float64), delta_raw, max(0.35, conf_d / 0.35), max_lim_deg
+                    ),
+                    lims,
+                )
+            return R_init @ delta_raw, 0.0
         p_children = children_map.get(p_name, []) if p_name else []
         gp_name = bones_meta.get(p_name, {}).get("parent") if p_name else None
         gp_children = children_map.get(gp_name, []) if gp_name else []
@@ -1312,6 +1338,7 @@ def solve_bone_rotation_by_kind(
     # 3. Limb Solver: Gimbal-Free Swing-Twist + Palm Centroid Swing (`hand_hub`) + Child-Pivot Swing-Twist (`forearm_hinge`)
     if kind == "limb":
         explicit_custom = lims_override is not None or str(info.get("limits_source", "")) in ("agent_custom", "probe_initial")
+        has_custom_profile = str(info.get("limits_source", "")) in ("agent_custom", "probe_initial")
         h_b_obs = np.array(obs_lookup.get(b_name, b_data)["head_3d"], dtype=np.float64)
         t_b_obs = np.array(obs_lookup.get(b_name, b_data)["tail_3d"], dtype=np.float64)
         obs_dir = t_b_obs - h_b_obs
@@ -1360,7 +1387,26 @@ def solve_bone_rotation_by_kind(
             else:
                 R_sw_comb = R_sw_self
 
-            R_sw_damped = blend_rotation_matrices_slerp(np.eye(3, dtype=np.float64), R_sw_comb, 0.68, 25.0)
+            if has_custom_profile:
+                max_lim_deg = max(
+                    25.0,
+                    math.degrees(
+                        max(
+                            abs(rx_lims[0]),
+                            abs(rx_lims[1]),
+                            abs(ry_lo),
+                            abs(ry_hi),
+                            abs(rz_lims[0]),
+                            abs(rz_lims[1]),
+                        )
+                    ),
+                )
+                wrist_alpha = 1.0 if conf_b >= 0.75 else max(0.68, conf_b)
+                R_sw_damped = blend_rotation_matrices_slerp(
+                    np.eye(3, dtype=np.float64), R_sw_comb, wrist_alpha, max_lim_deg
+                )
+            else:
+                R_sw_damped = blend_rotation_matrices_slerp(np.eye(3, dtype=np.float64), R_sw_comb, 0.68, 25.0)
             if explicit_custom:
                 R_sw_damped = clamp_local_delta_euler(R_sw_damped, lims)
             return R_init @ R_sw_damped, 0.0
@@ -1418,6 +1464,8 @@ def solve_bone_rotation_by_kind(
                         w_tau_noisy = min(0.55, ((n1 / n0) ** 2) * 0.45)
                         w_tau = w_clean * 1.0 + (1.0 - w_clean) * w_tau_noisy
                         max_tau = math.radians(65.0) if w_clean > 0.5 else math.radians(42.0)
+                        if has_custom_profile and (ry_hi - ry_lo) > 1e-6:
+                            max_tau = max(max_tau, abs(ry_lo), abs(ry_hi))
                         tau = float(np.clip(w_tau * tau_raw, -max_tau, max_tau))
                         if explicit_custom and (ry_hi - ry_lo) > 1e-6:
                             tau = float(np.clip(tau, ry_lo, ry_hi))
@@ -1434,7 +1482,7 @@ def solve_bone_rotation_by_kind(
 
     # 4. Spine / Head / Jaw / Flex / Tail / Wing Solver (Bounded Local-Euler + Child Observability)
     if not valid_children or (ry_hi - ry_lo) < 1e-4:
-        ry_best = 0.0 if not valid_children else ry_prior
+        ry_best = 0.0 if (not valid_children and not bool(info.get("allow_leaf_twist", False))) else ry_prior
         R_loc = build_bounded_local_euler_rotation(d_loc, ry_best, rx_lims, rz_lims)
         return R_init @ R_loc, ry_best
 
@@ -1689,7 +1737,10 @@ def refine_frames_with_dense_lbs(
 
             # Unlock axial roll limits ONLY on leaf/paddle bones with sufficient off-axis surface support
             # (or bones with explicit dense_roll_limits_rad) where axial roll cannot twist downstream chains!
-            if (off_axis_count >= 12 or "dense_roll_limits_rad" in info) and (ry_hi - ry_lo) < deg(15.0):
+            if (
+                (off_axis_count >= 12 and str(info.get("limits_source", "")) != "agent_custom")
+                or "dense_roll_limits_rad" in info
+            ) and (ry_hi - ry_lo) < deg(15.0):
                 dense_roll = info.get("dense_roll_limits_rad", [-deg(40.0), deg(40.0)])
                 ry_lo = min(ry_lo, float(dense_roll[0]))
                 ry_hi = max(ry_hi, float(dense_roll[1]))
@@ -1974,9 +2025,11 @@ def reconstruct_frames_with_kind_solvers(
             depth_scale=depth_scale,
         )
         root_lims = copy.deepcopy(effective_base_limits[root])
+        root_has_custom_lims = str(classified_bones[root].get("limits_source", "")) in ("agent_custom", "probe_initial")
         if macro_collapse > 0.0:
-            pitch_exp = macro_collapse * deg(30.0)
-            root_lims[0] = [min(float(root_lims[0][0]), -pitch_exp), max(float(root_lims[0][1]), pitch_exp)]
+            if not root_has_custom_lims:
+                pitch_exp = macro_collapse * deg(30.0)
+                root_lims[0] = [min(float(root_lims[0][0]), -pitch_exp), max(float(root_lims[0][1]), pitch_exp)]
             if u_macro is not None and top_axial is not None:
                 v_ax_rest = rest_T[top_axial] - rest_H[root]
                 u_ax_rest = v_ax_rest / max(1e-8, float(np.linalg.norm(v_ax_rest)))
@@ -2023,7 +2076,8 @@ def reconstruct_frames_with_kind_solvers(
             kind = str(info.get("kind", "limb"))
             sub_role = str(info.get("sub_role", ""))
             lims = copy.deepcopy(effective_base_limits[n])
-            if macro_collapse > 0.0 and kind in ("spine", "head") and info.get("side") == "C":
+            has_custom_lims = str(info.get("limits_source", "")) in ("agent_custom", "probe_initial")
+            if macro_collapse > 0.0 and not has_custom_lims and kind in ("spine", "head") and info.get("side") == "C":
                 pitch_exp = macro_collapse * deg(35.0)
                 lims[0] = [min(float(lims[0][0]), -pitch_exp), max(float(lims[0][1]), pitch_exp)]
 
@@ -2172,7 +2226,7 @@ def reconstruct_frames_with_kind_solvers(
                         p_ch = children_map.get(p, []) if p else []
                         gp = classified_bones.get(p, {}).get("parent") if p else None
                         gp_ch = children_map.get(gp, []) if gp else []
-                        if len(p_ch) < 3 and len(gp_ch) < 3 and rest_len >= 0.035:
+                        if has_custom_lims or (len(p_ch) < 3 and len(gp_ch) < 3 and rest_len >= 0.035):
                             alpha, max_step = (0.72, 16.0)
                     alpha_eff = 1.0 - (1.0 - alpha) * motion_smooth_scale
                     max_step_eff = max_step / max(0.15, motion_smooth_scale)
@@ -2320,7 +2374,8 @@ def reconstruct_frames_with_kind_solvers(
                 p = info.get("parent")
                 k = str(info.get("kind", "limb"))
                 lims = copy.deepcopy(effective_base_limits[n])
-                if m_col > 0.0:
+                has_custom_lims = str(info.get("limits_source", "")) in ("agent_custom", "probe_initial")
+                if m_col > 0.0 and not has_custom_lims:
                     if n == root:
                         pitch_exp = m_col * deg(28.0)
                         lims[0] = [min(float(lims[0][0]), -pitch_exp), max(float(lims[0][1]), pitch_exp)]
@@ -2682,7 +2737,23 @@ def apply_joint_limits_profile(
                 info["canonical_default_limits_deg"] = copy.deepcopy(b_prof["canonical_default_limits_deg"])
             if "rationale" in b_prof:
                 info["rationale"] = str(b_prof["rationale"])
-            info["limits_source"] = str(b_prof.get("limits_source") or b_prof.get("source") or profile_source)
+            if "allow_leaf_twist" in b_prof:
+                info["allow_leaf_twist"] = bool(b_prof["allow_leaf_twist"])
+            src_cand = (
+                "agent_custom"
+                if "agent_custom" in (b_prof.get("source"), b_prof.get("limits_source"))
+                else (b_prof.get("source") or b_prof.get("limits_source") or profile_source)
+            )
+            info["limits_source"] = str(src_cand)
+            if (
+                info["limits_source"] == "agent_custom"
+                and info.get("kind") != "rigid"
+                and not bool(info.get("fixed_local", False))
+                and isinstance(info.get("limits_rad"), list)
+                and len(info["limits_rad"]) == 3
+                and abs(float(info["limits_rad"][1][1]) - float(info["limits_rad"][1][0])) > 1e-4
+            ):
+                info["allow_leaf_twist"] = True
 
         if b_name == primary_root and global_root:
             info["global_root"] = copy.deepcopy(global_root)
@@ -3160,7 +3231,8 @@ def sample_stratified_pose_euler_dict(
 
         lims = effective_sampling_limits_for_bone(info, enforce_anatomical_floor=enforce_anatomical_floor)
         base_corr = float(info.get("chain_corr", 0.0))
-        if base_corr <= 0.0 and kind in ("digit", "flex", "tail", "spine", "wing", "head"):
+        has_explicit_corr = "chain_corr" in info and str(info.get("limits_source", "")) in ("agent_custom", "probe_initial")
+        if not has_explicit_corr and base_corr <= 0.0 and kind in ("digit", "flex", "tail", "spine", "wing", "head"):
             _, base_corr, _ = default_limits_and_corr_for_kind(kind, sub_role, is_leaf=is_leaf)
         parent_name = info.get("parent")
         has_parent_euler = bool(parent_name and parent_name in sampled_eulers)
@@ -3234,7 +3306,7 @@ def sample_stratified_pose_euler_dict(
                         raw[0] = float(np.clip(0.32 * wave_eul[0] + 0.68 * raw[0], lims[0][0], lims[0][1]))
                         raw[2] = float(np.clip(0.32 * wave_eul[2] + 0.68 * raw[2], lims[2][0], lims[2][1]))
 
-        if is_leaf:
+        if is_leaf and not bool(info.get("allow_leaf_twist", False)):
             raw[1] = 0.0
 
         sampled_eulers[b_name] = raw
@@ -3770,7 +3842,7 @@ def audit_pose_dataset_coverage(
         is_leaf = not bool(info.get("children"))
         arr = eulers_by_bone[b]
         for ax in range(3):
-            if is_leaf and ax == 1:
+            if is_leaf and ax == 1 and not bool(info.get("allow_leaf_twist", False)):
                 continue
             span = float(lims[ax][1] - lims[ax][0])
             if span <= 1e-3:

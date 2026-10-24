@@ -571,7 +571,8 @@ def apply_floor_and_foot_contact_constraints(
                 p = info.get("parent")
                 k = str(info.get("kind", "limb"))
                 lims = copy.deepcopy(effective_base_limits[n])
-                if m_col > 0.0:
+                has_custom_lims = str(info.get("limits_source", "")) in ("agent_custom", "probe_initial")
+                if m_col > 0.0 and not has_custom_lims:
                     if n == root:
                         pitch_exp = m_col * math.radians(28.0)
                         lims[0] = [min(float(lims[0][0]), -pitch_exp), max(float(lims[0][1]), pitch_exp)]

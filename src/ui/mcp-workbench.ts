@@ -7,7 +7,7 @@ document.documentElement.dataset.mcpApp = "true";
 // Hosts may omit the initial mode. Keep that case bounded like a chat embed.
 document.documentElement.dataset.mcpDisplayMode = "inline";
 const app = new App(
-  { name: "Open Game Studio", version: "0.1.11" },
+  { name: "Open Game Studio", version: "0.1.12" },
   { availableDisplayModes: ["fullscreen", "inline"] },
   { autoResize: false },
 );
