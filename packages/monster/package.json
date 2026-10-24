@@ -1,6 +1,6 @@
 {
   "name": "@open-game-studio/monster",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "private": true,
   "description": "Monster rigging, pose training and animation worker, Colab deployment and client integration",
   "scripts": {

@@ -58,9 +58,10 @@ npm run monster:sop -- gate --monster-id <id> --project-root . --drive-root "$MO
    npm run monster:sop -- joint-limits --monster-id <id> --project-root . --drive-root "$MONSTER_DRIVE_ROOT" probe --archetype humanoid
 
    # 3b. Agent 结合怪物形态（动作无关的完整生理运动包络 + 全局 ROOT 旋转/平移）按需微调各骨限制（保持 G1 通过状态）
+   # 注意：固定正交多视图摄影棚（Front 在 -Y 朝 +Y）下，ROOT 偏航 global_yaw_deg 默认保持正面斜向窗口 [-22:22]，严禁盲目设为 -180:180 导致边界采样把角色转成背对正视图！
    npm run monster:sop -- joint-limits --monster-id <id> --project-root . --drive-root "$MONSTER_DRIVE_ROOT" apply \
      --set-bone "SPINE_C_NECK_01=-35:40,-30:30,-60:60" \
-     --set-root-pitch "-24:24" --set-root-roll "-18:18" --set-root-yaw "-180:180" \
+     --set-root-pitch "-24:24" --set-root-roll "-18:18" --set-root-yaw "-22:22" \
      --notes "按怪兽颈部与胸腔装甲间隙定制动作无关完整运动包络"
 
    # 3c. 基于 joint_limits.json 运行 5 模态分层边界探索随机采样生成 50 个小样与 G2 审阅包
@@ -71,7 +72,7 @@ npm run monster:sop -- gate --monster-id <id> --project-root . --drive-root "$MO
      --project-root . \
      --drive-root "$MONSTER_DRIVE_ROOT"
    ```
-   脚本启动前自动断言 G1 已获用户明确通过且 `selected_candidate_id` 与模型指纹完全匹配。先通过 `joint-limits` 产出或定制独立版本化配置 `scratch/work/<id>/joint_limits.json`（Schema `monster-joint-limits-v1`：不绑定预设窄动作列表，定义怪兽动作无关的完整生理安全包络与全局 `ROOT` 俯仰/横滚/偏航及三维位移比例，保证训练出的检测器具备跨新姿势泛化能力）。随后仅对 G1 选定的完整绑定模型运行 **5 模态分层边界探索随机采样器**（`25% in_phase_boundary_extension`、`20% antiphase_fold_boundary`、`20% cross_occlusion_twist_boundary`、`20% full_body_dynamic_root_boundary`、`15% quasi_uniform_interior_coverage`，并通过轮转边界槽位保证每根活动骨骼的每个有效自由度在 50 个样本中均触达正负两侧 85%~100% 边界区间），**直接按当前锁定的目标视频生成分辨率与视角模式渲染原图**（默认双视图 `[Front | Side(Left)]`：768P 拼合 `1344×768`＝单视图 `672×768`，2K 拼合 `2560×1440`＝单视图 `1280×1440`；若开启 `ENABLE_3VIEW_STUDIO=True` / `MONSTER_ENABLE_3VIEW=1` 三视图 AB 测试特性开关，则采用单画布正视居中三联画 `[Left(+X→-X) | Front(-Y→+Y) | Right(-X→+X)]`：768P 拼合 `1344×768`＝单视图 `448×768 × 3`，2K 拼合 `2688×1440`＝单视图 `896×1440 × 3`），生成 `pose_001`～`pose_050`（含正交多视图原图、`pose_001_overlay.png`～`pose_050_overlay.png` 2D 标签叠加图、单屏 50 缩略图总览 `g2_50_overview.jpg`、`joint_limits.json` 范围总表、逐样本 `boundary_joints` 边界触达标注、异常重抽日志 `rejection_redraw_log.json` 及 `g2_review.html`）。固定 `seed` 并记录真实抽样与异常重抽对应关系，严禁反复换 seed 挑图或手工摆拍代替。等待用户认可随机与边界探索策略并执行 `npm run monster:sop -- gate --monster-id <id> approve --gate G2 --seed 42 --quote "<用户原话>"`，不能直接进入大规模合成或训练。
+   脚本启动前自动断言 G1 已获用户明确通过且 `selected_candidate_id` 与模型指纹完全匹配。先通过 `joint-limits` 产出或定制独立版本化配置 `scratch/work/<id>/joint_limits.json`（Schema `monster-joint-limits-v1`：不绑定预设窄动作列表，定义怪兽动作无关的完整生理安全包络、全局 `ROOT` 俯仰/横滚/偏航及三维位移比例，以及**不依赖特定人形硬编码规则、由任意绑定模型网格顶点、主控权重与骨骼拓扑树自动推导的通用三层关节协调机制 `coordination`**：① 同骨多轴 2D 象限与 3D 卦限椭球耦合 `intra_bone_coupling`，保留单轴 100% 跨度同时抑制多轴对角越界；② 跨骨骼拓扑方向耦合 `inter_bone_couplings`，覆盖相邻父子 `parent_child`、同链跨两跳 `chain_2hop`、共父兄弟 `co_parent_sibling` 与同侧上下肢 `ipsilateral_upper_lower_limb`；③ 骨骼局部多球体代理与 3D 体积防穿插 `body_part_volumes`，通过纯 NumPy FK 实时检测肢体接近胸口或异侧肢体并沿可动祖先链平滑回退，保证训练出的检测器具备跨新姿势泛化能力且消除自穿模）。随后仅对 G1 选定的完整绑定模型运行 **5 模态分层边界探索随机采样器＋通用三层关节协调器（`coordinate_pose_angles`）＋全网格硬部件相交/拉伸闸门**（`25% in_phase_boundary_extension`、`20% antiphase_fold_boundary`、`20% cross_occlusion_twist_boundary`、`20% full_body_dynamic_root_boundary`、`15% quasi_uniform_interior_coverage`，并通过无冲突轮转边界槽位保证每根活动骨骼的每个有效自由度在 50 个样本中均触达正负两侧 85%~100% 边界区间且新增硬部件穿插为 0），**直接按当前锁定的目标视频生成分辨率与视角模式渲染原图**（默认双视图 `[Front | Side(Left)]`：768P 拼合 `1344×768`＝单视图 `672×768`，2K 拼合 `2560×1440`＝单视图 `1280×1440`；若开启 `ENABLE_3VIEW_STUDIO=True` / `MONSTER_ENABLE_3VIEW=1` 三视图 AB 测试特性开关，则采用单画布正视居中三联画 `[Left(+X→-X) | Front(-Y→+Y) | Right(-X→+X)]`：768P 拼合 `1344×768`＝单视图 `448×768 × 3`，2K 拼合 `2688×1440`＝单视图 `896×1440 × 3`），生成 `pose_001`～`pose_050`（含正交多视图原图、`pose_001_overlay.png`～`pose_050_overlay.png` 2D 标签叠加图、单屏 50 缩略图总览 `g2_50_overview.jpg`、`joint_limits.json` 范围总表、逐样本 `boundary_joints` 边界触达标注、异常重抽日志 `rejection_redraw_log.json` 及 `g2_review.html`）。固定 `seed` 并记录真实抽样与异常重抽对应关系，严禁反复换 seed 挑图或手工摆拍代替。等待用户认可随机与边界探索策略并执行 `npm run monster:sop -- gate --monster-id <id> approve --gate G2 --seed 42 --quote "<用户原话>"`，不能直接进入大规模合成或训练。
 
 4. **U2、合成训练与 G3（SOP §5，调用 [sop_g3_exam.py](scripts/sop_g3_exam.py)）**：
    ```sh

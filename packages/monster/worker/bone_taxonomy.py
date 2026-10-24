@@ -621,11 +621,19 @@ def classify_rig_bones(
     # Populate enriched metadata on every bone
     for b in bone_names:
         info = meta[b]
-        k = assigned_kind[b]
-        sub = assigned_sub_role[b]
-        s = assigned_side[b]
-        grp = bone_group_id.get(b, 0)
-        c_idx = bone_chain_idx.get(b, 1)
+        parsed_canon = parse_canonical_bone_name(b)
+        if parsed_canon is not None:
+            k = parsed_canon["kind"]
+            s = parsed_canon["side"]
+            grp = int(parsed_canon["group_id"])
+            c_idx = int(parsed_canon["chain_index"])
+            sub = str(info.get("sub_role") or assigned_sub_role.get(b, ""))
+        else:
+            k = assigned_kind[b]
+            sub = assigned_sub_role[b]
+            s = assigned_side[b]
+            grp = bone_group_id.get(b, 0)
+            c_idx = bone_chain_idx.get(b, 1)
         is_leaf = len(children_map[b]) == 0
         lim_src = str(info.get("limits_source", ""))
         has_custom_limits = bool(info.get("limits_rad")) and lim_src != "stage1_heuristic"
@@ -2739,6 +2747,8 @@ def apply_joint_limits_profile(
                 info["rationale"] = str(b_prof["rationale"])
             if "allow_leaf_twist" in b_prof:
                 info["allow_leaf_twist"] = bool(b_prof["allow_leaf_twist"])
+            if "intra_bone_coupling" in b_prof and isinstance(b_prof["intra_bone_coupling"], dict):
+                info["intra_bone_coupling"] = copy.deepcopy(b_prof["intra_bone_coupling"])
             src_cand = (
                 "agent_custom"
                 if "agent_custom" in (b_prof.get("source"), b_prof.get("limits_source"))
@@ -2765,6 +2775,8 @@ def apply_joint_limits_profile(
                 info["limits_source"] = profile_source
             elif "limits_deg" in info:
                 info["global_root"]["rotation_limits_deg"] = copy.deepcopy(info["limits_deg"])
+        if b_name == primary_root and isinstance(joint_limits_profile.get("coordination"), dict):
+            info["coordination"] = copy.deepcopy(joint_limits_profile["coordination"])
 
     return classified
 
@@ -3111,6 +3123,15 @@ def probe_rig_joint_limits(
         "rationale": global_root["rationale"],
     }
 
+    coordination = _build_default_rig_coordination(
+        classified=classified,
+        bones_profile=bones_profile,
+        rest_H=rest_H,
+        rest_T=rest_T,
+        rest_R=rest_R,
+        rig_skinning=rig_skinning if has_lbs else None,
+    )
+
     return {
         "schema": JOINT_LIMITS_SCHEMA,
         "monster_id": monster_id,
@@ -3126,16 +3147,731 @@ def probe_rig_joint_limits(
         "global_root": global_root,
         "root_motion": root_motion,
         "bones": bones_profile,
+        "coordination": coordination,
     }
+
+
+def _coord_octant_key(vals: list[float] | np.ndarray) -> str:
+    return "".join("+" if float(v) >= 0.0 else "-" for v in vals[:3])
+
+
+def _coord_quadrant_key(a1: int, s1: int, a2: int, s2: int) -> str:
+    ax = ("rx", "ry", "rz")
+    c1 = "+" if s1 >= 0 else "-"
+    c2 = "+" if s2 >= 0 else "-"
+    return f"{ax[a1]}{c1}_{ax[a2]}{c2}"
+
+
+def build_body_part_volumes(
+    rest_verts: np.ndarray,
+    vert_bone_weights: np.ndarray,
+    bone_names: list[str],
+    bones_meta: dict[str, dict[str, Any]],
+    spheres_per_bone: int = 2,
+    radius_quantile: float = 0.78,
+    clearance_scale: float = 0.92,
+) -> dict[str, Any]:
+    """Automatically extracts a model-agnostic 3D multi-sphere volumetric proxy for every bone
+    in its local rest frame, plus a rest-pose baseline clearance matrix `pair_min_clearance`.
+    """
+    dom_idx = np.argmax(vert_bone_weights, axis=1)
+    dom_w = np.max(vert_bone_weights, axis=1)
+    bone_spheres: dict[str, list[dict[str, Any]]] = {}
+
+    for b_i, b_name in enumerate(bone_names):
+        if b_name not in bones_meta:
+            continue
+        info = bones_meta[b_name]
+        mask = (dom_idx == b_i) & (dom_w >= 0.25)
+        pts_world = rest_verts[mask]
+        if len(pts_world) < 8:
+            continue
+        h0 = np.asarray(info["rest_head_world"], dtype=np.float64)
+        R0 = np.asarray(info["rest_rot_mat_world"], dtype=np.float64)
+        pts_local = (pts_world - h0) @ R0
+        centered = pts_local - pts_local.mean(axis=0)
+        _, _, vt = np.linalg.svd(centered, full_matrices=False)
+        axis_dir = vt[0]
+        proj = centered @ axis_dir
+        k_slices = 1 if (info.get("kind") in ("digit", "head", "jaw") or len(pts_local) < 40) else spheres_per_bone
+        qs = np.linspace(0.0, 1.0, k_slices + 1)
+        q_bounds = np.quantile(proj, qs)
+        spheres: list[dict[str, Any]] = []
+        for s_i in range(k_slices):
+            s_mask = (proj >= q_bounds[s_i] - 1e-6) & (proj <= q_bounds[s_i + 1] + 1e-6)
+            sub_pts = pts_local[s_mask]
+            if len(sub_pts) < 4:
+                continue
+            c_loc = np.median(sub_pts, axis=0)
+            dists = np.linalg.norm(sub_pts - c_loc, axis=1)
+            rad = float(np.quantile(dists, radius_quantile))
+            if rad > 1e-4:
+                spheres.append({
+                    "id": s_i,
+                    "center_local": [round(float(x), 5) for x in c_loc],
+                    "radius": round(rad, 5),
+                    "world_rest": [round(float(x), 5) for x in (h0 + R0 @ c_loc)],
+                })
+        if spheres:
+            bone_spheres[b_name] = spheres
+
+    ancestors: dict[str, set[str]] = {}
+    for b in bones_meta:
+        anc = set()
+        cur = bones_meta[b].get("parent")
+        while cur:
+            anc.add(cur)
+            cur = bones_meta.get(cur, {}).get("parent")
+        ancestors[b] = anc
+
+    def _are_kinematically_adjacent(b1: str, b2: str) -> bool:
+        if b1 == b2:
+            return True
+        if b1 in ancestors.get(b2, set()) or b2 in ancestors.get(b1, set()):
+            d1 = int(bones_meta[b1].get("depth", 0))
+            d2 = int(bones_meta[b2].get("depth", 0))
+            if abs(d1 - d2) <= 1:
+                return True
+        p1 = bones_meta[b1].get("parent")
+        p2 = bones_meta[b2].get("parent")
+        if p1 and p1 == p2 and bones_meta[b1].get("kind") != "digit" and int(bones_meta[b1].get("chain_index", 1)) <= 1:
+            return True
+        return False
+
+    pair_min_clearance: dict[str, float] = {}
+    b_list = sorted(bone_spheres.keys())
+    for i, b1 in enumerate(b_list):
+        for b2 in b_list[i + 1 :]:
+            if _are_kinematically_adjacent(b1, b2):
+                continue
+            if (
+                bones_meta[b1].get("kind") in ("root", "rigid", "spine")
+                and bones_meta[b2].get("kind") in ("root", "rigid", "spine")
+                and (bones_meta[b1].get("fixed_local") or bones_meta[b2].get("fixed_local"))
+            ):
+                continue
+            for s1 in bone_spheres[b1]:
+                w1 = np.asarray(s1["world_rest"], dtype=np.float64)
+                r1 = float(s1["radius"])
+                for s2 in bone_spheres[b2]:
+                    w2 = np.asarray(s2["world_rest"], dtype=np.float64)
+                    r2 = float(s2["radius"])
+                    d_rest = float(np.linalg.norm(w1 - w2))
+                    req = min((r1 + r2) * clearance_scale, d_rest * 0.88)
+                    if req > 1e-4:
+                        key = f"{b1}:{s1['id']}|{b2}:{s2['id']}"
+                        pair_min_clearance[key] = round(req, 5)
+
+    return {
+        "spheres_per_bone": bone_spheres,
+        "bones": bone_spheres,
+        "pair_min_clearance": pair_min_clearance,
+    }
+
+
+def _build_default_rig_coordination(
+    classified: dict[str, dict[str, Any]],
+    bones_profile: dict[str, dict[str, Any]],
+    rest_H: dict[str, np.ndarray],
+    rest_T: dict[str, np.ndarray],
+    rest_R: dict[str, np.ndarray],
+    rig_skinning: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Constructs the model-agnostic 3-layer coordination rules (`intra_bone_coupling`,
+    `inter_bone_couplings`, and `body_part_volumes`) for `probe_rig_joint_limits`.
+    """
+    ax_names = ("rx", "ry", "rz")
+    for b_name, b_prof in bones_profile.items():
+        if b_prof.get("fixed_local") or b_prof.get("kind") == "rigid":
+            continue
+        ldeg = b_prof.get("limits_deg_list") or [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]
+        quad_scales: dict[str, float] = {}
+        for a1, a2 in ((0, 1), (0, 2), (1, 2)):
+            for s1 in (1, -1):
+                for s2 in (1, -1):
+                    b1_lim = abs(float(ldeg[a1][1] if s1 > 0 else ldeg[a1][0]))
+                    b2_lim = abs(float(ldeg[a2][1] if s2 > 0 else ldeg[a2][0]))
+                    qkey = _coord_quadrant_key(a1, s1, a2, s2)
+                    quad_scales[qkey] = 0.85 if (b1_lim > 1.0 and b2_lim > 1.0) else 1.0
+        oct_scales: dict[str, float] = {}
+        for sx in (1, -1):
+            for sy in (1, -1):
+                for sz in (1, -1):
+                    okey = ("+" if sx > 0 else "-") + ("+" if sy > 0 else "-") + ("+" if sz > 0 else "-")
+                    active_cnt = sum(
+                        1
+                        for ax_i, s_i in enumerate((sx, sy, sz))
+                        if abs(float(ldeg[ax_i][1] if s_i > 0 else ldeg[ax_i][0])) > 1.0
+                    )
+                    oct_scales[okey] = 0.78 if active_cnt >= 3 else (0.85 if active_cnt == 2 else 1.0)
+        b_prof.setdefault(
+            "intra_bone_coupling",
+            {
+                "quadrant_diagonal_scales": quad_scales,
+                "octant_diagonal_scales": oct_scales,
+            },
+        )
+
+    inter_couplings: list[dict[str, Any]] = []
+    movable = [
+        b
+        for b, bp in sorted(bones_profile.items())
+        if not bp.get("fixed_local") and bp.get("kind") not in ("root", "rigid")
+    ]
+    for b in movable:
+        p = bones_profile[b].get("parent")
+        if p and p in movable:
+            for ax in ("rx", "rz"):
+                ax_i = ax_names.index(ax)
+                for s1, s2 in ((1, 1), (-1, -1), (1, -1), (-1, 1)):
+                    lim_p = abs(float(bones_profile[p]["limits_deg_list"][ax_i][1 if s1 > 0 else 0]))
+                    lim_b = abs(float(bones_profile[b]["limits_deg_list"][ax_i][1 if s2 > 0 else 0]))
+                    if lim_p > 5.0 and lim_b > 5.0:
+                        inter_couplings.append({
+                            "relation": "parent_child",
+                            "bone_a": p,
+                            "axis_a": ax,
+                            "sign_a": s1,
+                            "bone_b": b,
+                            "axis_b": ax,
+                            "sign_b": s2,
+                            "safe_diagonal_scale": 0.85,
+                        })
+            gp = bones_profile[p].get("parent")
+            if gp and gp in movable:
+                for s1, s2 in ((1, 1), (-1, -1)):
+                    lim_gp = abs(float(bones_profile[gp]["limits_deg_list"][0][1 if s1 > 0 else 0]))
+                    lim_b = abs(float(bones_profile[b]["limits_deg_list"][0][1 if s2 > 0 else 0]))
+                    if lim_gp > 5.0 and lim_b > 5.0:
+                        inter_couplings.append({
+                            "relation": "chain_2hop",
+                            "bone_a": gp,
+                            "axis_a": "rx",
+                            "sign_a": s1,
+                            "bone_b": b,
+                            "axis_b": "rx",
+                            "sign_b": s2,
+                            "safe_diagonal_scale": 0.86,
+                        })
+
+    by_parent: dict[str, list[str]] = {}
+    for b in movable:
+        p = bones_profile[b].get("parent")
+        if p:
+            by_parent.setdefault(str(p), []).append(b)
+    for _p, sibs in sorted(by_parent.items()):
+        if len(sibs) >= 2:
+            for idx_s in range(len(sibs) - 1):
+                b1, b2 = sibs[idx_s], sibs[idx_s + 1]
+                for s1, s2 in ((1, -1), (-1, 1)):
+                    inter_couplings.append({
+                        "relation": "co_parent_sibling",
+                        "bone_a": b1,
+                        "axis_a": "rz",
+                        "sign_a": s1,
+                        "bone_b": b2,
+                        "axis_b": "rz",
+                        "sign_b": s2,
+                        "safe_diagonal_scale": 0.84,
+                    })
+
+    body_volumes: dict[str, Any] = {"spheres_per_bone": {}, "bones": {}, "pair_min_clearance": {}}
+    if (
+        isinstance(rig_skinning, dict)
+        and "rest_verts" in rig_skinning
+        and "skin_indices" in rig_skinning
+        and "skin_weights" in rig_skinning
+    ):
+        v_rest = np.asarray(rig_skinning["rest_verts"], dtype=np.float64)
+        s_idx = np.asarray(rig_skinning["skin_indices"], dtype=np.int32)
+        s_w = np.asarray(rig_skinning["skin_weights"], dtype=np.float64)
+        b_list = [str(x) for x in rig_skinning.get("bone_names", sorted(classified.keys()))]
+        W_dense = np.zeros((len(v_rest), len(b_list)), dtype=np.float64)
+        for k in range(s_idx.shape[1]):
+            valid = (s_idx[:, k] >= 0) & (s_idx[:, k] < len(b_list))
+            W_dense[valid, s_idx[valid, k]] += s_w[valid, k]
+        body_volumes = build_body_part_volumes(v_rest, W_dense, b_list, classified)
+
+    if not body_volumes.get("spheres_per_bone"):
+        bone_spheres: dict[str, list[dict[str, Any]]] = {}
+        for b_name, info in sorted(classified.items()):
+            h0 = rest_H[b_name]
+            t0 = rest_T[b_name]
+            R0 = rest_R[b_name]
+            v_loc = R0.T @ (t0 - h0)
+            b_len = max(1e-3, float(np.linalg.norm(t0 - h0)))
+            rad = round(max(0.008, 0.18 * b_len), 5)
+            c_loc = 0.5 * v_loc
+            bone_spheres[b_name] = [
+                {
+                    "id": 0,
+                    "center_local": [round(float(x), 5) for x in c_loc],
+                    "radius": rad,
+                    "world_rest": [round(float(x), 5) for x in (h0 + R0 @ c_loc)],
+                }
+            ]
+        ancestors: dict[str, set[str]] = {}
+        for b in classified:
+            anc = set()
+            cur = classified[b].get("parent")
+            while cur:
+                anc.add(cur)
+                cur = classified.get(cur, {}).get("parent")
+            ancestors[b] = anc
+        pair_min: dict[str, float] = {}
+        b_keys = sorted(bone_spheres.keys())
+        for i, b1 in enumerate(b_keys):
+            for b2 in b_keys[i + 1 :]:
+                if b1 in ancestors.get(b2, set()) or b2 in ancestors.get(b1, set()):
+                    if abs(int(classified[b1].get("depth", 0)) - int(classified[b2].get("depth", 0))) <= 1:
+                        continue
+                if classified[b1].get("parent") and classified[b1].get("parent") == classified[b2].get("parent"):
+                    continue
+                s1 = bone_spheres[b1][0]
+                s2 = bone_spheres[b2][0]
+                d_rest = float(np.linalg.norm(np.asarray(s1["world_rest"]) - np.asarray(s2["world_rest"])))
+                req = min((float(s1["radius"]) + float(s2["radius"])) * 0.85, d_rest * 0.78)
+                if req > 1e-4:
+                    pair_min[f"{b1}:0|{b2}:0"] = round(req, 5)
+        body_volumes = {
+            "spheres_per_bone": bone_spheres,
+            "bones": bone_spheres,
+            "pair_min_clearance": pair_min,
+        }
+
+    return {
+        "schema": "monster-joint-coordination-v1",
+        "inter_bone_couplings": inter_couplings,
+        "body_part_volumes": body_volumes,
+    }
+
+
+def forward_kinematics_skeleton(
+    bones_meta: dict[str, dict[str, Any]],
+    eulers_rad: dict[str, list[float] | np.ndarray],
+) -> dict[str, dict[str, np.ndarray]]:
+    """Fast NumPy forward kinematics returning `{bone: {'head': (3,), 'tail': (3,), 'R_world': (3,3)}}`."""
+    order = sorted(bones_meta.keys(), key=lambda b: (int(bones_meta[b].get("depth", 0)), b))
+    rest_H: dict[str, np.ndarray] = {}
+    rest_T: dict[str, np.ndarray] = {}
+    rest_R: dict[str, np.ndarray] = {}
+    for b in order:
+        info = bones_meta[b]
+        h = np.asarray(info.get("rest_head_world", [0.0, 0.0, 0.5]), dtype=np.float64)
+        t = np.asarray(info.get("rest_tail_world", h + np.array([0.0, 0.0, 0.1])), dtype=np.float64)
+        rest_H[b] = h
+        rest_T[b] = t
+        rmat = info.get("rest_rot_mat_world")
+        if rmat is not None:
+            rest_R[b] = np.asarray(rmat, dtype=np.float64)
+        else:
+            v0 = t - h
+            d0 = v0 / max(1e-8, float(np.linalg.norm(v0)))
+            rest_R[b] = _build_default_rest_rot_matrix(d0)
+    out: dict[str, dict[str, np.ndarray]] = {}
+    for b in order:
+        p = bones_meta[b].get("parent")
+        rx, ry, rz = eulers_rad.get(b, (0.0, 0.0, 0.0))
+        R_delta = euler_xyz_to_matrix_numpy(float(rx), float(ry), float(rz))
+        if p and p in out:
+            R_rel = rest_R[p].T @ rest_R[b]
+            R_w = out[p]["R_world"] @ R_rel @ R_delta
+            off_loc = rest_R[p].T @ (rest_H[b] - rest_H[p])
+            h_w = out[p]["head"] + out[p]["R_world"] @ off_loc
+        else:
+            R_w = rest_R[b] @ R_delta
+            h_w = rest_H[b].copy()
+        v_loc = rest_R[b].T @ (rest_T[b] - rest_H[b])
+        t_w = h_w + R_w @ v_loc
+        out[b] = {"head": h_w, "tail": t_w, "R_world": R_w}
+    return out
+
+
+def evaluate_volume_clearance(
+    eulers_deg: dict[str, list[float]],
+    bones_meta: dict[str, dict[str, Any]],
+    body_volumes: dict[str, Any],
+) -> dict[str, Any]:
+    """Evaluates 3D multi-sphere body-part clearances under forward kinematics."""
+    eulers_rad = {
+        b: [math.radians(float(x)) for x in vals]
+        for b, vals in eulers_deg.items()
+    }
+    fk = forward_kinematics_skeleton(bones_meta, eulers_rad)
+    spheres_by_bone = body_volumes.get("spheres_per_bone") or body_volumes.get("bones", {})
+    pair_min = body_volumes.get("pair_min_clearance", {})
+
+    world_spheres: dict[tuple[str, int], np.ndarray] = {}
+    for b_name, s_list in spheres_by_bone.items():
+        if b_name not in fk:
+            continue
+        h_w = fk[b_name]["head"]
+        R_w = fk[b_name]["R_world"]
+        for s_idx, s in enumerate(s_list):
+            c_loc = np.asarray(s["center_local"], dtype=np.float64)
+            sid = int(s.get("id", s_idx))
+            world_spheres[(b_name, sid)] = h_w + R_w @ c_loc
+
+    violations: list[dict[str, Any]] = []
+    max_penetration = 0.0
+    for key, req_d in pair_min.items():
+        lhs, rhs = key.split("|")
+        b1, s1_s = lhs.split(":")
+        b2, s2_s = rhs.split(":")
+        k1 = (b1, int(s1_s))
+        k2 = (b2, int(s2_s))
+        if k1 not in world_spheres or k2 not in world_spheres:
+            continue
+        dist = float(np.linalg.norm(world_spheres[k1] - world_spheres[k2]))
+        pen = float(req_d) - dist
+        if pen > 1e-4:
+            max_penetration = max(max_penetration, pen)
+            violations.append({
+                "bone_a": b1,
+                "bone_b": b2,
+                "penetration_m": round(pen, 5),
+                "distance_m": round(dist, 5),
+                "required_m": float(req_d),
+            })
+
+    violations.sort(key=lambda x: x["penetration_m"], reverse=True)
+    return {
+        "passed": len(violations) == 0,
+        "violation_count": len(violations),
+        "max_penetration_m": round(max_penetration, 5),
+        "violations": violations[:12],
+    }
+
+
+def apply_intra_bone_coupling(
+    euler_deg: list[float],
+    limits_deg_list: list[list[float]],
+    intra_cfg: dict[str, Any] | None,
+    priority_axis: int | None = None,
+) -> list[float]:
+    """Applies measured 2D quadrant and 3D octant coupling budgets to a single bone's `[rx, ry, rz]`
+    in degrees while preserving 100% single-axis reach.
+    """
+    out = [
+        float(np.clip(euler_deg[i], limits_deg_list[i][0], limits_deg_list[i][1]))
+        for i in range(3)
+    ]
+    if not intra_cfg:
+        return out
+
+    u = [0.0, 0.0, 0.0]
+    signs = [1, 1, 1]
+    bounds = [0.0, 0.0, 0.0]
+    for i in range(3):
+        v = out[i]
+        signs[i] = 1 if v >= 0.0 else -1
+        b_lim = abs(float(limits_deg_list[i][1] if v >= 0.0 else limits_deg_list[i][0]))
+        bounds[i] = b_lim
+        u[i] = (abs(v) / b_lim) if b_lim > 1e-4 else 0.0
+
+    dom = priority_axis if (priority_axis is not None and bounds[priority_axis] > 1e-4) else int(np.argmax(u))
+
+    quad_scales = intra_cfg.get("quadrant_diagonal_scales", {})
+    for a1, a2 in ((0, 1), (0, 2), (1, 2)):
+        if u[a1] <= 1e-3 or u[a2] <= 1e-3:
+            continue
+        qkey = _coord_quadrant_key(a1, signs[a1], a2, signs[a2])
+        gamma_q = float(quad_scales.get(qkey, 1.0))
+        if gamma_q >= 0.98:
+            continue
+        if gamma_q <= 0.05:
+            if a1 == dom or (a2 != dom and u[a1] >= u[a2]):
+                u[a2] = 0.0
+            else:
+                u[a1] = 0.0
+            continue
+        c_q = max(0.0, (1.0 / gamma_q) - 1.0)
+        if priority_axis is not None and a1 == priority_axis:
+            if u[a1] + c_q * u[a2] > 1.0:
+                u[a2] = max(0.0, (1.0 - u[a1]) / max(1e-6, c_q))
+        elif priority_axis is not None and a2 == priority_axis:
+            if u[a2] + c_q * u[a1] > 1.0:
+                u[a1] = max(0.0, (1.0 - u[a2]) / max(1e-6, c_q))
+        else:
+            budget = max(u[a1], u[a2]) + c_q * min(u[a1], u[a2])
+            if budget > 1.0:
+                s = 1.0 / budget
+                u[a1] *= s
+                u[a2] *= s
+
+    oct_scales = intra_cfg.get("octant_diagonal_scales", {})
+    okey = _coord_octant_key(out)
+    gamma_o = float(oct_scales.get(okey, 1.0))
+    active_other = [i for i in range(3) if i != dom and u[i] > 1e-3]
+    if gamma_o < 0.98 and active_other:
+        if gamma_o <= 0.05:
+            for i in active_other:
+                u[i] = 0.0
+        else:
+            c_o = max(0.0, (1.0 / gamma_o) - 1.0) / float(len(active_other))
+            other_sum = sum(u[i] for i in active_other)
+            if u[dom] + c_o * other_sum > 1.0 and other_sum > 1e-6:
+                scale_sec = max(0.0, (1.0 - u[dom]) / (c_o * other_sum))
+                for i in active_other:
+                    u[i] *= min(1.0, scale_sec)
+
+    return [round(float(signs[i] * u[i] * bounds[i]), 4) for i in range(3)]
+
+
+def apply_inter_bone_couplings(
+    eulers_deg: dict[str, list[float]],
+    bones_profile: dict[str, dict[str, Any]],
+    inter_couplings: list[dict[str, Any]],
+    priority_bone_axes: set[tuple[str, int]] | None = None,
+) -> dict[str, list[float]]:
+    """Enforces directional inter-bone coupling budgets between parent-child, 2-hop chain,
+    co-parent sibling, and ipsilateral limb bone pairs.
+    """
+    out = copy.deepcopy(eulers_deg)
+    prio = priority_bone_axes or set()
+    ax_idx_map = {"rx": 0, "ry": 1, "rz": 2}
+
+    for rule in inter_couplings:
+        b1 = rule["bone_a"]
+        b2 = rule["bone_b"]
+        if b1 not in out or b2 not in out or b1 not in bones_profile or b2 not in bones_profile:
+            continue
+        ax1 = ax_idx_map[rule["axis_a"]]
+        ax2 = ax_idx_map[rule["axis_b"]]
+        s1 = int(rule["sign_a"])
+        s2 = int(rule["sign_b"])
+        gamma = float(rule["safe_diagonal_scale"])
+        if gamma >= 0.98:
+            continue
+
+        v1 = float(out[b1][ax1])
+        v2 = float(out[b2][ax2])
+        if (v1 * s1) <= 1e-3 or (v2 * s2) <= 1e-3:
+            continue
+
+        lim1_list = bones_profile[b1].get("limits_deg_list") or bones_profile[b1].get("limits_deg")
+        lim2_list = bones_profile[b2].get("limits_deg_list") or bones_profile[b2].get("limits_deg")
+        if isinstance(lim1_list, dict):
+            lim1_list = [lim1_list["rx"], lim1_list["ry"], lim1_list["rz"]]
+        if isinstance(lim2_list, dict):
+            lim2_list = [lim2_list["rx"], lim2_list["ry"], lim2_list["rz"]]
+        bound1 = abs(float(lim1_list[ax1][1] if s1 > 0 else lim1_list[ax1][0]))
+        bound2 = abs(float(lim2_list[ax2][1] if s2 > 0 else lim2_list[ax2][0]))
+        if bound1 <= 1e-4 or bound2 <= 1e-4:
+            continue
+
+        u1 = abs(v1) / bound1
+        u2 = abs(v2) / bound2
+
+        if gamma <= 0.05:
+            if (b2, ax2) in prio and (b1, ax1) not in prio:
+                u1 = 0.0
+            else:
+                u2 = 0.0
+        else:
+            c_pair = max(0.0, (1.0 / gamma) - 1.0)
+            if (b2, ax2) in prio and (b1, ax1) not in prio:
+                if u2 + c_pair * u1 > 1.0:
+                    u1 = max(0.0, (1.0 - u2) / max(1e-6, c_pair))
+            elif (b1, ax1) in prio and (b2, ax2) not in prio:
+                if u1 + c_pair * u2 > 1.0:
+                    u2 = max(0.0, (1.0 - u1) / max(1e-6, c_pair))
+            else:
+                budget = max(u1, u2) + c_pair * min(u1, u2)
+                if budget > 1.0:
+                    s = 1.0 / budget
+                    u1 *= s
+                    u2 *= s
+
+        out[b1][ax1] = round(float(s1 * u1 * bound1), 4)
+        out[b2][ax2] = round(float(s2 * u2 * bound2), 4)
+
+    return out
+
+
+def resolve_volume_collisions_fk(
+    eulers_deg: dict[str, list[float]],
+    bones_meta: dict[str, dict[str, Any]],
+    bones_profile: dict[str, dict[str, Any]],
+    body_volumes: dict[str, Any] | None,
+    priority_bone_axes: set[tuple[str, int]] | None = None,
+    max_iters: int = 12,
+) -> tuple[dict[str, list[float]], list[dict[str, Any]]]:
+    """Checks 3D multi-sphere body-part clearances via fast NumPy FK and smoothly backs off the
+    movable ancestor chain of any colliding limb/digit/head bone until all 3D volumes are clear.
+    """
+    out = copy.deepcopy(eulers_deg)
+    adjustments: list[dict[str, Any]] = []
+    if not body_volumes or not body_volumes.get("pair_min_clearance"):
+        return out, adjustments
+
+    prio = priority_bone_axes or set()
+
+    def _movable_chain(b_name: str) -> list[str]:
+        chain: list[str] = []
+        cur: str | None = b_name
+        while cur and cur in bones_meta:
+            info = bones_profile.get(cur, bones_meta[cur])
+            if info.get("kind") not in ("root", "rigid") and not info.get("fixed_local"):
+                chain.append(cur)
+            cur = bones_meta[cur].get("parent")
+        return chain
+
+    for it in range(max_iters):
+        chk = evaluate_volume_clearance(out, bones_meta, body_volumes)
+        if chk["passed"]:
+            break
+        for viol in chk["violations"][:4]:
+            ba, bb = viol["bone_a"], viol["bone_b"]
+            chain_a = _movable_chain(ba)
+            chain_b = _movable_chain(bb)
+            depth_a = int(bones_meta.get(ba, {}).get("depth", 0))
+            depth_b = int(bones_meta.get(bb, {}).get("depth", 0))
+            target_bones = (chain_a + chain_b) if depth_a >= depth_b else (chain_b + chain_a)
+            for tb in target_bones:
+                old_v = list(out[tb])
+                new_v = [
+                    round(float(old_v[ax] * (1.0 if (tb, ax) in prio else 0.72)), 4)
+                    for ax in range(3)
+                ]
+                out[tb] = new_v
+            adjustments.append({
+                "iter": it + 1,
+                "pair": [ba, bb],
+                "penetration_m": viol["penetration_m"],
+                "damped_bones": target_bones[:4],
+            })
+
+    return out, adjustments
+
+
+def coordinate_pose_angles(
+    raw_eulers_deg: dict[str, list[float]],
+    bones_meta: dict[str, dict[str, Any]],
+    joint_limits_profile: dict[str, Any],
+    priority_bone_axes: set[tuple[str, int]] | None = None,
+) -> tuple[dict[str, list[float]], dict[str, Any]]:
+    """Universal 3-layer pure-NumPy coordination pipeline respecting:
+      1. Single-axis limits (`limits_deg_list`)
+      2. Intra-bone multi-axis quadrant & octant couplings (`intra_bone_coupling`)
+      3. Inter-bone topological couplings (`inter_bone_couplings`)
+      4. 3D multi-sphere body-part volume clearance (`body_part_volumes`)
+    """
+    bones_prof = joint_limits_profile.get("bones", bones_meta)
+    coord_cfg = joint_limits_profile.get("coordination", {})
+    inter_couplings = coord_cfg.get("inter_bone_couplings", [])
+    body_volumes = coord_cfg.get("body_part_volumes")
+    prio = priority_bone_axes or set()
+
+    stage1: dict[str, list[float]] = {}
+    intra_modified_bones: list[str] = []
+    for b_name, b_prof in bones_prof.items():
+        raw_v = raw_eulers_deg.get(b_name, [0.0, 0.0, 0.0])
+        if b_prof.get("fixed_local") or b_prof.get("kind") == "rigid":
+            stage1[b_name] = [0.0, 0.0, 0.0]
+            continue
+        ldeg_list = b_prof.get("limits_deg_list") or b_prof.get("limits_deg")
+        if isinstance(ldeg_list, dict):
+            ldeg_list = [ldeg_list["rx"], ldeg_list["ry"], ldeg_list["rz"]]
+        p_ax = next((ax for (bn, ax) in prio if bn == b_name), None)
+        coupled_v = apply_intra_bone_coupling(
+            raw_v,
+            ldeg_list,
+            b_prof.get("intra_bone_coupling"),
+            priority_axis=p_ax,
+        )
+        if any(abs(coupled_v[i] - float(raw_v[i])) > 0.05 for i in range(3)):
+            intra_modified_bones.append(b_name)
+        stage1[b_name] = coupled_v
+
+    stage2 = apply_inter_bone_couplings(stage1, bones_prof, inter_couplings, priority_bone_axes=prio)
+    inter_modified_bones = [
+        b for b in stage2
+        if any(abs(stage2[b][i] - stage1[b][i]) > 0.05 for i in range(3))
+    ]
+
+    stage3, vol_adjustments = resolve_volume_collisions_fk(
+        stage2,
+        bones_meta,
+        bones_prof,
+        body_volumes,
+        priority_bone_axes=prio,
+    )
+
+    final_pose: dict[str, list[float]] = {}
+    for b_name, b_prof in bones_prof.items():
+        if b_prof.get("fixed_local") or b_prof.get("kind") == "rigid":
+            final_pose[b_name] = [0.0, 0.0, 0.0]
+            continue
+        ldeg_list = b_prof.get("limits_deg_list") or b_prof.get("limits_deg")
+        if isinstance(ldeg_list, dict):
+            ldeg_list = [ldeg_list["rx"], ldeg_list["ry"], ldeg_list["rz"]]
+        p_ax = next((ax for (bn, ax) in prio if bn == b_name), None)
+        final_pose[b_name] = apply_intra_bone_coupling(
+            stage3[b_name],
+            ldeg_list,
+            b_prof.get("intra_bone_coupling"),
+            priority_axis=p_ax,
+        )
+
+    return final_pose, {
+        "intra_bone_adjusted": intra_modified_bones,
+        "inter_bone_adjusted": inter_modified_bones,
+        "volume_clearance_adjustments": vol_adjustments,
+    }
+
+
+def coordinate_pose_euler_dict_rad(
+    eulers_rad: dict[str, list[float]],
+    classified_bones: dict[str, dict[str, Any]],
+    joint_limits_profile: dict[str, Any] | None = None,
+    priority_bone_axes: set[tuple[str, int]] | None = None,
+) -> dict[str, list[float]]:
+    """Applies `coordinate_pose_angles` to a radian Euler dict whenever `intra_bone_coupling`
+    or `coordination` rules are present on `classified_bones` or `joint_limits_profile`.
+    """
+    has_intra = any(isinstance(info.get("intra_bone_coupling"), dict) for info in classified_bones.values())
+    coord_cfg = (
+        joint_limits_profile.get("coordination")
+        if isinstance(joint_limits_profile, dict) and isinstance(joint_limits_profile.get("coordination"), dict)
+        else next(
+            (info.get("coordination") for info in classified_bones.values() if isinstance(info.get("coordination"), dict)),
+            None,
+        )
+    )
+    if not has_intra and not coord_cfg:
+        return eulers_rad
+
+    synth_profile = joint_limits_profile if isinstance(joint_limits_profile, dict) and "bones" in joint_limits_profile else {
+        "bones": classified_bones,
+        "coordination": coord_cfg or {},
+    }
+    raw_deg = {b: [math.degrees(float(x)) for x in vals] for b, vals in eulers_rad.items()}
+    coord_deg, _ = coordinate_pose_angles(
+        raw_deg,
+        classified_bones,
+        synth_profile,
+        priority_bone_axes=priority_bone_axes,
+    )
+    return {b: [math.radians(float(x)) for x in vals] for b, vals in coord_deg.items()}
 
 
 def _sample_bimodal_boundary(rng: Any, lo: float, hi: float) -> float:
     """Samples with 70% weight in the outer 28% boundary quartiles `[lo, lo+0.28*span]` and
     `[hi-0.28*span, hi]` and 30% uniform across `[lo, hi]` to cover extreme joint angles.
+    For wide/circular spans (`span >= pi`, e.g. `[-180°, 180°]` where `lo` and `hi` meet at the
+    same back-facing angle on S^1), avoids collapsing 70% of samples to the back hemisphere and
+    instead samples with 65% front-hemisphere concentration around the midpoint and 35% full-span.
     """
     span = hi - lo
     if span <= 1e-8:
         return lo
+    if span >= math.pi - 1e-4:
+        mid = 0.5 * (lo + hi)
+        front_half = min(math.radians(30.0), 0.22 * span)
+        if rng.random() < 0.65:
+            return float(rng.uniform(max(lo, mid - front_half), min(hi, mid + front_half)))
+        return float(rng.uniform(lo, hi))
     r = rng.random()
     q = 0.28 * span
     if r < 0.35:
@@ -3311,6 +4047,11 @@ def sample_stratified_pose_euler_dict(
 
         sampled_eulers[b_name] = raw
 
+    sampled_eulers = coordinate_pose_euler_dict_rad(
+        sampled_eulers,
+        classified,
+        joint_limits_profile=joint_limits_profile,
+    )
     return sampled_eulers, regime
 
 
@@ -3555,7 +4296,38 @@ def sample_boundary_exploration_pose_euler_dict(
 
         raw = [0.0, 0.0, 0.0]
 
-        if regime == "quasi_uniform_interior_coverage":
+        if kind == "root":
+            # Global studio root orientation: in non-root regimes (80% of poses), keep `ry` (global yaw)
+            # within a front-facing studio window around 0° so `Cam_Front` always sees the character's
+            # front/oblique-front, while allowing `rx` (pitch) and `rz` (roll) to explore their normal span.
+            if regime == "full_body_dynamic_root_boundary":
+                for ax in range(3):
+                    lo, hi = lims[ax]
+                    b_side = "hi" if ((idx // 2 + ax) % 2 == 0) else "lo"
+                    if ax == 1 and (hi - lo) > math.radians(90.0):
+                        mid = 0.5 * (lo + hi)
+                        half_w = min(math.radians(35.0), 0.25 * (hi - lo))
+                        raw[ax] = float(rng.uniform(max(lo, mid - half_w), min(hi, mid + half_w)))
+                    else:
+                        raw[ax] = _sample_near_bound(rng, lo, hi, b_side, band_ratio=0.13)
+            elif regime == "quasi_uniform_interior_coverage":
+                for ax in range(3):
+                    lo, hi = lims[ax]
+                    mid = 0.5 * (lo + hi)
+                    max_cap = math.radians(18.0) if ax == 1 else math.radians(24.0)
+                    half_w = min(max_cap, 0.38 * (hi - lo))
+                    raw[ax] = float(rng.uniform(max(lo, mid - half_w), min(hi, mid + half_w)))
+            else:
+                for ax in range(3):
+                    lo, hi = lims[ax]
+                    if ax == 1:
+                        mid = 0.5 * (lo + hi)
+                        half_w = min(math.radians(22.0), 0.35 * (hi - lo))
+                        raw[ax] = float(rng.uniform(max(lo, mid - half_w), min(hi, mid + half_w)))
+                    else:
+                        raw[ax] = _sample_bimodal_boundary(rng, lo, hi)
+
+        elif regime == "quasi_uniform_interior_coverage":
             # Stratified interior quantile coverage [0.12, 0.88] with zero inter-joint coupling
             for ax in range(3):
                 lo, hi = lims[ax]
@@ -3613,14 +4385,14 @@ def sample_boundary_exploration_pose_euler_dict(
             for ax in range(3):
                 lo, hi = lims[ax]
                 b_side = "hi" if ((idx // 2 + rank_i + ax) % 2 == 0) else "lo"
-                if kind in ("root", "jaw", "head", "limb", "wing"):
+                if kind in ("jaw", "head", "limb", "wing"):
                     raw[ax] = _sample_near_bound(rng, lo, hi, b_side, band_ratio=0.13)
                 else:
                     raw[ax] = _sample_bimodal_boundary(rng, lo, hi)
 
         # Deterministic Rotating Boundary Slot Guarantee:
-        # Ensure every bone axis hits both its lower 14% and upper 14% boundary across the 50 samples
-        if regime != "quasi_uniform_interior_coverage":
+        # Ensure every non-root bone axis hits both its lower 14% and upper 14% boundary across the 50 samples
+        if kind != "root" and regime != "quasi_uniform_interior_coverage":
             slot_phase = (idx + rank_i * 3) % 8
             if slot_phase == 0:
                 for ax in range(3):
@@ -3628,11 +4400,141 @@ def sample_boundary_exploration_pose_euler_dict(
             elif slot_phase == 4:
                 for ax in range(3):
                     raw[ax] = _sample_near_bound(rng, lims[ax][0], lims[ax][1], "hi", band_ratio=0.12)
+        elif kind == "root" and regime == "full_body_dynamic_root_boundary":
+            # Deterministically cycle ROOT rx/ry/rz lo/hi across the 8 dynamic-root slots (13..16, 33..36)
+            dyn_pos = ((idx // 20) * 4) + ((idx % 20) - 13)
+            r_ax = (dyn_pos // 2) % 3
+            r_side = "lo" if (dyn_pos % 2 == 0) else "hi"
+            raw[r_ax] = _sample_near_bound(rng, lims[r_ax][0], lims[r_ax][1], r_side, band_ratio=0.09)
+            for other_ax in range(3):
+                if other_ax != r_ax:
+                    raw[other_ax] *= 0.25
 
         if is_leaf and not bool(info.get("allow_leaf_twist", False)):
             raw[1] = 0.0
 
         sampled_eulers[b_name] = [float(np.clip(raw[ax], lims[ax][0], lims[ax][1])) for ax in range(3)]
+
+    # If universal 3-layer coordination rules are present, apply conflict-free boundary-slot priority
+    has_coord = any(isinstance(info.get("intra_bone_coupling"), dict) for info in classified.values()) or (
+        isinstance(joint_limits_profile, dict) and isinstance(joint_limits_profile.get("coordination"), dict)
+    ) or any(isinstance(info.get("coordination"), dict) for info in classified.values())
+
+    if has_coord:
+        root_axes_list: list[tuple[str, int]] = []
+        non_root_axes_list: list[tuple[str, int]] = []
+        for b_name in topo_names:
+            info = classified[b_name]
+            if info.get("kind") == "rigid" or bool(info.get("fixed_local", False)):
+                continue
+            is_leaf = not bool(info.get("children"))
+            lims = effective_sampling_limits_for_bone(info, enforce_anatomical_floor=enforce_anatomical_floor)
+            for ax_i in range(3):
+                if is_leaf and ax_i == 1 and not bool(info.get("allow_leaf_twist", False)):
+                    continue
+                if (lims[ax_i][1] - lims[ax_i][0]) > math.radians(1.0):
+                    if info.get("kind") == "root":
+                        root_axes_list.append((b_name, ax_i))
+                    else:
+                        non_root_axes_list.append((b_name, ax_i))
+
+        synth_profile = (
+            joint_limits_profile
+            if isinstance(joint_limits_profile, dict) and "bones" in joint_limits_profile
+            else {
+                "bones": classified,
+                "coordination": next(
+                    (info.get("coordination") for info in classified.values() if isinstance(info.get("coordination"), dict)),
+                    {},
+                ),
+            }
+        )
+        inter_rules = (synth_profile.get("coordination") or {}).get("inter_bone_couplings", [])
+        ax_to_idx = {"rx": 0, "ry": 1, "rz": 2}
+        coupled_signed_pairs: set[tuple[tuple[str, int, str], tuple[str, int, str]]] = set()
+        for r in inter_rules:
+            if float(r.get("safe_diagonal_scale", 1.0)) >= 0.96:
+                continue
+            ba = str(r.get("bone_a", ""))
+            bb = str(r.get("bone_b", ""))
+            aa = ax_to_idx.get(str(r.get("axis_a", "rx")), 0)
+            ab = ax_to_idx.get(str(r.get("axis_b", "rx")), 0)
+            sa = "hi" if int(r.get("sign_a", 1)) > 0 else "lo"
+            sb = "hi" if int(r.get("sign_b", 1)) > 0 else "lo"
+            k1 = (ba, aa, sa)
+            k2 = (bb, ab, sb)
+            coupled_signed_pairs.add((k1, k2))
+            coupled_signed_pairs.add((k2, k1))
+
+        n_tot = max(1, int(total_samples or num_total_samples or 50))
+        slot_schedule: dict[int, dict[tuple[str, int], str]] = {i: {} for i in range(n_tot)}
+
+        def _can_place_slot(p_idx: int, b_cand: str, ax_cand: int, side_cand: str) -> bool:
+            cur_slots = slot_schedule[p_idx]
+            if (b_cand, ax_cand) in cur_slots:
+                return False
+            cand_key = (b_cand, ax_cand, side_cand)
+            for (eb, eax), eside in cur_slots.items():
+                if eb == b_cand:
+                    return False
+                if (cand_key, (eb, eax, eside)) in coupled_signed_pairs:
+                    return False
+            return True
+
+        for k, (b_name, ax_i) in enumerate(non_root_axes_list):
+            for rep in range(3):
+                for side_tag, base_offset in (("lo", 0), ("hi", 8)):
+                    base_idx = (k * 7 + base_offset + rep * 17) % n_tot
+                    placed_idx = base_idx
+                    for shift in range(n_tot):
+                        cand_idx = (base_idx + shift) % n_tot
+                        if _can_place_slot(cand_idx, b_name, ax_i, side_tag):
+                            placed_idx = cand_idx
+                            break
+                    slot_schedule[placed_idx][(b_name, ax_i)] = side_tag
+
+        # Schedule ROOT boundary slots exclusively on `full_body_dynamic_root_boundary` indices
+        # so the character remains front-facing in all non-root regimes while still achieving 100%
+        # dual-sided boundary touch coverage on ROOT pitch/yaw/roll across the G2 suite.
+        dyn_root_indices = [
+            i for i in range(n_tot)
+            if select_g2_boundary_regime(i, rng) == "full_body_dynamic_root_boundary"
+        ]
+        if len(dyn_root_indices) < 2 * max(1, len(root_axes_list)):
+            dyn_root_indices = list(range(n_tot))
+        for r_k, (r_bone, r_ax) in enumerate(root_axes_list):
+            lo_slot = dyn_root_indices[(2 * r_k) % len(dyn_root_indices)]
+            hi_slot = dyn_root_indices[(2 * r_k + 1) % len(dyn_root_indices)]
+            slot_schedule[lo_slot][(r_bone, r_ax)] = "lo"
+            slot_schedule[hi_slot][(r_bone, r_ax)] = "hi"
+            if len(dyn_root_indices) >= 2 * len(root_axes_list) + 2:
+                extra_slot = dyn_root_indices[2 * len(root_axes_list) + (r_k % (len(dyn_root_indices) - 2 * len(root_axes_list)))]
+                slot_schedule[extra_slot][(r_bone, r_ax)] = "lo" if (r_k % 2 == 0) else "hi"
+
+        pose_slots = slot_schedule[idx % n_tot]
+        prio_set = set(pose_slots.keys())
+        for (b_slot, ax_slot), side_tag in pose_slots.items():
+            lims = effective_sampling_limits_for_bone(classified[b_slot], enforce_anatomical_floor=enforce_anatomical_floor)
+            lo_r, hi_r = lims[ax_slot]
+            span_r = hi_r - lo_r
+            sampled_eulers[b_slot][ax_slot] = (
+                float(lo_r + rng.uniform(0.01, 0.09) * span_r)
+                if side_tag == "lo"
+                else float(hi_r - rng.uniform(0.01, 0.09) * span_r)
+            )
+            for other_ax in range(3):
+                if other_ax != ax_slot and (b_slot, other_ax) not in pose_slots:
+                    sampled_eulers[b_slot][other_ax] *= 0.15
+        raw_deg = {b: [math.degrees(float(x)) for x in vals] for b, vals in sampled_eulers.items()}
+        coord_deg, coord_report = coordinate_pose_angles(
+            raw_deg,
+            classified,
+            synth_profile,
+            priority_bone_axes=prio_set,
+        )
+        sampled_eulers = {b: [math.radians(float(x)) for x in vals] for b, vals in coord_deg.items()}
+    else:
+        coord_report = None
 
     boundary_meta = inspect_pose_boundary_utilization(
         sampled_eulers,
@@ -3640,6 +4542,12 @@ def sample_boundary_exploration_pose_euler_dict(
         boundary_band_ratio=0.15,
         enforce_anatomical_floor=enforce_anatomical_floor,
     )
+    if coord_report is not None:
+        boundary_meta["coordination_report"] = coord_report
+        boundary_meta["priority_slots"] = [
+            {"bone": b_s, "axis": ("rx", "ry", "rz")[ax_s], "axis_index": ax_s, "side": s_tag}
+            for (b_s, ax_s), s_tag in sorted(pose_slots.items())
+        ]
     return sampled_eulers, regime, boundary_meta
 
 

@@ -143,6 +143,8 @@ def probe_joint_limits(
         "joint_limits_sha256": jl_sha,
         "num_bones": len(profile.get("bones", {})),
         "root_motion": profile.get("root_motion"),
+        "coordination_present": bool(profile.get("coordination")),
+        "inter_bone_couplings_count": len((profile.get("coordination") or {}).get("inter_bone_couplings", [])),
     }
 
 
@@ -225,6 +227,11 @@ def apply_custom_joint_limits(
         if b_entry.get("kind") == "rigid":
             new_lims_deg = {"rx": [0.0, 0.0], "ry": [0.0, 0.0], "rz": [0.0, 0.0]}
         b_entry["limits_deg"] = new_lims_deg
+        b_entry["limits_deg_list"] = [
+            list(new_lims_deg["rx"]),
+            list(new_lims_deg["ry"]),
+            list(new_lims_deg["rz"]),
+        ]
         b_entry["limits_rad"] = [
             [round(math.radians(new_lims_deg["rx"][0]), 4), round(math.radians(new_lims_deg["rx"][1]), 4)],
             [round(math.radians(new_lims_deg["ry"][0]), 4), round(math.radians(new_lims_deg["ry"][1]), 4)],
@@ -238,10 +245,10 @@ def apply_custom_joint_limits(
     root_motion = profile.setdefault(
         "root_motion",
         {
-            "global_pitch_deg": [-22.0, 22.0],
-            "global_roll_deg": [-18.0, 18.0],
-            "global_yaw_deg": [-180.0, 180.0],
-            "translation_fraction_xyz": [0.12, 0.12, 0.08],
+            "global_pitch_deg": [-28.0, 32.0],
+            "global_roll_deg": [-25.0, 25.0],
+            "global_yaw_deg": [-22.0, 22.0],
+            "translation_fraction_xyz": [0.08, 0.08, 0.10],
         },
     )
     if set_root_pitch:
@@ -256,6 +263,14 @@ def apply_custom_joint_limits(
             raise ValueError(f"Expected 3 comma-separated fractions for --set-root-trans, got {set_root_trans!r}")
         root_motion["translation_fraction_xyz"] = [round(max(0.0, x), 4) for x in t_parts]
 
+    if isinstance(profile.get("global_root"), dict):
+        profile["global_root"]["rotation_limits_deg"] = [
+            list(root_motion["global_pitch_deg"]),
+            list(root_motion["global_yaw_deg"]),
+            list(root_motion["global_roll_deg"]),
+        ]
+        profile["global_root"]["translation_fraction_xyz"] = list(root_motion["translation_fraction_xyz"])
+
     # Sync ROOT bone limits with root_motion pitch/yaw/roll if ROOT bone exists and wasn't explicitly overridden
     for b_name, b_entry in bones_prof.items():
         if b_entry.get("kind") == "root" and b_name not in updated_bones and any(
@@ -265,6 +280,7 @@ def apply_custom_joint_limits(
             r_deg = root_motion["global_roll_deg"]
             y_deg = root_motion["global_yaw_deg"]
             b_entry["limits_deg"] = {"rx": list(p_deg), "ry": list(y_deg), "rz": list(r_deg)}
+            b_entry["limits_deg_list"] = [list(p_deg), list(y_deg), list(r_deg)]
             b_entry["limits_rad"] = [
                 [round(math.radians(p_deg[0]), 4), round(math.radians(p_deg[1]), 4)],
                 [round(math.radians(y_deg[0]), 4), round(math.radians(y_deg[1]), 4)],
@@ -291,6 +307,8 @@ def apply_custom_joint_limits(
         "joint_limits_sha256": jl_sha,
         "updated_bones": updated_bones,
         "root_motion": profile.get("root_motion"),
+        "coordination_present": bool(profile.get("coordination")),
+        "inter_bone_couplings_count": len((profile.get("coordination") or {}).get("inter_bone_couplings", [])),
         "invalidated_gates": invalidated,
     }
 

@@ -419,7 +419,17 @@ class MigrationTests(unittest.TestCase):
             anon_check = tax.validate_canonical_rig_bone_names(classified)
             self.assertFalse(anon_check["valid"])
             self.assertEqual(len(anon_check["non_canonical_bones"]), len(classified))
-            canon_bones = {info["canonical_name"]: info for info in classified.values()}
+            canon_bones = {
+                info["canonical_name"]: {
+                    **info,
+                    "parent": (
+                        classified[info["parent"]]["canonical_name"]
+                        if info.get("parent") in classified
+                        else info.get("parent")
+                    ),
+                }
+                for info in classified.values()
+            }
             canon_check = tax.validate_canonical_rig_bone_names(canon_bones)
             self.assertTrue(canon_check["valid"])
             self.assertEqual(canon_check["non_canonical_bones"], [])
@@ -519,6 +529,40 @@ class MigrationTests(unittest.TestCase):
             self.assertFalse(cov_bad["passed"])
             self.assertTrue(any("Coupled hand/digit curl" in f for f in cov_bad["failures"]))
             self.assertTrue(any("Inter-finger fixed-ratio coupling" in f for f in cov_bad["failures"]))
+
+            # 7. Universal 3-Layer Joint Coordination (intra_bone_coupling + inter_bone_couplings + body_part_volumes)
+            jl_prof = tax.probe_rig_joint_limits(canon_bones, monster_id="test_coord_monster", archetype="humanoid")
+            self.assertIn("coordination", jl_prof)
+            self.assertEqual(jl_prof["coordination"]["schema"], "monster-joint-coordination-v1")
+            self.assertGreater(len(jl_prof["coordination"]["inter_bone_couplings"]), 0)
+            self.assertIn("body_part_volumes", jl_prof["coordination"])
+            self.assertGreater(len(jl_prof["coordination"]["body_part_volumes"].get("bones", {})), 0)
+            canon_classified = tax.apply_joint_limits_profile(dict(canon_bones), jl_prof)
+            coord_rng = random.Random(108)
+            coord_samples = []
+            for idx in range(50):
+                e_rad, reg, b_info = tax.sample_boundary_exploration_pose_euler_dict(
+                    canon_classified,
+                    rng=coord_rng,
+                    sample_idx=idx,
+                    total_samples=50,
+                    joint_limits_profile=jl_prof,
+                )
+                self.assertIn("coordination_report", b_info)
+                coord_samples.append({"sampling_regime": reg, "joints": e_rad})
+            b_cov = tax.audit_boundary_exploration_coverage(coord_samples, canon_classified)
+            self.assertTrue(b_cov["passed"], msg=f"Boundary audit failed under 3-layer coordination: {b_cov}")
+            self.assertGreaterEqual(b_cov["dual_boundary_touch_rate"], 0.95)
+            # Verify all 50 poses keep ROOT_C_00_00 yaw front-facing (|ry| <= 22 deg << 90 deg)
+            root_yaws_deg = [abs(tax.math.degrees(s["joints"]["ROOT_C_00_00"][1])) for s in coord_samples]
+            self.assertTrue(all(y <= 22.5 for y in root_yaws_deg), msg=f"Unexpected root yaws: {root_yaws_deg}")
+            # Even in non-root regimes, ROOT yaw stays within the studio front window
+            non_root_yaws = [
+                abs(tax.math.degrees(s["joints"]["ROOT_C_00_00"][1]))
+                for s in coord_samples
+                if s["sampling_regime"] != "full_body_dynamic_root_boundary"
+            ]
+            self.assertTrue(all(y <= 16.0 for y in non_root_yaws))
         finally:
             sys.path.remove(str(ROOT / "worker"))
 

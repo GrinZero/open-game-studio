@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "game-studio",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Local projects, immutable assets, canvases and character production for Codex.",
   "keywords": [
     "games",
