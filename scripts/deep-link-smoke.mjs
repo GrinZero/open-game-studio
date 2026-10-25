@@ -257,6 +257,7 @@ export async function verifyDeepLinks({
   const fallback = await open({ runId: run.id, nodeKey });
   await page.goto(`${hostOrigin}/${new URL(fallback.url).search}`);
   await ui.getByRole("button", { name: "打开新版工作台", exact: true }).click();
+  await page.waitForFunction(() => window.__openedLinks.length > 0);
   const openedLink = await page.evaluate(() => window.__openedLinks.at(-1));
   assert.equal(new URL(openedLink).searchParams.get("runId"), run.id);
   assert.equal(new URL(openedLink).searchParams.get("nodeKey"), nodeKey);
