@@ -37,4 +37,18 @@ assert registered == set(protocol["endpoints"]), "Protocol must describe the exp
 result = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", str(ROOT / "tests"), "-v"], cwd=ROOT)
 if result.returncode:
     raise SystemExit(result.returncode)
-print("Monster syntax, Notebook, API contract and CPU-only migration checks passed.")
+
+formal_gate_res = subprocess.run(
+    [sys.executable, str(ROOT / "skills/monster-workflow/scripts/sop_formal_gate.py"), "self-test"],
+    cwd=ROOT,
+    capture_output=True,
+    text=True,
+)
+if formal_gate_res.returncode:
+    sys.stderr.write(formal_gate_res.stdout + formal_gate_res.stderr)
+    raise SystemExit(formal_gate_res.returncode)
+formal_report = json.loads(formal_gate_res.stdout)
+assert formal_report.get("passed") is True, "Formal verification gate must pass"
+print(
+    "Monster syntax, Notebook, API contract, CPU-only migration checks, and Formal Verification Gate (P1-P4) passed."
+)

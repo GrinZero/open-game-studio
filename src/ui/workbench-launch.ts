@@ -1,9 +1,43 @@
-// Launch context belongs to this app instance, not a global last-used project.
-let projectId =
-  new URLSearchParams(location.search).get("projectId") || undefined;
+import {
+  readWorkbenchTarget,
+  targetFields,
+  type WorkbenchTarget,
+} from "../shared/workbench-target";
+
+// Per-window launch intent. Never use a global last-opened project.
+function initialTarget(): WorkbenchTarget {
+  const saved =
+    typeof document !== "undefined"
+      ? document.getElementById("studio-launch")?.textContent
+      : undefined;
+  if (saved) {
+    try {
+      return readWorkbenchTarget(JSON.parse(saved));
+    } catch {
+      /* fall back to URL */
+    }
+  }
+  return readWorkbenchTarget(
+    Object.fromEntries(new URLSearchParams(location.search)),
+  );
+}
+let target = initialTarget();
+let navigationId: string | undefined;
 const listeners = new Set<() => void>();
+export function launchRequest() {
+  return target;
+}
 export function launchProject() {
-  return projectId;
+  return target.projectId;
+}
+export function launchCanvas(project: string) {
+  return project === target.projectId ? target.canvasId : undefined;
+}
+export function characterLaunch(project: string) {
+  return project === target.projectId &&
+    (target.view === "character" || (target.runId && !target.stepKey))
+    ? target
+    : undefined;
 }
 export function subscribeLaunch(listener: () => void) {
   listeners.add(listener);
@@ -14,21 +48,28 @@ export function subscribeLaunch(listener: () => void) {
 export function receiveLaunch(value: unknown) {
   if (!value || typeof value !== "object") return;
   const data = value as {
-    projectId?: unknown;
-    project?: { project?: { id?: unknown } };
+    target?: unknown;
+    project?: { project?: { id?: string } };
+    projectId?: string;
+    navigationId?: string;
+    [key: string]: unknown;
   };
-  const next = data.projectId || data.project?.project?.id;
-  if (typeof next !== "string" || !next || next === projectId) return;
-  projectId = next;
+  const next = readWorkbenchTarget(data.target || data);
+  next.projectId ||= data.project?.project?.id;
+  if (!next.projectId) return;
+  // Hosts replay project-only context when a reloaded iframe connects. Keep
+  // the more specific target restored from that iframe's saved launch data.
+  if (
+    next.projectId === target.projectId &&
+    Object.keys(next).length === 1 &&
+    !data.navigationId &&
+    !data.target
+  )
+    return;
+  const same = targetFields.every((field) => next[field] === target[field]);
+  if (same && (!data.navigationId || data.navigationId === navigationId))
+    return;
+  target = next;
+  navigationId = data.navigationId;
   for (const listener of listeners) listener();
-}
-
-export function characterLaunch(project: string) {
-  const query = new URLSearchParams(location.search);
-  if (query.get("projectId") !== project || query.get("view") !== "character")
-    return undefined;
-  return {
-    runId: query.get("runId") || undefined,
-    nodeKey: query.get("nodeKey") || undefined,
-  };
 }

@@ -1800,6 +1800,11 @@ class MonsterSopExecutionSuiteTests(unittest.TestCase):
                 self.assertTrue(Path(g2_rep["joint_limits_path"]).is_file())
                 self.assertTrue(Path(g2_rep["overview_jpg"]).is_file())
                 self.assertTrue(Path(g2_rep["review_html"]).is_file())
+                g2_html_text = Path(g2_rep["review_html"]).read_text(encoding="utf-8")
+                self.assertIn("G2 50 姿势审阅工作台 · MonsterStudio", g2_html_text)
+                self.assertIn("inspectorDrawer", g2_html_text)
+                self.assertTrue((Path(g2_rep["review_html"]).parent / "pose_001_front.png").is_file())
+                self.assertTrue((Path(g2_rep["review_html"]).parent / "pose_records.json").is_file())
 
                 # Approve G2
                 rc_g2 = monster_sop.main([

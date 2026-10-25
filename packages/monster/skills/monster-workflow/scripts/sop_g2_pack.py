@@ -34,6 +34,7 @@ from sop_gate import (  # noqa: E402
     MONSTER_ROOT,
     WORKER_DIR,
     assert_gate,
+    resolve_g1_candidate_files,
     load_ledger,
     mark_awaiting_review,
     now_taipei_iso,
@@ -59,6 +60,7 @@ from pose_features import (  # noqa: E402
     studio_resolution,
     studio_view_order,
 )
+from sop_formal_gate import verify_rig_formal_gate  # noqa: E402
 from sop_preflight import (  # noqa: E402
     _worker_command,
     resolve_scratch_dirs,
@@ -212,166 +214,219 @@ def build_g2_overview_grid(overlay_paths: list[Path], out_jpg_path: Path, cols: 
     return out_jpg_path
 
 
+G2_REVIEW_TEMPLATE_PATH = SCRIPT_DIR.parent / "assets" / "g2_review.html"
+
+
+def _compute_image_foreground_bounds(img: Any) -> list[int]:
+    """Computes tight `[x0, y0, x1, y1]` foreground bounding box against top-left background color."""
+    arr = np.asarray(img.convert("RGB"), dtype=np.int16)
+    bg = arr[0, 0]
+    mask = np.abs(arr - bg).max(axis=2) > 4
+    ys, xs = np.where(mask)
+    if len(xs) == 0:
+        w, h = img.size
+        return [int(w * 0.18), int(h * 0.18), int(w * 0.82), int(h * 0.82)]
+    return [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]
+
+
+def _ensure_pose_view_crops_and_bounds(
+    pose_records: list[dict[str, Any]],
+    calib: dict[str, Any],
+    out_dir: Path,
+) -> None:
+    """Ensures lossless per-view panel crops (`pose_XXX_<view>.png`) and foreground `bounds` exist for each pose."""
+    from PIL import Image
+
+    views = list(calib.get("view_order") or ["left", "front", "right"])
+    res = calib.get("resolution") or [calib.get("composite_width", 1344), calib.get("composite_height", 768)]
+    comp_w = int(calib.get("composite_width") or res[0] or 1344)
+    comp_h = int(calib.get("composite_height") or res[1] or 768)
+    pw = int(calib.get("panel_width") or max(1, comp_w // max(1, len(views))))
+    ph = int(calib.get("panel_height") or comp_h)
+
+    for rec in pose_records:
+        pid = str(rec["pose_id"])
+        raw_path = out_dir / str(rec.get("raw_rel") or f"{pid}.png")
+        ov_path = out_dir / str(rec.get("overlay_rel") or f"{pid}_overlay.png")
+        existing_bounds = rec.get("bounds")
+        crops_ready = all((out_dir / f"{pid}_{v}.png").is_file() for v in views)
+        if isinstance(existing_bounds, dict) and "all" in existing_bounds and crops_ready:
+            continue
+
+        b_map: dict[str, list[int]] = dict(existing_bounds) if isinstance(existing_bounds, dict) else {}
+        if raw_path.is_file():
+            raw_im = Image.open(raw_path)
+            b_map["all"] = _compute_image_foreground_bounds(raw_im)
+            for idx, v in enumerate(views):
+                box = (idx * pw, 0, (idx + 1) * pw, ph)
+                crop_im = raw_im.crop(box)
+                crop_path = out_dir / f"{pid}_{v}.png"
+                if not crop_path.is_file():
+                    crop_im.save(crop_path)
+                b_map[v] = _compute_image_foreground_bounds(crop_im)
+        else:
+            b_map.setdefault("all", [int(comp_w * 0.08), int(comp_h * 0.18), int(comp_w * 0.92), int(comp_h * 0.82)])
+            for v in views:
+                b_map.setdefault(v, [int(pw * 0.18), int(ph * 0.18), int(pw * 0.82), int(ph * 0.82)])
+
+        if ov_path.is_file():
+            ov_im = Image.open(ov_path)
+            for idx, v in enumerate(views):
+                ov_crop_path = out_dir / f"{pid}_overlay_{v}.png"
+                if not ov_crop_path.is_file():
+                    ov_im.crop((idx * pw, 0, (idx + 1) * pw, ph)).save(ov_crop_path)
+
+        rec["bounds"] = b_map
+
+
+def _normalize_bone_limits_deg(raw_limits: Any) -> list[list[float]] | None:
+    if isinstance(raw_limits, list) and len(raw_limits) == 3:
+        return [[round(float(pair[0]), 1), round(float(pair[1]), 1)] for pair in raw_limits]
+    if isinstance(raw_limits, dict):
+        return [
+            [round(float(raw_limits.get(ax, [0.0, 0.0])[0]), 1), round(float(raw_limits.get(ax, [0.0, 0.0])[1]), 1)]
+            for ax in ("rx", "ry", "rz")
+        ]
+    return None
+
+
 def build_g2_review_html(
     monster_id: str,
     summary: dict[str, Any],
     pose_records: list[dict[str, Any]],
     out_html_path: Path,
 ) -> Path:
-    """Builds the interactive single-screen 50-thumbnail G2 review HTML page (SOP §4.2)."""
-    thumbs_html = []
-    for idx, rec in enumerate(pose_records):
-        pid = rec["pose_id"]
-        regime = rec["sampling_regime"]
-        b_joints = rec.get("boundary_joints", [])
-        b_badge = f" · 边界×{len(b_joints)}" if b_joints else ""
-        thumbs_html.append(
-            f'<div class="thumb-card" onclick="openModal({idx})">'
-            f'<img src="{html.escape(rec["overlay_rel"])}" data-raw="{html.escape(rec["raw_rel"])}" '
-            f'data-overlay="{html.escape(rec["overlay_rel"])}" alt="{html.escape(pid)}"/>'
-            f'<div class="thumb-meta"><strong>{html.escape(pid)}</strong> · <span>{html.escape(regime)}{html.escape(b_badge)}</span></div>'
-            f'</div>'
-        )
+    """Builds the interactive G2 50-pose review HTML page using the dedicated skill template (`assets/g2_review.html`)."""
+    out_dir = out_html_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    poses_js = json.dumps(
-        [
-            {
-                "pose_id": r["pose_id"],
-                "regime": r["sampling_regime"],
-                "raw_rel": r["raw_rel"],
-                "overlay_rel": r["overlay_rel"],
-                "root_offset": r["root_offset"],
-                "boundary_joints": r.get("boundary_joints", []),
-                "max_utilization": r.get("max_utilization", 0.0),
-                "joints_deg": {
-                    k: [round(math.degrees(x), 1) for x in v]
-                    for k, v in list(r["joints_rad"].items())[:24]
-                },
+    calib = summary.get("calibration") or summary.get("render_receipt") or {}
+    _ensure_pose_view_crops_and_bounds(pose_records, calib, out_dir)
+
+    poses_payload = []
+    for r in pose_records:
+        pid = str(r["pose_id"])
+        regime = str(r.get("sampling_regime") or r.get("regime") or "")
+        if isinstance(r.get("joints_deg"), dict):
+            joints_deg = r["joints_deg"]
+        else:
+            joints_deg = {
+                k: [round(math.degrees(float(x)), 1) for x in v]
+                for k, v in (r.get("joints_rad") or {}).items()
             }
-            for r in pose_records
-        ],
-        ensure_ascii=False,
+        b_joints = r.get("boundary_joints") or r.get("boundary", {}).get("boundary_joints") or []
+        b_count = int(
+            r.get("boundary_joint_count")
+            or r.get("boundary", {}).get("boundary_joint_count")
+            or len(b_joints)
+        )
+        max_util = round(
+            float(r.get("max_utilization", r.get("boundary", {}).get("max_utilization", 0.0))),
+            3,
+        )
+        raw_m = r.get("metrics") or {}
+        whole_m = raw_m.get("whole_mesh") if isinstance(raw_m.get("whole_mesh"), dict) else raw_m
+        flex_m = raw_m.get("flexible_connections") if isinstance(raw_m.get("flexible_connections"), dict) else {}
+        metrics = {
+            "bad_edge_ratio": round(float(whole_m.get("bad_edge_ratio", raw_m.get("bad_edge_ratio", 0.0))), 5),
+            "flex_bad_edge_ratio": round(
+                float(flex_m.get("bad_edge_ratio", raw_m.get("flex_bad_edge_ratio", 0.0))), 5
+            ),
+            "max_stretch_ratio": round(
+                float(whole_m.get("max_stretch_ratio", raw_m.get("max_stretch_ratio", 1.0))), 3
+            ),
+            "new_hard_intersection_pairs": int(raw_m.get("new_hard_intersection_pairs", 0)),
+            "new_flexible_intersection_pairs": int(
+                raw_m.get("new_flexible_intersection_pairs", r.get("new_intersection_pairs", 0))
+            ),
+            "chest_rigid_fit_max_m": round(float(raw_m.get("chest_rigid_fit_max_m", 0.0)), 6),
+        }
+        poses_payload.append({
+            "pose_id": pid,
+            "sampling_regime": regime,
+            "raw_rel": r.get("raw_rel", f"{pid}.png"),
+            "overlay_rel": r.get("overlay_rel", f"{pid}_overlay.png"),
+            "root_offset": [round(float(x), 4) for x in r.get("root_offset", [0.0, 0.0, 0.0])],
+            "joints_deg": joints_deg,
+            "boundary_joint_count": b_count,
+            "boundary_joints": b_joints,
+            "max_utilization": max_util,
+            "metrics": metrics,
+            "bounds": r.get("bounds", {}),
+            "uv_labels": r.get("uv_labels", {}),
+        })
+
+    views = list(
+        calib.get("view_order")
+        or summary.get("render_receipt", {}).get("view_order")
+        or ["left", "front", "right"]
+    )
+    comp_w = int(calib.get("composite_width") or (calib.get("resolution") or [1344, 768])[0])
+    comp_h = int(calib.get("composite_height") or (calib.get("resolution") or [1344, 768])[1])
+    cov = summary.get("coverage_audit") or {}
+    b_audit = cov.get("boundary_exploration_audit") or summary.get("boundary_exploration_audit") or {}
+    jl_summary = summary.get("joint_limits_summary") or {}
+    normalized_bones = {}
+    for b_name, b_info in (jl_summary.get("bones") or cov.get("bones") or {}).items():
+        norm_lim = _normalize_bone_limits_deg(b_info.get("limits_deg"))
+        normalized_bones[b_name] = {
+            "kind": b_info.get("kind"),
+            "sub_role": b_info.get("sub_role"),
+            "limits_deg": norm_lim,
+            "source": b_info.get("source") or b_info.get("limits_source", "probe_initial"),
+        }
+
+    redraw_log = summary.get("rejection_redraw_log") or []
+    receipt = dict(summary.get("render_receipt") or {})
+    receipt.setdefault("resolution", [comp_w, comp_h])
+    receipt.setdefault("view_order", views)
+    receipt.setdefault("rejected_draws", len(redraw_log))
+
+    active_dofs = int(
+        cov.get("active_dof_count")
+        or b_audit.get("active_axes_count")
+        or b_audit.get("total_active_axes")
+        or 52
+    )
+    dual_rate = float(
+        cov.get("both_bounds_coverage_ratio")
+        if cov.get("both_bounds_coverage_ratio") is not None
+        else b_audit.get("dual_boundary_touch_rate", 1.0)
+    )
+    both_covered = int(
+        cov.get("both_bounds_covered_count")
+        or round(dual_rate * active_dofs)
     )
 
-    calib = summary["calibration"]
-    cov = summary["coverage_audit"]
-    b_audit = cov.get("boundary_exploration_audit") or {}
-    jl_summary = summary.get("joint_limits_summary") or {}
-    jl_rows = []
-    for b_name, b_item in sorted((jl_summary.get("bones") or {}).items()):
-        ldeg = b_item.get("limits_deg") or {}
-        rx_s = f"[{ldeg.get('rx', [0, 0])[0]}°, {ldeg.get('rx', [0, 0])[1]}°]"
-        ry_s = f"[{ldeg.get('ry', [0, 0])[0]}°, {ldeg.get('ry', [0, 0])[1]}°]"
-        rz_s = f"[{ldeg.get('rz', [0, 0])[0]}°, {ldeg.get('rz', [0, 0])[1]}°]"
-        jl_rows.append(
-            f"<tr><td><code>{html.escape(b_name)}</code></td>"
-            f"<td><code>{html.escape(str(b_item.get('kind', '')))}</code></td>"
-            f"<td>{html.escape(rx_s)}</td><td>{html.escape(ry_s)}</td><td>{html.escape(rz_s)}</td>"
-            f"<td><code>{html.escape(str(b_item.get('source', 'probe_initial')))}</code></td></tr>"
-        )
-    jl_table_html = "".join(jl_rows)
+    summary_payload = {
+        "monster_id": monster_id,
+        "selected_candidate_id": str(summary.get("selected_candidate_id", "0")),
+        "seed": int(summary.get("seed", 42)),
+        "num_poses": len(poses_payload),
+        "generated_at": summary.get("generated_at", ""),
+        "user_decision": summary.get("user_decision", "awaiting_pose_review"),
+        "sampler_policy": summary.get("sampler_policy"),
+        "render_receipt": receipt,
+        "coverage_audit": {
+            "passed": bool(cov.get("passed", True)),
+            "active_dof_count": active_dofs,
+            "both_bounds_covered_count": both_covered,
+            "both_bounds_coverage_ratio": round(dual_rate, 4),
+        },
+        "joint_limits_summary": {
+            "schema": jl_summary.get("schema", JOINT_LIMITS_SCHEMA),
+            "root_motion": jl_summary.get("root_motion") or jl_summary.get("global_root"),
+            "bones": normalized_bones,
+        },
+        "rejection_redraw_log": redraw_log,
+    }
 
-    doc = f"""<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <title>G2 50 边界探索随机姿势审计 — {html.escape(monster_id)}</title>
-  <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #e6edf3; margin: 0; padding: 20px; }}
-    .container {{ max-width: 1480px; margin: 0 auto; }}
-    .header-bar {{ display: flex; justify-content: space-between; align-items: center; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 16px 20px; margin-bottom: 16px; }}
-    .grid-50 {{ display: grid; grid-template-columns: repeat(10, 1fr); gap: 8px; }}
-    .thumb-card {{ background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 4px; cursor: pointer; transition: border-color 0.15s; }}
-    .thumb-card:hover {{ border-color: #58a6ff; }}
-    .thumb-card img {{ width: 100%; border-radius: 4px; display: block; }}
-    .thumb-meta {{ font-size: 11px; color: #8b949e; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
-    .limits-box {{ background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 14px 18px; margin-top: 16px; }}
-    table {{ width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }}
-    th, td {{ border-bottom: 1px solid #21262d; padding: 6px 8px; text-align: left; }}
-    .modal {{ display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 999; align-items: center; justify-content: center; padding: 24px; }}
-    .modal.open {{ display: flex; }}
-    .modal-box {{ background: #161b22; border: 1px solid #30363d; border-radius: 12px; max-width: 1280px; width: 100%; padding: 20px; }}
-    .modal-controls {{ display: flex; gap: 10px; align-items: center; justify-content: space-between; margin-bottom: 12px; }}
-    button {{ background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 6px 14px; cursor: pointer; font-weight: 600; }}
-    button:hover {{ background: #30363d; }}
-    pre {{ background: #0d1117; padding: 10px; border-radius: 6px; max-height: 160px; overflow-y: auto; font-size: 12px; }}
-    code {{ background: #21262d; padding: 2px 6px; border-radius: 4px; }}
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="header-bar">
-      <div>
-        <h1 style="margin:0 0 6px 0;font-size:20px;">MonsterStudio · G2 50 个边界探索随机姿势审计 (<code>{html.escape(monster_id)}</code>)</h1>
-        <div style="font-size:13px;color:#8b949e;">
-          选定候选：<code>candidate_{html.escape(str(summary['selected_candidate_id']))}</code> ·
-          固定 Seed：<code>{summary['seed']}</code> ·
-          原生分辨率：<code>{calib['composite_width']}×{calib['composite_height']}</code> (单面板 <code>{calib['panel_width']}×{calib['panel_height']}</code> · 视图 <code>{",".join(calib['view_order'])}</code>) ·
-          解耦覆盖率门禁：<strong>{'PASS' if cov['passed'] else 'WARN'}</strong> ·
-          双侧边界触达率：<strong>{int(round(float(b_audit.get('dual_boundary_touch_rate', 1.0)) * 100))}%</strong> ·
-          关节限制配置：<code>{html.escape(str(jl_summary.get('schema', JOINT_LIMITS_SCHEMA)))}</code> ·
-          异常重抽次数：<code>{len(summary['rejection_redraw_log'])}</code>
-        </div>
-      </div>
-    </div>
-    <div class="grid-50">{"".join(thumbs_html)}</div>
-    <details class="limits-box">
-      <summary style="cursor:pointer;font-weight:600;">查看当前怪兽关节限制表 (<code>joint_limits.json</code> · 共 {len(jl_summary.get('bones') or {})} 骨)</summary>
-      <table>
-        <thead><tr><th>规范骨骼名</th><th>Kind</th><th>RX 范围</th><th>RY 范围</th><th>RZ 范围</th><th>来源</th></tr></thead>
-        <tbody>{jl_table_html}</tbody>
-      </table>
-    </details>
-  </div>
-
-  <div id="pose-modal" class="modal">
-    <div class="modal-box">
-      <div class="modal-controls">
-        <div>
-          <strong id="modal-title">pose_001</strong>
-          <span id="modal-regime" style="color:#58a6ff;margin-left:8px;"></span>
-        </div>
-        <div>
-          <button onclick="prevPose()">← 上一张</button>
-          <button onclick="toggleLayer()" id="layer-btn">切换原图 / 2D 标签图层 (当前: 叠加图)</button>
-          <button onclick="nextPose()">下一张 →</button>
-          <button onclick="closeModal()">关闭 ✕</button>
-        </div>
-      </div>
-      <img id="modal-img" src="" style="width:100%;border-radius:8px;background:#000;"/>
-      <pre id="modal-joints"></pre>
-    </div>
-  </div>
-
-  <script>
-    const POSES = {poses_js};
-    let curIdx = 0;
-    let showOverlay = true;
-    function renderModal() {{
-      const p = POSES[curIdx];
-      document.getElementById('modal-title').textContent = p.pose_id + ' (' + (curIdx + 1) + '/50)';
-      document.getElementById('modal-regime').textContent = p.regime + ' · 最大边界利用率 ' + Math.round((p.max_utilization || 0) * 100) + '%';
-      document.getElementById('modal-img').src = showOverlay ? p.overlay_rel : p.raw_rel;
-      document.getElementById('layer-btn').textContent = '切换原图 / 2D 标签图层 (当前: ' + (showOverlay ? '2D 标签叠加图' : '正交多视图原图') + ')';
-      document.getElementById('modal-joints').textContent = JSON.stringify({{boundary_joints: p.boundary_joints, root_offset: p.root_offset, joints_deg: p.joints_deg}}, null, 2);
-    }}
-    function openModal(idx) {{ curIdx = idx; document.getElementById('pose-modal').classList.add('open'); renderModal(); }}
-    function closeModal() {{ document.getElementById('pose-modal').classList.remove('open'); }}
-    function prevPose() {{ curIdx = (curIdx + POSES.length - 1) % POSES.length; renderModal(); }}
-    function nextPose() {{ curIdx = (curIdx + 1) % POSES.length; renderModal(); }}
-    function toggleLayer() {{ showOverlay = !showOverlay; renderModal(); }}
-    window.addEventListener('keydown', (e) => {{
-      if (!document.getElementById('pose-modal').classList.contains('open')) return;
-      if (e.key === 'ArrowLeft') prevPose();
-      if (e.key === 'ArrowRight') nextPose();
-      if (e.key === ' ') {{ e.preventDefault(); toggleLayer(); }}
-      if (e.key === 'Escape') closeModal();
-    }});
-  </script>
-</body>
-</html>
-"""
-    out_html_path.parent.mkdir(parents=True, exist_ok=True)
+    template_text = G2_REVIEW_TEMPLATE_PATH.read_text(encoding="utf-8")
+    doc = (
+        template_text
+        .replace("__POSE_DATA__", json.dumps(poses_payload, ensure_ascii=False))
+        .replace("__SUMMARY_DATA__", json.dumps(summary_payload, ensure_ascii=False))
+    )
     out_html_path.write_text(doc, encoding="utf-8")
     return out_html_path
 
@@ -395,15 +450,7 @@ def build_g2_review_pack(
     g2_dir = dirs["checks_dir"] / "g2_review"
     g2_dir.mkdir(parents=True, exist_ok=True)
 
-    meta_path = (
-        Path(g1_info.get("bone_naming_validation", {}).get("rig_meta_path", ""))
-        if g1_info.get("bone_naming_validation", {}).get("rig_meta_path")
-        else (work_dir / "g1_candidates" / f"candidate_{selected_cid}_rig_meta.json")
-    )
-    if not meta_path.is_file():
-        meta_path = work_dir / "g1_candidates" / f"candidate_{selected_cid}_rig_meta.json"
-    if not meta_path.is_file():
-        raise FileNotFoundError(f"Selected candidate studio_rig_meta.json not found: {meta_path}")
+    selected_cid, meta_path, blend_path = resolve_g1_candidate_files(work_dir, g1_info)
 
     rig_meta = json.loads(meta_path.read_text(encoding="utf-8"))
     val = validate_canonical_rig_bone_names(rig_meta.get("bones", {}))
@@ -434,6 +481,10 @@ def build_g2_review_pack(
         bbox_max=rig_meta.get("bbox_max"),
     )
     classified = apply_joint_limits_profile(classified, joint_limits_profile)
+    formal_gate = verify_rig_formal_gate(classified, joint_limits_profile, assert_passed=True)
+    (dirs["checks_dir"] / "formal_gate_rig.json").write_text(
+        json.dumps(formal_gate, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
 
     panel_w, panel_h, comp_w, comp_h = studio_resolution()
     views = list(studio_view_order())
@@ -451,7 +502,6 @@ def build_g2_review_pack(
         "view_order": views,
     }
 
-    blend_path = work_dir / "g1_candidates" / f"candidate_{selected_cid}_full.blend"
     worker_cmd = _worker_command(
         [
             "--mode",
@@ -570,8 +620,18 @@ def build_g2_review_pack(
     summary_path = g2_dir / "g2_pose_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
+    calib_path = g2_dir / "calibration.json"
+    if not calib_path.is_file():
+        calib_path.write_text(json.dumps(calib, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    g2_limits_copy = g2_dir / "joint_limits.json"
+    if limits_path.is_file() and not g2_limits_copy.is_file():
+        g2_limits_copy.write_text(limits_path.read_text(encoding="utf-8"), encoding="utf-8")
+
     html_path = g2_dir / "g2_review.html"
     build_g2_review_html(monster_id, summary, pose_records, html_path)
+
+    records_path = g2_dir / "pose_records.json"
+    records_path.write_text(json.dumps(pose_records, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     mark_awaiting_review(
         ledger,

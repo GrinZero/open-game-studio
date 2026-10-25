@@ -38,6 +38,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any
+from surface_contact import assert_surface_contact_quality
 
 
 DRIVE_ROOT = Path(os.environ.get("MONSTER_DRIVE_ROOT", "/content/drive/MyDrive/MonsterStudio"))
@@ -941,11 +942,13 @@ def animate_monster_actions(
                     str(frames_dir),
                     "--out_json",
                     str(traj_json),
-                ]
+                ] + (["--contact_events", str(action_work / "contact_events.json")]
+                     if (action_work / "contact_events.json").is_file() else [])
             )
             with open(traj_json, "r", encoding="utf-8") as f:
                 last_res = json.load(f)
             if last_res.get("gate_passed", False):
+                assert_surface_contact_quality(last_res, action_name)
                 gate_passed = True
                 print(f"[Stage 5 Gate PASSED] Action '{action_name}' passed on seed {seed}!")
                 break

@@ -29,6 +29,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from sop_gate import (  # noqa: E402
     assert_gate,
+    resolve_g1_candidate_files,
     derive_invalidations,
     load_ledger,
     now_taipei_iso,
@@ -45,6 +46,7 @@ from sop_preflight import (  # noqa: E402
     _worker_command,
     resolve_scratch_dirs,
 )
+from sop_formal_gate import verify_rig_formal_gate  # noqa: E402
 
 
 def resolve_joint_limits_path(project_root: Path, monster_id: str) -> Path:
@@ -57,20 +59,8 @@ def _resolve_g1_candidate_files(
     monster_id: str,
     g1_info: dict[str, Any],
 ) -> tuple[str, Path, Path]:
-    selected_cid = str(g1_info["selected_candidate_id"])
-    dirs = resolve_scratch_dirs(project_root, monster_id)
-    work_dir = dirs["work_dir"]
-    meta_path = (
-        Path(g1_info.get("bone_naming_validation", {}).get("rig_meta_path", ""))
-        if g1_info.get("bone_naming_validation", {}).get("rig_meta_path")
-        else (work_dir / "g1_candidates" / f"candidate_{selected_cid}_rig_meta.json")
-    )
-    if not meta_path.is_file():
-        meta_path = work_dir / "g1_candidates" / f"candidate_{selected_cid}_rig_meta.json"
-    if not meta_path.is_file():
-        raise FileNotFoundError(f"Selected candidate studio_rig_meta.json not found: {meta_path}")
-    blend_path = work_dir / "g1_candidates" / f"candidate_{selected_cid}_full.blend"
-    return selected_cid, meta_path, blend_path
+    work_dir = resolve_scratch_dirs(project_root, monster_id)["work_dir"]
+    return resolve_g1_candidate_files(work_dir, g1_info)
 
 
 def probe_joint_limits(
@@ -135,6 +125,13 @@ def probe_joint_limits(
     derive_invalidations(ledger, new_fingerprints={"joint_limits_sha256": jl_sha})
     save_ledger(ledger, project_root=proj, drive_root=drive_root)
 
+    formal_gate = verify_rig_formal_gate(rig_meta.get("bones", {}), profile, assert_passed=True)
+    checks_dir = resolve_scratch_dirs(proj, monster_id)["checks_dir"]
+    checks_dir.mkdir(parents=True, exist_ok=True)
+    (checks_dir / "formal_gate_rig.json").write_text(
+        json.dumps(formal_gate, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
     return {
         "monster_id": monster_id,
         "selected_candidate_id": selected_cid,
@@ -145,6 +142,7 @@ def probe_joint_limits(
         "root_motion": profile.get("root_motion"),
         "coordination_present": bool(profile.get("coordination")),
         "inter_bone_couplings_count": len((profile.get("coordination") or {}).get("inter_bone_couplings", [])),
+        "formal_gate_passed": bool(formal_gate.get("passed", False)),
     }
 
 
@@ -270,6 +268,18 @@ def apply_custom_joint_limits(
             list(root_motion["global_roll_deg"]),
         ]
         profile["global_root"]["translation_fraction_xyz"] = list(root_motion["translation_fraction_xyz"])
+    # Fractions and absolute bounds are alternative consumers of the same
+    # envelope. Never leave an old absolute clamp after changing its fraction.
+    if set_root_trans:
+        bmin, bmax = profile.get("bbox_min"), profile.get("bbox_max")
+        if not (isinstance(bmin, list) and isinstance(bmax, list) and len(bmin) == len(bmax) == 3):
+            raise ValueError("Updating root translation requires the profile's three-dimensional bounding box")
+        absolute = [
+            round(max(0.0, float(bmax[i]) - float(bmin[i])) * root_motion["translation_fraction_xyz"][i], 10)
+            for i in range(3)
+        ]
+        root_motion["max_translation_world_xyz"] = absolute
+        profile.setdefault("global_root", {})["max_translation_world_xyz"] = list(absolute)
 
     # Sync ROOT bone limits with root_motion pitch/yaw/roll if ROOT bone exists and wasn't explicitly overridden
     for b_name, b_entry in bones_prof.items():
@@ -300,6 +310,17 @@ def apply_custom_joint_limits(
     invalidated = derive_invalidations(ledger, new_fingerprints={"joint_limits_sha256": jl_sha})
     save_ledger(ledger, project_root=proj, drive_root=drive_root)
 
+    formal_gate_passed = True
+    if meta_path.is_file():
+        rig_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        formal_gate = verify_rig_formal_gate(rig_meta.get("bones", {}), profile, assert_passed=True)
+        formal_gate_passed = bool(formal_gate.get("passed", False))
+        checks_dir = resolve_scratch_dirs(proj, monster_id)["checks_dir"]
+        checks_dir.mkdir(parents=True, exist_ok=True)
+        (checks_dir / "formal_gate_rig.json").write_text(
+            json.dumps(formal_gate, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+
     return {
         "monster_id": monster_id,
         "selected_candidate_id": selected_cid,
@@ -310,6 +331,7 @@ def apply_custom_joint_limits(
         "coordination_present": bool(profile.get("coordination")),
         "inter_bone_couplings_count": len((profile.get("coordination") or {}).get("inter_bone_couplings", [])),
         "invalidated_gates": invalidated,
+        "formal_gate_passed": formal_gate_passed,
     }
 
 

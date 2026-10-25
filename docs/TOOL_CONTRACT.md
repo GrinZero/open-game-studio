@@ -93,7 +93,7 @@ export_bundle 通过固定 revisionIds 和幂等键生成独立目录。带 runI
 
 ## 读取与能力
 
-studio_open 返回项目、URL 和真实能力状态。传 `projectId` 直接打开该项目；传当前会话绝对目录 `workspaceRoot` 自动匹配已登记项目（子目录匹配最近的项目根，忽略归档或不可用项目）。省略参数时，支持 MCP roots 的宿主会提供工作区目录；多个工作区匹配不同项目时保留列表，不使用服务安装目录或全局最近项目猜测当前会话。调用工具打开时应传当前会话目录，兼容未提供 roots 的宿主。备用浏览器 URL 携带所选项目。project_open 获取快照。asset_search 支持 query / kind / cursor / limit；asset_inspect 返回所有版本及跨画布使用位置。selection_context 返回固定选择、上游 inputSnapshot 与带 fileRef 的版本文件，不向宿主自动发送消息。
+studio_open 返回项目、标准化的 `target`、深链接 URL 与真实能力状态。传 `projectId` 或当前会话 `workspaceRoot` 定位项目；可传 `view`（overview/assets/canvas/character/runs/settings）、`canvasId`、`nodeId`、`assetId` / `revisionId`、`runId` + `nodeKey`（DAG 步骤）或 `stepKey`（制作阶段）、`taskId`。节点、运行和任务可推导所属画布；固定版本可推导资源。冲突、缺失、跨项目或归档目标明确报错，不回退到无关对象。资源打开详情与固定版本，节点选中并居中，DAG 步骤切换运行和阶段，制作阶段展开并滚动，任务打开详情且不启动制作。HTTP URL、MCP 首次输入、后续结果和内嵌页面刷新使用同一目标解析；每次打开返回独立 `navigationId`，允许重新定位同一目标。`navigationStatus=requested` 仅证明目标已解析并发出，不证明宿主的原窗口已经显示；Agent 必须检查实际页面后才能报告“已打开”。`canvas_open`、`project_open` 仍只读取数据。工作区匹配已登记项目的最近根目录，忽略归档或不可用项目；多个工作区有歧义时保留项目列表，不使用插件安装目录或全局最近项目。
 
 `studio_open` 已绑定 `ui://game-studio/workbench` MCP App 资源及 global/thread 入口。Codex 直接打开入口或界面初始化时，优先按调用 `_meta.threadId` 只读查询本地 `CODEX_HOME/state_*.sqlite` 中该会话的 `cwd`；只查准确会话，不读取聊天正文、不改数据库、不以最近聊天或 MCP 进程环境会话代替调用身份。宿主不提供原生会话 ID 或本地状态不可用时回退到标准 MCP roots；显式 `projectId` / `workspaceRoot` 优先。`studio_ui_request` 仅供界面调用，负责项目数据、导入与媒体桥接。原生宿主是否显示入口仍取决于宿主支持，不能从 manifest 存在推断当前宿主表现。
 

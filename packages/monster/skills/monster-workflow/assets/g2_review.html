@@ -1,0 +1,2186 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>G2 50 姿势审阅工作台 · MonsterStudio</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0c0e12;
+    --surface: #13161c;
+    --surface-2: #191d25;
+    --surface-3: #212631;
+    --ink: #f1f5f9;
+    --muted: #94a3b8;
+    --faint: #64748b;
+    --line: rgba(255, 255, 255, 0.08);
+    --line-strong: rgba(255, 255, 255, 0.16);
+    --accent: #38bdf8;
+    --accent-soft: rgba(56, 189, 248, 0.14);
+    --emerald: #34d399;
+    --emerald-soft: rgba(52, 211, 153, 0.14);
+    --amber: #fbbf24;
+    --amber-soft: rgba(251, 191, 36, 0.16);
+    --rose: #fb7185;
+    --rose-soft: rgba(251, 113, 133, 0.16);
+    --violet: #a78bfa;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+    user-select: none;
+  }
+  button, input, select {
+    font: inherit;
+    color: inherit;
+  }
+  .app {
+    height: 100vh;
+    display: grid;
+    grid-template-rows: 52px 1fr auto 48px;
+  }
+
+  /* Topbar */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 0 16px;
+    border-bottom: 1px solid var(--line);
+    background: var(--surface);
+    z-index: 20;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .pose-num {
+    font-variant-numeric: tabular-nums;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--bg);
+    background: var(--ink);
+    padding: 3px 9px;
+    border-radius: 5px;
+    letter-spacing: 0.02em;
+    flex-shrink: 0;
+  }
+  .pose-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--ink);
+    white-space: nowrap;
+  }
+  .regime-badge {
+    font-size: 12px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 5px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    border: 1px solid rgba(56, 189, 248, 0.28);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .quick-metrics {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    overflow: hidden;
+  }
+  .metric-pill {
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    padding: 2px 7px;
+    border-radius: 4px;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .metric-pill strong {
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .metric-pill.ok {
+    border-color: rgba(52, 211, 153, 0.3);
+    color: var(--emerald);
+  }
+  .metric-pill.warn {
+    border-color: rgba(251, 191, 36, 0.35);
+    color: var(--amber);
+  }
+
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+  .seg-group {
+    display: inline-flex;
+    background: var(--bg);
+    padding: 2px;
+    border-radius: 7px;
+    border: 1px solid var(--line);
+    gap: 2px;
+  }
+  .btn {
+    height: 30px;
+    padding: 0 10px;
+    border-radius: 5px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+    white-space: nowrap;
+  }
+  .btn:hover {
+    color: var(--ink);
+    background: rgba(255, 255, 255, 0.05);
+  }
+  .btn.active {
+    background: var(--ink);
+    color: var(--bg);
+    font-weight: 600;
+  }
+  .btn-outline {
+    background: var(--surface-2);
+    border-color: var(--line);
+    color: var(--ink);
+  }
+  .btn-outline:hover {
+    background: var(--surface-3);
+    border-color: var(--line-strong);
+  }
+  .btn-outline.active {
+    background: var(--accent-soft);
+    border-color: rgba(56, 189, 248, 0.45);
+    color: var(--accent);
+  }
+  .kbd-hint {
+    font-size: 10px;
+    opacity: 0.65;
+    padding: 0 4px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.08);
+    font-variant-numeric: tabular-nums;
+  }
+  .btn.active .kbd-hint {
+    background: rgba(0, 0, 0, 0.18);
+    opacity: 0.8;
+  }
+  .sep {
+    width: 1px;
+    height: 18px;
+    background: var(--line);
+    margin: 0 2px;
+  }
+
+  /* Workspace: Stage + Right Inspector Drawer */
+  .workspace {
+    position: relative;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    min-height: 0;
+    overflow: hidden;
+    background: #101318;
+  }
+  .stage-wrap {
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background:
+      radial-gradient(circle at 50% 42%, rgba(30, 41, 59, 0.42), rgba(12, 14, 18, 0.92)),
+      #0e1116;
+  }
+  .stage-grid {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 1px;
+    background: var(--line);
+  }
+  .stage-grid.split-2 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .stage-grid.split-3 {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .viewport {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #2a2a2a;
+    cursor: grab;
+  }
+  .viewport.dragging {
+    cursor: grabbing;
+  }
+  .viewport-tag {
+    position: absolute;
+    top: 10px;
+    left: 12px;
+    z-index: 6;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 9px;
+    border-radius: 5px;
+    background: rgba(12, 14, 18, 0.78);
+    border: 1px solid var(--line);
+    backdrop-filter: blur(8px);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted);
+    letter-spacing: 0.03em;
+    pointer-events: none;
+  }
+  .viewport-tag span {
+    color: var(--ink);
+  }
+  .canvas-layer {
+    position: absolute;
+    top: 0;
+    left: 0;
+    transform-origin: 0 0;
+    will-change: transform;
+  }
+  .pose-img {
+    display: block;
+    pointer-events: none;
+    user-select: none;
+    -webkit-user-drag: none;
+  }
+  .bone-svg {
+    position: absolute;
+    top: 0;
+    left: 0;
+    overflow: visible;
+    pointer-events: none;
+  }
+  .bone-svg.interactive {
+    pointer-events: auto;
+  }
+  .bone-hit {
+    stroke: transparent;
+    stroke-width: 10px;
+    stroke-linecap: round;
+    cursor: pointer;
+    fill: none;
+  }
+  .bone-line {
+    stroke-linecap: round;
+    transition: stroke-width 80ms ease, opacity 80ms ease;
+    pointer-events: none;
+  }
+  .bone-joint {
+    pointer-events: none;
+  }
+  .bone-label-group {
+    pointer-events: none;
+  }
+
+  /* Stage floating HUD & Tooltip */
+  .stage-hud {
+    position: absolute;
+    left: 14px;
+    bottom: 12px;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    pointer-events: none;
+  }
+  .hud-pill {
+    padding: 5px 10px;
+    border-radius: 6px;
+    background: rgba(12, 14, 18, 0.82);
+    border: 1px solid var(--line);
+    backdrop-filter: blur(8px);
+    font-size: 11px;
+    color: var(--muted);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    pointer-events: auto;
+  }
+  .hud-pill strong {
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+  .legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .bone-tooltip {
+    position: fixed;
+    z-index: 100;
+    padding: 8px 10px;
+    border-radius: 7px;
+    background: rgba(15, 18, 24, 0.95);
+    border: 1px solid var(--line-strong);
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.5);
+    font-size: 12px;
+    line-height: 1.45;
+    pointer-events: none;
+    display: none;
+    max-width: 300px;
+  }
+  .bone-tooltip.visible {
+    display: block;
+  }
+  .bone-tooltip .tt-title {
+    font-weight: 700;
+    color: var(--ink);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 3px;
+  }
+  .bone-tooltip .tt-angles {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .bone-tooltip .tt-bound {
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--amber);
+    font-weight: 600;
+  }
+
+  /* Right Inspector Drawer */
+  .inspector {
+    width: 390px;
+    height: 100%;
+    background: var(--surface);
+    border-left: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    transition: margin-right 180ms ease;
+    z-index: 15;
+  }
+  .inspector.collapsed {
+    display: none;
+  }
+  .insp-header {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .insp-tabs {
+    display: flex;
+    gap: 4px;
+    background: var(--bg);
+    padding: 2px;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+    flex: 1;
+  }
+  .insp-tab {
+    flex: 1;
+    height: 28px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .insp-tab.active {
+    background: var(--surface-3);
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .insp-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 14px 18px;
+    user-select: text;
+  }
+  .insp-pane {
+    display: none;
+  }
+  .insp-pane.active {
+    display: block;
+  }
+  .sec-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    margin: 14px 0 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .sec-title:first-child {
+    margin-top: 0;
+  }
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 7px;
+  }
+  .stat-card {
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+  }
+  .stat-card .k {
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 3px;
+  }
+  .stat-card .v {
+    font-size: 13px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+  }
+  .stat-card .sub {
+    font-size: 11px;
+    color: var(--faint);
+    margin-top: 2px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Boundary Joint Interactive List */
+  .boundary-list {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .boundary-item {
+    padding: 7px 9px;
+    border-radius: 6px;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    cursor: pointer;
+    transition: border-color 120ms ease, background 120ms ease;
+  }
+  .boundary-item:hover, .boundary-item.active {
+    border-color: var(--amber);
+    background: rgba(251, 191, 36, 0.08);
+  }
+  .bi-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    font-size: 12px;
+    margin-bottom: 5px;
+  }
+  .bi-bone {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-weight: 600;
+    color: var(--ink);
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .kind-tag {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: var(--surface-3);
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+  .bi-val {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    color: var(--amber);
+    font-weight: 600;
+  }
+  .bi-bar-track {
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+  }
+  .bi-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    background: linear-gradient(90deg, #38bdf8, #fbbf24);
+  }
+
+  /* All Bones Filter & Table */
+  .filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+  }
+  .search-input {
+    flex: 1;
+    min-width: 110px;
+    height: 28px;
+    padding: 0 8px;
+    border-radius: 5px;
+    border: 1px solid var(--line);
+    background: var(--bg);
+    color: var(--ink);
+    font-size: 12px;
+  }
+  .search-input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .mini-pill {
+    height: 26px;
+    padding: 0 8px;
+    border-radius: 5px;
+    border: 1px solid var(--line);
+    background: var(--surface-2);
+    color: var(--muted);
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .mini-pill.active {
+    background: var(--ink);
+    color: var(--bg);
+    border-color: var(--ink);
+    font-weight: 600;
+  }
+  .bone-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11.5px;
+  }
+  .bone-table th,
+  .bone-table td {
+    padding: 6px 6px;
+    border-bottom: 1px solid var(--line);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .bone-table th {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+    font-size: 11px;
+    color: var(--muted);
+    font-weight: 600;
+    position: sticky;
+    top: -12px;
+    background: var(--surface);
+    z-index: 2;
+  }
+  .bone-table th:first-child,
+  .bone-table td:first-child {
+    text-align: left;
+  }
+  .bone-row {
+    cursor: pointer;
+    transition: background 100ms ease;
+  }
+  .bone-row:hover, .bone-row.active {
+    background: rgba(56, 189, 248, 0.1);
+  }
+  .bone-row.is-boundary td:first-child {
+    color: var(--amber);
+    font-weight: 600;
+  }
+  .axis-cell.hit {
+    color: var(--amber);
+    font-weight: 700;
+  }
+  .axis-lim {
+    display: block;
+    font-size: 9.5px;
+    color: var(--faint);
+    font-weight: 400;
+  }
+
+  .summary-note {
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--muted);
+    padding: 10px 12px;
+    border-radius: 6px;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+  }
+  .summary-note strong {
+    color: var(--ink);
+  }
+  .link-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .file-link {
+    font-size: 11px;
+    padding: 5px 9px;
+    border-radius: 5px;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    color: var(--accent);
+    text-decoration: none;
+    transition: border-color 120ms ease, background 120ms ease;
+  }
+  .file-link:hover {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+
+  /* Bottom Filmstrip */
+  .filmstrip {
+    height: 98px;
+    background: var(--surface);
+    border-top: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  .filmstrip.collapsed {
+    display: none;
+  }
+  .strip-item {
+    flex: 0 0 68px;
+    height: 80px;
+    border-radius: 6px;
+    overflow: hidden;
+    background: #161922;
+    border: 1px solid var(--line);
+    padding: 0;
+    cursor: pointer;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    transition: border-color 120ms ease, transform 120ms ease;
+  }
+  .strip-item:hover {
+    border-color: var(--line-strong);
+    transform: translateY(-1px);
+  }
+  .strip-item.active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+  .strip-item img {
+    width: 100%;
+    height: 60px;
+    object-fit: cover;
+    object-position: center 42%;
+    display: block;
+    background: #101318;
+  }
+  .strip-meta {
+    height: 20px;
+    padding: 0 5px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+    background: var(--surface-2);
+  }
+  .strip-item.active .strip-meta {
+    background: var(--accent-soft);
+    color: var(--ink);
+    font-weight: 600;
+  }
+
+  /* Footer Navigation & Interactive Scrubber */
+  .footer {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 16px;
+    padding: 0 16px;
+    border-top: 1px solid var(--line);
+    background: var(--surface);
+    z-index: 20;
+  }
+  .nav-btn {
+    height: 32px;
+    padding: 0 14px;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+    background: var(--surface-2);
+    color: var(--ink);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    justify-self: start;
+    transition: background 120ms ease, border-color 120ms ease;
+  }
+  .nav-btn:hover {
+    background: var(--surface-3);
+    border-color: var(--line-strong);
+  }
+  .nav-btn.next {
+    justify-self: end;
+    background: var(--ink);
+    color: var(--bg);
+    border-color: var(--ink);
+  }
+  .nav-btn.next:hover {
+    background: #e2e8f0;
+  }
+  .scrubber-wrap {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    min-width: 0;
+    width: 100%;
+    max-width: 760px;
+    margin: 0 auto;
+  }
+  .scrubber-count {
+    font-size: 12px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+    white-space: nowrap;
+    min-width: 52px;
+    text-align: right;
+  }
+  .progress-track {
+    flex: 1;
+    display: grid;
+    grid-template-columns: repeat(50, minmax(3px, 1fr));
+    gap: 2px;
+    height: 18px;
+    align-items: center;
+    padding: 3px 4px;
+    border-radius: 5px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+  }
+  .prog-seg {
+    height: 100%;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.16);
+    cursor: pointer;
+    transition: transform 100ms ease, background 100ms ease;
+  }
+  .prog-seg:hover {
+    transform: scaleY(1.35);
+    background: var(--accent);
+  }
+  .prog-seg.active {
+    background: var(--ink);
+    box-shadow: 0 0 6px rgba(255, 255, 255, 0.6);
+    transform: scaleY(1.35);
+  }
+  .prog-seg[data-regime="in_phase_boundary_extension"]:not(.active) { background: rgba(56, 189, 248, 0.42); }
+  .prog-seg[data-regime="antiphase_fold_boundary"]:not(.active) { background: rgba(167, 139, 250, 0.42); }
+  .prog-seg[data-regime="cross_occlusion_twist_boundary"]:not(.active) { background: rgba(251, 191, 36, 0.42); }
+  .prog-seg[data-regime="full_body_dynamic_root_boundary"]:not(.active) { background: rgba(251, 113, 133, 0.42); }
+  .prog-seg[data-regime="quasi_uniform_interior_coverage"]:not(.active) { background: rgba(52, 211, 153, 0.42); }
+
+  /* 50-Pose Overview Modal */
+  dialog {
+    width: min(1360px, 95vw);
+    max-height: 90vh;
+    border: 1px solid var(--line-strong);
+    border-radius: 12px;
+    background: var(--surface);
+    color: var(--ink);
+    padding: 0;
+    box-shadow: 0 24px 72px rgba(0, 0, 0, 0.65);
+  }
+  dialog::backdrop {
+    background: rgba(6, 8, 12, 0.76);
+    backdrop-filter: blur(6px);
+  }
+  .modal-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--line);
+    position: sticky;
+    top: 0;
+    background: var(--surface);
+    z-index: 5;
+    flex-wrap: wrap;
+  }
+  .modal-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 14px;
+    font-weight: 700;
+  }
+  .modal-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .modal-body {
+    padding: 16px 18px 22px;
+    overflow-y: auto;
+    max-height: calc(90vh - 60px);
+  }
+  .overview-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+    gap: 10px;
+  }
+  .ov-card {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--surface-2);
+    padding: 0;
+    cursor: pointer;
+    text-align: left;
+    transition: border-color 120ms ease, transform 120ms ease;
+    display: flex;
+    flex-direction: column;
+  }
+  .ov-card:hover {
+    border-color: var(--line-strong);
+    transform: translateY(-2px);
+  }
+  .ov-card.active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+  .ov-img-wrap {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 448 / 560;
+    background: #12151c;
+    overflow: hidden;
+  }
+  .ov-img-wrap img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: center 44%;
+    display: block;
+  }
+  .ov-badge {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    background: rgba(12, 14, 18, 0.82);
+    border: 1px solid var(--line);
+    color: var(--amber);
+  }
+  .ov-foot {
+    padding: 7px 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px;
+    font-size: 11px;
+    border-top: 1px solid var(--line);
+  }
+  .ov-foot strong {
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+  }
+  .ov-foot span {
+    color: var(--muted);
+    font-size: 10.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  @media (max-width: 1024px) {
+    .quick-metrics { display: none; }
+    .inspector {
+      position: absolute;
+      right: 0;
+      top: 0;
+      bottom: 0;
+      width: min(380px, 92vw);
+      box-shadow: -16px 0 40px rgba(0, 0, 0, 0.55);
+    }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="pose-num" id="poseIndex">01 / 50</span>
+      <span class="pose-title" id="poseTitle">pose_001</span>
+      <span class="regime-badge" id="poseRegime">同相伸展</span>
+      <div class="quick-metrics" id="quickMetrics"></div>
+    </div>
+
+    <div class="toolbar">
+      <div class="seg-group" id="viewGroup" role="group" aria-label="视角切换"></div>
+      <div class="sep"></div>
+      <div class="seg-group" role="group" aria-label="骨骼叠加">
+        <button class="btn" id="toggleOverlay" type="button" title="切换矢量骨骼与关节叠加 (快捷键 B)">
+          骨骼线 <span class="kbd-hint">B</span>
+        </button>
+        <button class="btn" id="cycleLabelMode" type="button" title="切换骨骼名标签显示模式 (快捷键 L)">
+          标签: <span id="labelModeText">悬停骨</span> <span class="kbd-hint">L</span>
+        </button>
+      </div>
+      <button class="btn btn-outline" id="fitView" type="button" title="自适应居中缩放 (快捷键 0 或双击画面)">
+        合适大小 <span class="kbd-hint">0</span>
+      </button>
+      <div class="sep"></div>
+      <button class="btn btn-outline" id="openOverview" type="button" title="打开 50 张缩略图总览与筛选 (快捷键 G)">
+        50 张总览 <span class="kbd-hint">G</span>
+      </button>
+      <button class="btn btn-outline active" id="toggleInspector" type="button" title="展开/收起右侧关节参数与批次审计抽屉 (快捷键 I)">
+        参数与骨骼 <span class="kbd-hint">I</span>
+      </button>
+    </div>
+  </header>
+
+  <div class="workspace">
+    <main class="stage-wrap" id="stageWrap">
+      <div class="stage-grid" id="stageGrid"></div>
+
+      <div class="stage-hud">
+        <div class="hud-pill">
+          <span>缩放 <strong id="zoomReadout">100%</strong></span>
+          <span>·</span>
+          <span>滚轮缩放 / 拖拽平移 / 双击重置</span>
+        </div>
+        <div class="hud-pill" id="overlayLegend" style="display:none">
+          <span><i class="legend-dot" style="background:#fbbf24"></i> 触达边界关节</span>
+          <span><i class="legend-dot" style="background:#38bdf8"></i> 常规骨骼向量</span>
+          <span><i class="legend-dot" style="background:#f43f5e"></i> 当前高亮骨</span>
+        </div>
+      </div>
+    </main>
+
+    <aside class="inspector" id="inspectorDrawer" aria-label="关节参数与骨骼检查器">
+      <div class="insp-header">
+        <div class="insp-tabs" role="tablist">
+          <button class="insp-tab active" data-tab="pose" type="button">当前姿势</button>
+          <button class="insp-tab" data-tab="bones" type="button">全骨角度</button>
+          <button class="insp-tab" data-tab="batch" type="button">批次审计</button>
+        </div>
+      </div>
+
+      <div class="insp-body">
+        <div class="insp-pane active" id="pane-pose">
+          <div class="sec-title">
+            <span>姿势质量与几何门禁</span>
+            <span id="posePassBadge" style="color:var(--emerald)">PASS</span>
+          </div>
+          <div class="stat-grid" id="poseMetricsGrid"></div>
+
+          <div class="sec-title">
+            <span>本帧触达边界自由度 (<span id="boundaryCountLabel">0</span>)</span>
+            <span style="font-size:10px;text-transform:none;font-weight:400">悬停高亮舞台骨骼</span>
+          </div>
+          <div class="boundary-list" id="boundaryList"></div>
+        </div>
+
+        <div class="insp-pane" id="pane-bones">
+          <div class="filter-bar">
+            <input class="search-input" id="boneSearch" type="search" placeholder="筛选骨骼名 / 类型..." />
+            <button class="mini-pill active" data-bone-filter="all" type="button">全部</button>
+            <button class="mini-pill" data-bone-filter="boundary" type="button">仅边界</button>
+            <button class="mini-pill" data-bone-filter="active" type="button">非零角</button>
+          </div>
+          <table class="bone-table">
+            <thead>
+              <tr>
+                <th>骨骼 (悬停定位)</th>
+                <th>X (°)</th>
+                <th>Y (°)</th>
+                <th>Z (°)</th>
+              </tr>
+            </thead>
+            <tbody id="boneTableBody"></tbody>
+          </table>
+        </div>
+
+        <div class="insp-pane" id="pane-batch">
+          <div class="sec-title">批次配置与边界覆盖审计</div>
+          <div class="stat-grid" id="batchSummaryGrid"></div>
+
+          <div class="sec-title">采样与协调策略说明</div>
+          <div class="summary-note" id="batchPolicyNote"></div>
+
+          <div class="sec-title">原始审阅材料与数据文件</div>
+          <div class="link-grid" id="batchFileLinks"></div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <div class="filmstrip" id="filmstrip" aria-label="50 姿势底部缩略图导航栏"></div>
+
+  <footer class="footer">
+    <button class="nav-btn" id="prevBtn" type="button" title="上一张 (←)">
+      ← 上一张
+    </button>
+
+    <div class="scrubber-wrap">
+      <span class="scrubber-count" id="footerCount">01 / 50</span>
+      <div class="progress-track" id="progressTrack" title="点击任意格直接跳转对应姿势"></div>
+      <button class="btn btn-outline" id="toggleStrip" type="button" title="显示/隐藏底部缩略图栏 (快捷键 F)">
+        缩略图栏 <span class="kbd-hint">F</span>
+      </button>
+    </div>
+
+    <button class="nav-btn next" id="nextBtn" type="button" title="下一张 (→ / Space)">
+      下一张 →
+    </button>
+  </footer>
+</div>
+
+<div class="bone-tooltip" id="boneTooltip"></div>
+
+<dialog id="overviewDialog">
+  <div class="modal-head">
+    <div class="modal-title">
+      <span>50 张随机姿势总览</span>
+      <span class="metric-pill" id="overviewCountPill">显示 50 / 50</span>
+    </div>
+    <div class="modal-controls">
+      <div class="seg-group" id="ovRegimeFilter"></div>
+      <div class="seg-group" id="ovViewSwitch"></div>
+      <button class="btn btn-outline" id="closeOverview" type="button">关闭 (Esc)</button>
+    </div>
+  </div>
+  <div class="modal-body">
+    <div class="overview-grid" id="overviewGrid"></div>
+  </div>
+</dialog>
+
+<script>
+const poses = __POSE_DATA__;
+let summaryData = null;
+try { summaryData = __SUMMARY_DATA__; } catch (_e) { summaryData = null; }
+
+const REGIME_LABELS = {
+  in_phase_boundary_extension: "同相伸展",
+  antiphase_fold_boundary: "反相折叠",
+  cross_occlusion_twist_boundary: "交叉与扭转",
+  full_body_dynamic_root_boundary: "全身与根部运动",
+  quasi_uniform_interior_coverage: "内部范围覆盖",
+  synergistic: "链内协同",
+  decoupled: "全关节独立",
+  antiphase_extreme: "反相极值",
+  workspace_cross_occlusion: "交叉遮挡",
+};
+
+const VIEW_LABELS = {
+  front: "正面",
+  left: "左侧",
+  right: "右侧",
+  side: "侧面",
+  split: "三视角并排",
+  all: "原拼合图",
+};
+
+function detectViewOrder() {
+  const fromReceipt = summaryData?.render_receipt?.view_order;
+  if (Array.isArray(fromReceipt) && fromReceipt.length >= 2) {
+    return fromReceipt;
+  }
+  const sampleBounds = poses[0]?.bounds || {};
+  if (sampleBounds.left && sampleBounds.front && sampleBounds.right) {
+    return ["left", "front", "right"];
+  }
+  if (sampleBounds.front && sampleBounds.side) {
+    return ["front", "side"];
+  }
+  return ["left", "front", "right"];
+}
+
+const viewOrder = detectViewOrder();
+if (viewOrder.length === 2) {
+  VIEW_LABELS.split = "双视角并排";
+}
+const compositeRes = summaryData?.render_receipt?.resolution || [1344, 768];
+const defaultPanelW = Math.round(compositeRes[0] / Math.max(1, viewOrder.length));
+const defaultPanelH = compositeRes[1] || 768;
+
+// Build lookup of configured bone joint limits from summaryData if present
+const boneLimitsLookup = {};
+const rawSummaryBones =
+  summaryData?.coverage_audit?.bones ||
+  summaryData?.joint_limits_summary?.bones ||
+  {};
+for (const [bName, bInfo] of Object.entries(rawSummaryBones)) {
+  const ld = bInfo?.limits_deg || bInfo?.canonical_default_limits_deg;
+  if (Array.isArray(ld) && ld.length === 3) {
+    boneLimitsLookup[bName] = ld;
+  } else if (ld && typeof ld === "object" && Array.isArray(ld.rx)) {
+    boneLimitsLookup[bName] = [ld.rx, ld.ry || [0, 0], ld.rz || [0, 0]];
+  }
+}
+
+// Application State
+let idx = 0;
+let currentView = viewOrder.includes("front") ? "front" : viewOrder[0];
+let showOverlay = false;
+// labelMode: 'hover' | 'boundary' | 'all' | 'baked'
+let labelMode = "hover";
+let inspectorOpen = true;
+let stripOpen = true;
+let activeTab = "pose";
+let boneFilter = "all";
+let boneSearchQuery = "";
+let highlightedBone = null;
+
+// Overview modal state
+let ovRegime = "all";
+let ovThumbView = viewOrder.includes("front") ? "front" : viewOrder[0];
+
+// Shared zoom/pan multiplier across stage viewports (1.0 = auto-fit to bounds)
+let userZoom = 1.0;
+let userPanX = 0;
+let userPanY = 0;
+let isDragging = false;
+let dragStartX = 0;
+let dragStartY = 0;
+let dragOriginPanX = 0;
+let dragOriginPanY = 0;
+
+// DOM Elements
+const stageGrid = document.getElementById("stageGrid");
+const viewGroup = document.getElementById("viewGroup");
+const toggleOverlayBtn = document.getElementById("toggleOverlay");
+const cycleLabelModeBtn = document.getElementById("cycleLabelMode");
+const labelModeText = document.getElementById("labelModeText");
+const overlayLegend = document.getElementById("overlayLegend");
+const zoomReadout = document.getElementById("zoomReadout");
+const inspectorDrawer = document.getElementById("inspectorDrawer");
+const toggleInspectorBtn = document.getElementById("toggleInspector");
+const filmstrip = document.getElementById("filmstrip");
+const toggleStripBtn = document.getElementById("toggleStrip");
+const progressTrack = document.getElementById("progressTrack");
+const boneTooltip = document.getElementById("boneTooltip");
+const overviewDialog = document.getElementById("overviewDialog");
+
+function inferBoneKind(boneName) {
+  const prefix = String(boneName || "").split("_")[0].toUpperCase();
+  return prefix || "BONE";
+}
+
+function getPoseJointsDeg(pose) {
+  if (!pose) return {};
+  if (pose.joints_deg && Object.keys(pose.joints_deg).length) return pose.joints_deg;
+  const out = {};
+  for (const [k, vals] of Object.entries(pose.joints_rad || {})) {
+    out[k] = vals.map((x) => +(Number(x) * 180 / Math.PI).toFixed(1));
+  }
+  return out;
+}
+
+function getPoseMetrics(pose) {
+  const m = pose?.metrics || {};
+  const wm = m.whole_mesh || pose?.stretch || m;
+  const fm = m.flexible_connections || {};
+  return {
+    bad_edge_ratio: wm.bad_edge_ratio ?? m.bad_edge_ratio ?? 0,
+    flex_bad_edge_ratio: fm.bad_edge_ratio ?? m.flex_bad_edge_ratio ?? 0,
+    max_stretch_ratio: wm.max_stretch_ratio ?? m.max_stretch_ratio ?? 1,
+    new_hard_intersection_pairs: m.new_hard_intersection_pairs ?? 0,
+    new_flexible_intersection_pairs: m.new_flexible_intersection_pairs ?? pose?.new_intersection_pairs ?? 0,
+    chest_rigid_fit_max_m: m.chest_rigid_fit_max_m ?? 0,
+  };
+}
+
+function getPoseBoundaryCount(pose) {
+  return pose?.boundary_joint_count ?? pose?.boundary?.boundary_joint_count ?? (pose?.boundary_joints || []).length;
+}
+
+function getImageSrcForPanel(pose, panelView) {
+  const useBakedOverlay = showOverlay && labelMode === "baked";
+  if (panelView === "all") {
+    return useBakedOverlay ? `${pose.pose_id}_overlay.png` : `${pose.pose_id}.png`;
+  }
+  return useBakedOverlay
+    ? `${pose.pose_id}_overlay_${panelView}.png`
+    : `${pose.pose_id}_${panelView}.png`;
+}
+
+function getFallbackImageSrc(pose) {
+  const useBakedOverlay = showOverlay && labelMode === "baked";
+  return useBakedOverlay ? `${pose.pose_id}_overlay.png` : `${pose.pose_id}.png`;
+}
+
+function initToolbarViews() {
+  viewGroup.innerHTML = "";
+  const orderedButtons = [];
+  if (viewOrder.includes("front")) orderedButtons.push("front");
+  for (const v of viewOrder) {
+    if (v !== "front") orderedButtons.push(v);
+  }
+  orderedButtons.push("split");
+  orderedButtons.push("all");
+
+  const keyHints = { front: "1", left: "2", side: "2", right: "3", split: "4", all: "5" };
+  for (const v of orderedButtons) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn" + (v === currentView ? " active" : "");
+    btn.dataset.view = v;
+    const hint = keyHints[v] ? ` <span class="kbd-hint">${keyHints[v]}</span>` : "";
+    btn.innerHTML = `${VIEW_LABELS[v] || v}${hint}`;
+    btn.addEventListener("click", () => setView(v));
+    viewGroup.appendChild(btn);
+  }
+}
+
+function buildStageViewports() {
+  stageGrid.innerHTML = "";
+  const panels = currentView === "split" ? [...viewOrder] : [currentView];
+  stageGrid.className = "stage-grid" + (panels.length === 3 ? " split-3" : panels.length === 2 ? " split-2" : "");
+
+  for (const panelView of panels) {
+    const vp = document.createElement("div");
+    vp.className = "viewport";
+    vp.dataset.panelView = panelView;
+
+    const tag = document.createElement("div");
+    tag.className = "viewport-tag";
+    const viewCode = panelView.toUpperCase();
+    tag.innerHTML = `<span>${VIEW_LABELS[panelView] || panelView}</span> · ${viewCode}`;
+    vp.appendChild(tag);
+
+    const layer = document.createElement("div");
+    layer.className = "canvas-layer";
+
+    const img = document.createElement("img");
+    img.className = "pose-img";
+    img.alt = `${poses[idx]?.pose_id || "pose"} ${panelView}`;
+    img.addEventListener("load", () => {
+      updatePanelLayout(vp);
+      renderPanelSvg(vp);
+    });
+    img.addEventListener("error", () => {
+      const p = poses[idx];
+      if (!p) return;
+      const fallback = getFallbackImageSrc(p);
+      if (!img.src.endsWith(fallback)) {
+        img.src = fallback;
+      }
+    });
+
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "bone-svg");
+
+    layer.appendChild(img);
+    layer.appendChild(svg);
+    vp.appendChild(layer);
+
+    // Attach zoom/pan interactions
+    vp.addEventListener("wheel", onStageWheel, { passive: false });
+    vp.addEventListener("pointerdown", onStagePointerDown);
+    vp.addEventListener("dblclick", () => resetTransform());
+
+    stageGrid.appendChild(vp);
+  }
+}
+
+function computeBaseTransform(vp, panelView, imgW, imgH) {
+  const pose = poses[idx];
+  const rect = vp.getBoundingClientRect();
+  if (currentView === "split" && pose?.bounds) {
+    // In split mode, lock all panels to a shared 1:1 scale & vertical center (epipolar alignment)
+    // while centering each view horizontally on its own tight bounding box.
+    let maxBw = 48;
+    let minY = imgH;
+    let maxY = 0;
+    for (const v of viewOrder) {
+      const b = pose.bounds[v];
+      if (Array.isArray(b) && b.length === 4) {
+        maxBw = Math.max(maxBw, b[2] - b[0]);
+        minY = Math.min(minY, b[1]);
+        maxY = Math.max(maxY, b[3]);
+      }
+    }
+    const sharedBh = Math.max(48, maxY > minY ? maxY - minY : imgH * 0.5);
+    const sharedCy = maxY > minY ? (minY + maxY) * 0.5 : imgH * 0.5;
+    const baseScale = Math.min((rect.width * 0.92) / maxBw, (rect.height * 0.88) / sharedBh);
+    const ownBounds = pose.bounds[panelView] || [0, 0, imgW, imgH];
+    const cx = (ownBounds[0] + ownBounds[2]) * 0.5;
+    return { baseScale, cx, cy: sharedCy, vw: rect.width, vh: rect.height };
+  }
+
+  const rawBounds = (pose?.bounds && pose.bounds[panelView]) || (pose?.bounds && pose.bounds.all) || [0, 0, imgW, imgH];
+  const [x0, y0, x1, y1] = rawBounds;
+  const bw = Math.max(48, x1 - x0);
+  const bh = Math.max(48, y1 - y0);
+  const pad = 0.86;
+  const baseScale = Math.min((rect.width * pad) / bw, (rect.height * pad) / bh);
+  const cx = (x0 + x1) * 0.5;
+  const cy = (y0 + y1) * 0.5;
+  return { baseScale, cx, cy, vw: rect.width, vh: rect.height };
+}
+
+function updatePanelLayout(vp) {
+  const panelView = vp.dataset.panelView;
+  const img = vp.querySelector(".pose-img");
+  const layer = vp.querySelector(".canvas-layer");
+  if (!img || !layer) return;
+  const imgW = img.naturalWidth || (panelView === "all" ? compositeRes[0] : defaultPanelW);
+  const imgH = img.naturalHeight || defaultPanelH;
+  const { baseScale, cx, cy, vw, vh } = computeBaseTransform(vp, panelView, imgW, imgH);
+  const scale = baseScale * userZoom;
+  const tx = vw * 0.5 - cx * scale + userPanX;
+  const ty = vh * 0.5 - cy * scale + userPanY;
+  layer.style.transform = `translate(${tx.toFixed(1)}px, ${ty.toFixed(1)}px) scale(${scale.toFixed(4)})`;
+  zoomReadout.textContent = `${Math.round(scale * 100)}%`;
+}
+
+function updateAllPanelsLayout() {
+  stageGrid.querySelectorAll(".viewport").forEach((vp) => updatePanelLayout(vp));
+}
+
+function resetTransform() {
+  userZoom = 1.0;
+  userPanX = 0;
+  userPanY = 0;
+  updateAllPanelsLayout();
+}
+
+function onStageWheel(e) {
+  e.preventDefault();
+  const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+  const nextZoom = Math.min(8.0, Math.max(0.35, userZoom * factor));
+  const actualRatio = nextZoom / userZoom;
+
+  const vp = e.currentTarget;
+  const rect = vp.getBoundingClientRect();
+  const mx = e.clientX - rect.left - rect.width * 0.5;
+  const my = e.clientY - rect.top - rect.height * 0.5;
+
+  userPanX = mx - (mx - userPanX) * actualRatio;
+  userPanY = my - (my - userPanY) * actualRatio;
+  userZoom = nextZoom;
+  updateAllPanelsLayout();
+}
+
+function onStagePointerDown(e) {
+  if (e.button !== 0) return;
+  if (e.target.closest(".bone-hit")) return;
+  const vp = e.currentTarget;
+  isDragging = true;
+  dragStartX = e.clientX;
+  dragStartY = e.clientY;
+  dragOriginPanX = userPanX;
+  dragOriginPanY = userPanY;
+  vp.classList.add("dragging");
+  vp.setPointerCapture(e.pointerId);
+
+  const onMove = (ev) => {
+    if (!isDragging) return;
+    userPanX = dragOriginPanX + (ev.clientX - dragStartX);
+    userPanY = dragOriginPanY + (ev.clientY - dragStartY);
+    updateAllPanelsLayout();
+  };
+  const onUp = () => {
+    isDragging = false;
+    vp.classList.remove("dragging");
+    vp.removeEventListener("pointermove", onMove);
+    vp.removeEventListener("pointerup", onUp);
+    vp.removeEventListener("pointercancel", onUp);
+  };
+  vp.addEventListener("pointermove", onMove);
+  vp.addEventListener("pointerup", onUp);
+  vp.addEventListener("pointercancel", onUp);
+}
+
+// Render interactive SVG bone vectors & labels on top of panel image
+function getBoneUvForView(uvEntry, viewName, panelIndexInComposite) {
+  if (!uvEntry) return null;
+  const hKey = `${viewName}_uv_head`;
+  const tKey = `${viewName}_uv_tail`;
+  const head = uvEntry[hKey];
+  const tail = uvEntry[tKey];
+  if (!Array.isArray(head) || !Array.isArray(tail)) return null;
+  const offsetX = panelIndexInComposite * defaultPanelW;
+  return {
+    x1: Number(head[0]) + offsetX,
+    y1: Number(head[1]),
+    x2: Number(tail[0]) + offsetX,
+    y2: Number(tail[1]),
+  };
+}
+
+function renderPanelSvg(vp) {
+  const svg = vp.querySelector(".bone-svg");
+  const img = vp.querySelector(".pose-img");
+  const pose = poses[idx];
+  if (!svg || !img || !pose) return;
+
+  const panelView = vp.dataset.panelView;
+  const imgW = img.naturalWidth || (panelView === "all" ? compositeRes[0] : defaultPanelW);
+  const imgH = img.naturalHeight || defaultPanelH;
+  svg.setAttribute("viewBox", `0 0 ${imgW} ${imgH}`);
+  svg.setAttribute("width", String(imgW));
+  svg.setAttribute("height", String(imgH));
+  svg.innerHTML = "";
+
+  const uvLabels = pose.uv_labels || {};
+  const shouldDrawAllVectors = showOverlay && labelMode !== "baked";
+  if (!shouldDrawAllVectors && !highlightedBone) {
+    svg.classList.remove("interactive");
+    return;
+  }
+  svg.classList.toggle("interactive", shouldDrawAllVectors);
+
+  const boundaryByBone = {};
+  for (const bj of pose.boundary_joints || []) {
+    if (!boundaryByBone[bj.bone]) boundaryByBone[bj.bone] = [];
+    boundaryByBone[bj.bone].push(bj);
+  }
+
+  const subViews = panelView === "all"
+    ? viewOrder.map((v, i) => ({ view: v, offsetIdx: i }))
+    : [{ view: panelView, offsetIdx: 0 }];
+
+  const pendingLabels = [];
+
+  for (const { view, offsetIdx } of subViews) {
+    for (const [boneName, uvEntry] of Object.entries(uvLabels)) {
+      const isHighlighted = highlightedBone === boneName;
+      if (!shouldDrawAllVectors && !isHighlighted) continue;
+
+      const coords = getBoneUvForView(uvEntry, view, offsetIdx);
+      if (!coords) continue;
+
+      const bHits = boundaryByBone[boneName] || [];
+      const isBoundary = bHits.length > 0;
+      const strokeColor = isHighlighted
+        ? "#f43f5e"
+        : isBoundary
+        ? "#fbbf24"
+        : "#38bdf8";
+      const strokeWidth = isHighlighted ? 2.4 : isBoundary ? 1.5 : 1.05;
+      const opacity = isHighlighted ? 1.0 : highlightedBone ? 0.32 : isBoundary ? 0.92 : 0.68;
+
+      const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      line.setAttribute("class", "bone-line");
+      line.setAttribute("x1", coords.x1.toFixed(2));
+      line.setAttribute("y1", coords.y1.toFixed(2));
+      line.setAttribute("x2", coords.x2.toFixed(2));
+      line.setAttribute("y2", coords.y2.toFixed(2));
+      line.setAttribute("stroke", strokeColor);
+      line.setAttribute("stroke-width", String(strokeWidth));
+      line.setAttribute("opacity", String(opacity));
+      svg.appendChild(line);
+
+      const joint = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      joint.setAttribute("class", "bone-joint");
+      joint.setAttribute("cx", coords.x1.toFixed(2));
+      joint.setAttribute("cy", coords.y1.toFixed(2));
+      joint.setAttribute("r", isHighlighted ? "2.8" : isBoundary ? "1.9" : "1.4");
+      joint.setAttribute("fill", strokeColor);
+      joint.setAttribute("opacity", String(opacity));
+      svg.appendChild(joint);
+
+      if (shouldDrawAllVectors) {
+        const hit = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        hit.setAttribute("class", "bone-hit");
+        hit.setAttribute("x1", coords.x1.toFixed(2));
+        hit.setAttribute("y1", coords.y1.toFixed(2));
+        hit.setAttribute("x2", coords.x2.toFixed(2));
+        hit.setAttribute("y2", coords.y2.toFixed(2));
+        hit.addEventListener("pointerenter", (ev) => {
+          setHighlightedBone(boneName, true);
+          showBoneTooltip(ev, boneName);
+        });
+        hit.addEventListener("pointermove", (ev) => moveBoneTooltip(ev));
+        hit.addEventListener("pointerleave", () => {
+          setHighlightedBone(null, true);
+          hideBoneTooltip();
+        });
+        svg.appendChild(hit);
+      }
+
+      const showLabel =
+        isHighlighted ||
+        (shouldDrawAllVectors &&
+          ((labelMode === "boundary" && isBoundary) || labelMode === "all"));
+
+      if (showLabel) {
+        pendingLabels.push({
+          boneName,
+          isHighlighted,
+          isBoundary,
+          mx: (coords.x1 + coords.x2) * 0.5,
+          my: (coords.y1 + coords.y2) * 0.5,
+        });
+      }
+    }
+  }
+
+  // Render labels with simple collision avoidance so dense bone clusters stay legible
+  const placedBoxes = [];
+  pendingLabels.sort((a, b) => (b.isHighlighted ? 2 : b.isBoundary ? 1 : 0) - (a.isHighlighted ? 2 : a.isBoundary ? 1 : 0));
+  for (const item of pendingLabels) {
+    const labelStr = item.isHighlighted
+      ? item.boneName
+      : item.boneName.replace("_00_", "_").replace("_0", "_");
+    const fontSize = item.isHighlighted ? 5.6 : 4.4;
+    const estW = labelStr.length * (fontSize * 0.62);
+    const estH = fontSize + 2.0;
+    let lx = item.mx + 3.0;
+    let ly = item.my - 2.0;
+
+    if (!item.isHighlighted) {
+      let collided = false;
+      for (const dy of [0, -6, 6, -12, 12]) {
+        const tryY = ly + dy;
+        const hit = placedBoxes.some(
+          (b) => Math.abs(lx - b.x) < (estW + b.w) * 0.48 && Math.abs(tryY - b.y) < (estH + b.h) * 0.55
+        );
+        if (!hit) {
+          ly = tryY;
+          collided = false;
+          break;
+        }
+        collided = true;
+      }
+      if (collided) continue;
+    }
+    placedBoxes.push({ x: lx, y: ly, w: estW, h: estH });
+
+    const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    text.setAttribute("x", lx.toFixed(1));
+    text.setAttribute("y", ly.toFixed(1));
+    text.setAttribute("fill", item.isHighlighted ? "#ffe4e6" : item.isBoundary ? "#fef08a" : "#e0f2fe");
+    text.setAttribute("font-size", String(fontSize));
+    text.setAttribute("font-family", "ui-monospace, SFMono-Regular, Menlo, monospace");
+    text.setAttribute("font-weight", item.isHighlighted || item.isBoundary ? "700" : "500");
+    text.setAttribute("paint-order", "stroke");
+    text.setAttribute("stroke", "rgba(9, 11, 16, 0.92)");
+    text.setAttribute("stroke-width", "1.4");
+    text.setAttribute("pointer-events", "none");
+    text.textContent = labelStr;
+    svg.appendChild(text);
+  }
+}
+
+function renderAllPanelSvgs() {
+  stageGrid.querySelectorAll(".viewport").forEach((vp) => renderPanelSvg(vp));
+}
+
+function showBoneTooltip(ev, boneName) {
+  const pose = poses[idx];
+  if (!pose) return;
+  const deg = getPoseJointsDeg(pose)[boneName] || [0, 0, 0];
+  const bHits = (pose.boundary_joints || []).filter((b) => b.bone === boneName);
+  const lims = boneLimitsLookup[boneName];
+  const limText = lims
+    ? `<div style="font-size:10.5px;color:var(--faint);margin-top:2px">限位 X[${lims[0][0]}°,${lims[0][1]}°] Y[${lims[1][0]}°,${lims[1][1]}°] Z[${lims[2][0]}°,${lims[2][1]}°]</div>`
+    : "";
+  const hitHtml = bHits.length
+    ? `<div class="tt-bound">边界触达: ${bHits.map((h) => `${h.axis}=${h.deg}° (${h.bound}:${h.limit_deg}°)`).join(" · ")}</div>`
+    : "";
+
+  boneTooltip.innerHTML = `
+    <div class="tt-title">
+      <span>${boneName}</span>
+      <span class="kind-tag">${inferBoneKind(boneName)}</span>
+    </div>
+    <div class="tt-angles">rx ${deg[0]}° · ry ${deg[1]}° · rz ${deg[2]}°</div>
+    ${limText}
+    ${hitHtml}
+  `;
+  boneTooltip.classList.add("visible");
+  moveBoneTooltip(ev);
+}
+
+function moveBoneTooltip(ev) {
+  const pad = 14;
+  const x = Math.min(window.innerWidth - 310, ev.clientX + pad);
+  const y = Math.min(window.innerHeight - 110, ev.clientY + pad);
+  boneTooltip.style.left = `${x}px`;
+  boneTooltip.style.top = `${y}px`;
+}
+
+function hideBoneTooltip() {
+  boneTooltip.classList.remove("visible");
+}
+
+function setHighlightedBone(boneName, fromStage = false) {
+  if (highlightedBone === boneName) return;
+  highlightedBone = boneName;
+  renderAllPanelSvgs();
+
+  document.querySelectorAll(".boundary-item, .bone-row").forEach((el) => {
+    const match = el.dataset.bone === boneName && boneName !== null;
+    el.classList.toggle("active", match);
+    if (match && fromStage) {
+      el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  });
+}
+
+// Render Inspector Panes
+function renderInspectorPosePane(pose) {
+  const m = getPoseMetrics(pose);
+  const bCount = getPoseBoundaryCount(pose);
+  const maxUtil = Math.round((pose.max_utilization ?? pose.boundary?.max_utilization ?? 0) * 100);
+  const hardPairs = m.new_hard_intersection_pairs ?? 0;
+  const badEdgePct = ((m.bad_edge_ratio || 0) * 100).toFixed(2);
+  const flexBadPct = ((m.flex_bad_edge_ratio || 0) * 100).toFixed(2);
+  const ro = (pose.root_offset || [0, 0, 0]).map((v) => Number(v).toFixed(3));
+
+  const passBadge = document.getElementById("posePassBadge");
+  const isOk = hardPairs === 0 && (m.bad_edge_ratio || 0) <= 0.02;
+  passBadge.textContent = isOk ? "门禁通过 PASS" : "需关注 CHECK";
+  passBadge.style.color = isOk ? "var(--emerald)" : "var(--amber)";
+
+  document.getElementById("poseMetricsGrid").innerHTML = `
+    <div class="stat-card">
+      <div class="k">采样体制</div>
+      <div class="v">${REGIME_LABELS[pose.sampling_regime] || pose.sampling_regime}</div>
+      <div class="sub">${pose.sampling_regime}</div>
+    </div>
+    <div class="stat-card">
+      <div class="k">本帧边界触达</div>
+      <div class="v" style="color:var(--amber)">${bCount} 个自由度</div>
+      <div class="sub">峰值包络利用率 ${maxUtil}%</div>
+    </div>
+    <div class="stat-card">
+      <div class="k">新增硬部件穿插</div>
+      <div class="v" style="color:${hardPairs === 0 ? "var(--emerald)" : "var(--rose)"}">${hardPairs} 对</div>
+      <div class="sub">柔性接触 ${m.new_flexible_intersection_pairs ?? 0} 对</div>
+    </div>
+    <div class="stat-card">
+      <div class="k">网格拉伸坏边率</div>
+      <div class="v">${badEdgePct}%</div>
+      <div class="sub">柔性 ${flexBadPct}% · 阈值 ≤ 2.00%</div>
+    </div>
+    <div class="stat-card">
+      <div class="k">全局 ROOT 位移 (m)</div>
+      <div class="v">${ro[0]}, ${ro[1]}, ${ro[2]}</div>
+      <div class="sub">ΔX / ΔY / ΔZ 世界坐标偏移</div>
+    </div>
+    <div class="stat-card">
+      <div class="k">胸腔刚体拟合误差</div>
+      <div class="v">${Number(m.chest_rigid_fit_max_m || 0).toFixed(6)} m</div>
+      <div class="sub">最大边拉伸比 ${m.max_stretch_ratio ?? "-"}</div>
+    </div>
+  `;
+
+  const bList = pose.boundary_joints || [];
+  document.getElementById("boundaryCountLabel").textContent = String(bList.length);
+  const listEl = document.getElementById("boundaryList");
+  if (!bList.length) {
+    listEl.innerHTML = `<div class="summary-note">当前姿势为内部均匀过渡区样本，无关节压在 85%~100% 极值边界。</div>`;
+    return;
+  }
+
+  listEl.innerHTML = bList
+    .map((bj) => {
+      const ratio = bj.limit_deg
+        ? Math.min(100, Math.round((Math.abs(bj.deg) / Math.max(0.1, Math.abs(bj.limit_deg))) * 100))
+        : 90;
+      const boundText = bj.bound === "lo" ? "下界 lo" : "上界 hi";
+      return `
+        <div class="boundary-item" data-bone="${bj.bone}">
+          <div class="bi-top">
+            <span class="bi-bone">
+              <span class="kind-tag">${bj.kind || inferBoneKind(bj.bone)}</span>
+              ${bj.bone}.${bj.axis}
+            </span>
+            <span class="bi-val">${bj.deg}° / ${boundText} ${bj.limit_deg}° (${ratio}%)</span>
+          </div>
+          <div class="bi-bar-track">
+            <div class="bi-bar-fill" style="width:${ratio}%"></div>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+
+  listEl.querySelectorAll(".boundary-item").forEach((item) => {
+    const bName = item.dataset.bone;
+    item.addEventListener("pointerenter", () => setHighlightedBone(bName, false));
+    item.addEventListener("pointerleave", () => setHighlightedBone(null, false));
+    item.addEventListener("click", () => {
+      if (!showOverlay) {
+        showOverlay = true;
+        syncOverlayButtons();
+      }
+      setHighlightedBone(bName, false);
+    });
+  });
+}
+
+function renderInspectorBonesPane(pose) {
+  const tbody = document.getElementById("boneTableBody");
+  const jointsDeg = getPoseJointsDeg(pose);
+  const boundaryMap = {};
+  for (const bj of pose.boundary_joints || []) {
+    if (!boundaryMap[bj.bone]) boundaryMap[bj.bone] = {};
+    boundaryMap[bj.bone][bj.axis] = bj;
+  }
+
+  const q = boneSearchQuery.trim().toLowerCase();
+  const entries = Object.entries(jointsDeg).filter(([boneName, vals]) => {
+    const isBoundary = Boolean(boundaryMap[boneName]);
+    const isNonZero = vals.some((v) => Math.abs(v) >= 0.1);
+    if (boneFilter === "boundary" && !isBoundary) return false;
+    if (boneFilter === "active" && !isNonZero) return false;
+    if (q && !boneName.toLowerCase().includes(q) && !inferBoneKind(boneName).toLowerCase().includes(q)) {
+      return false;
+    }
+    return true;
+  });
+
+  tbody.innerHTML = entries
+    .map(([boneName, vals]) => {
+      const bAxes = boundaryMap[boneName] || {};
+      const isBoundary = Object.keys(bAxes).length > 0;
+      const lims = boneLimitsLookup[boneName];
+      const axes = ["rx", "ry", "rz"];
+      const cells = axes
+        .map((ax, i) => {
+          const hit = bAxes[ax];
+          const limHtml = lims && lims[i]
+            ? `<span class="axis-lim">[${lims[i][0]}, ${lims[i][1]}]</span>`
+            : "";
+          return `<td class="axis-cell${hit ? " hit" : ""}">${vals[i]}°${limHtml}</td>`;
+        })
+        .join("");
+      return `
+        <tr class="bone-row${isBoundary ? " is-boundary" : ""}" data-bone="${boneName}">
+          <td>
+            <span class="kind-tag">${inferBoneKind(boneName)}</span>
+            ${boneName}
+          </td>
+          ${cells}
+        </tr>
+      `;
+    })
+    .join("");
+
+  tbody.querySelectorAll(".bone-row").forEach((row) => {
+    const bName = row.dataset.bone;
+    row.addEventListener("pointerenter", () => setHighlightedBone(bName, false));
+    row.addEventListener("pointerleave", () => setHighlightedBone(null, false));
+  });
+}
+
+function renderInspectorBatchPane(pose) {
+  const monsterId = summaryData?.monster_id || summaryData?.joint_limits_summary?.monster_id || "monster_g2";
+  const candidateId = summaryData?.selected_candidate_id ?? summaryData?.joint_limits_summary?.selected_candidate_id ?? "0";
+  const seed = summaryData?.seed ?? summaryData?.render_receipt?.seed ?? 42;
+  const rejectedCount = summaryData?.render_receipt?.rejected_draws ??
+    (Array.isArray(summaryData?.rejection_redraw_log) ? summaryData.rejection_redraw_log.length : 0);
+  const cov = summaryData?.coverage_audit || {};
+  const activeDof = cov.active_dof_count ?? poses[0]?.boundary?.active_axes_count ?? 52;
+  const bothCovered = cov.both_bounds_covered_count ?? activeDof;
+  const covRate = cov.both_bounds_coverage_ratio !== undefined
+    ? `${Math.round(cov.both_bounds_coverage_ratio * 100)}%`
+    : "100%";
+  const engine = summaryData?.render_receipt?.backend?.engine || "CYCLES";
+  const backendDev = summaryData?.render_receipt?.backend?.backend || "GPU";
+
+  document.getElementById("batchSummaryGrid").innerHTML = `
+    <div class="stat-card">
+      <div class="k">怪物 ID / 候选骨架</div>
+      <div class="v" style="font-size:12px;word-break:break-all">${monsterId}</div>
+      <div class="sub">G1 选定 candidate_${candidateId} · Seed ${seed}</div>
+    </div>
+    <div class="stat-card">
+      <div class="k">双侧边界覆盖率</div>
+      <div class="v" style="color:var(--emerald)">${covRate} (${bothCovered}/${activeDof})</div>
+      <div class="sub">全部活动自由度触达正负 85%~100%</div>
+    </div>
+    <div class="stat-card">
+      <div class="k">正式样本 / 异常重抽</div>
+      <div class="v">${poses.length} 张 / 重抽 ${rejectedCount} 次</div>
+      <div class="sub">无挑图 · 真实随机抽样记录</div>
+    </div>
+    <div class="stat-card">
+      <div class="k">摄影棚渲染规格</div>
+      <div class="v">${compositeRes[0]}×${compositeRes[1]}</div>
+      <div class="sub">${engine} (${backendDev}) · ${viewOrder.join("/")}</div>
+    </div>
+  `;
+
+  const policyText = summaryData?.sampler_policy ||
+    "5 模态分层边界探索随机采样（25% 同相伸展、20% 反相折叠、20% 交叉扭转、20% 全身与根部运动、15% 内部均匀覆盖）＋ 通用三层几何/拓扑关节协调（同骨多轴椭球耦合、跨骨骼拓扑耦合、多球体 FK 体积防穿插）。";
+  document.getElementById("batchPolicyNote").innerHTML = `
+    <div><strong>采样与协调策略：</strong>${policyText}</div>
+    <div style="margin-top:6px"><strong>生成时间：</strong>${summaryData?.generated_at || "当前批次"} · <strong>审计状态：</strong>${summaryData?.user_decision || "awaiting_pose_review"}</div>
+  `;
+
+  document.getElementById("batchFileLinks").innerHTML = `
+    <a class="file-link" href="${pose.pose_id}.png" target="_blank" rel="noopener">当前三视图原图 (${pose.pose_id}.png)</a>
+    <a class="file-link" href="${pose.pose_id}_overlay.png" target="_blank" rel="noopener">当前烘焙标签图 (${pose.pose_id}_overlay.png)</a>
+    <a class="file-link" href="g2_50_overview.jpg" target="_blank" rel="noopener">50 张拼接总览图 (g2_50_overview.jpg)</a>
+    <a class="file-link" href="g2_pose_summary.json" target="_blank" rel="noopener">g2_pose_summary.json</a>
+    <a class="file-link" href="pose_records.json" target="_blank" rel="noopener">pose_records.json</a>
+    <a class="file-link" href="joint_limits.json" target="_blank" rel="noopener">joint_limits.json</a>
+    <a class="file-link" href="calibration.json" target="_blank" rel="noopener">calibration.json</a>
+  `;
+}
+
+function buildFilmstripAndProgress() {
+  filmstrip.innerHTML = "";
+  progressTrack.innerHTML = "";
+
+  poses.forEach((p, i) => {
+    const num = String(i + 1).padStart(2, "0");
+    const regName = REGIME_LABELS[p.sampling_regime] || p.sampling_regime;
+    const bCount = getPoseBoundaryCount(p);
+
+    // Progress segment
+    const seg = document.createElement("div");
+    seg.className = "prog-seg" + (i === idx ? " active" : "");
+    seg.dataset.regime = p.sampling_regime || "";
+    seg.title = `#${num} ${p.pose_id} · ${regName} · 边界关节 ${bCount} 个`;
+    seg.addEventListener("click", () => goToPose(i));
+    progressTrack.appendChild(seg);
+
+    // Filmstrip card
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "strip-item" + (i === idx ? " active" : "");
+    card.title = `#${num} ${p.pose_id} · ${regName}`;
+    const thumbView = viewOrder.includes("front") ? "front" : viewOrder[0];
+    card.innerHTML = `
+      <img loading="lazy" src="${p.pose_id}_${thumbView}.png" alt="${p.pose_id}" onerror="this.src='${p.pose_id}.png'" />
+      <div class="strip-meta">
+        <span>#${num}</span>
+        <span style="color:var(--amber)">${bCount}</span>
+      </div>
+    `;
+    card.addEventListener("click", () => goToPose(i));
+    filmstrip.appendChild(card);
+  });
+}
+
+function syncOverlayButtons() {
+  toggleOverlayBtn.classList.toggle("active", showOverlay);
+  const modeNames = {
+    hover: "悬停骨",
+    boundary: "边界骨",
+    all: "全部骨",
+    baked: "烘焙图",
+  };
+  labelModeText.textContent = modeNames[labelMode] || labelMode;
+  overlayLegend.style.display = showOverlay && labelMode !== "baked" ? "inline-flex" : "none";
+}
+
+function renderCurrentPose() {
+  const pose = poses[idx];
+  if (!pose) return;
+  const num = String(idx + 1).padStart(2, "0");
+  const total = String(poses.length).padStart(2, "0");
+  const regName = REGIME_LABELS[pose.sampling_regime] || pose.sampling_regime;
+  const bCount = getPoseBoundaryCount(pose);
+  const maxUtil = Math.round((pose.max_utilization ?? pose.boundary?.max_utilization ?? 0) * 100);
+  const hardPairs = getPoseMetrics(pose).new_hard_intersection_pairs ?? 0;
+
+  document.getElementById("poseIndex").textContent = `${num} / ${total}`;
+  document.getElementById("footerCount").textContent = `${num} / ${total}`;
+  document.getElementById("poseTitle").textContent = pose.pose_id;
+  document.getElementById("poseRegime").textContent = regName;
+
+  document.getElementById("quickMetrics").innerHTML = `
+    <span class="metric-pill">边界关节 <strong>${bCount}</strong></span>
+    <span class="metric-pill">包络峰值 <strong>${maxUtil}%</strong></span>
+    <span class="metric-pill ${hardPairs === 0 ? "ok" : "warn"}">硬穿插 <strong>${hardPairs}</strong></span>
+  `;
+
+  // Update stage viewport images
+  stageGrid.querySelectorAll(".viewport").forEach((vp) => {
+    const panelView = vp.dataset.panelView;
+    const img = vp.querySelector(".pose-img");
+    const wantSrc = getImageSrcForPanel(pose, panelView);
+    if (!img.getAttribute("src") || img.getAttribute("src") !== wantSrc) {
+      img.setAttribute("src", wantSrc);
+    } else {
+      updatePanelLayout(vp);
+      renderPanelSvg(vp);
+    }
+  });
+
+  // Update inspector
+  renderInspectorPosePane(pose);
+  renderInspectorBonesPane(pose);
+  renderInspectorBatchPane(pose);
+
+  // Sync progress & filmstrip active state
+  [...progressTrack.children].forEach((el, i) => el.classList.toggle("active", i === idx));
+  [...filmstrip.children].forEach((el, i) => {
+    const active = i === idx;
+    el.classList.toggle("active", active);
+    if (active && stripOpen) {
+      el.scrollIntoView({ block: "nearest", inline: "center", behavior: "smooth" });
+    }
+  });
+
+  // Preload adjacent pose images
+  const nextPose = poses[(idx + 1) % poses.length];
+  if (nextPose) {
+    const pre = new Image();
+    const preloadView = currentView === "split" ? viewOrder[0] : currentView;
+    pre.src = getImageSrcForPanel(nextPose, preloadView);
+  }
+}
+
+function goToPose(newIdx) {
+  idx = (newIdx + poses.length) % poses.length;
+  highlightedBone = null;
+  hideBoneTooltip();
+  renderCurrentPose();
+}
+
+function setView(newView) {
+  if (currentView === newView) return;
+  currentView = newView;
+  viewGroup.querySelectorAll(".btn").forEach((b) => {
+    b.classList.toggle("active", b.dataset.view === currentView);
+  });
+  userZoom = 1.0;
+  userPanX = 0;
+  userPanY = 0;
+  buildStageViewports();
+  renderCurrentPose();
+}
+
+// Overview Modal
+function initOverviewControls() {
+  const regGroup = document.getElementById("ovRegimeFilter");
+  const regimes = ["all", ...new Set(poses.map((p) => p.sampling_regime).filter(Boolean))];
+  regGroup.innerHTML = regimes
+    .map((r) => {
+      const count = r === "all" ? poses.length : poses.filter((p) => p.sampling_regime === r).length;
+      const label = r === "all" ? `全部 (${count})` : `${REGIME_LABELS[r] || r} (${count})`;
+      return `<button type="button" class="btn${r === ovRegime ? " active" : ""}" data-ov-regime="${r}">${label}</button>`;
+    })
+    .join("");
+  regGroup.querySelectorAll(".btn").forEach((b) => {
+    b.addEventListener("click", () => {
+      ovRegime = b.dataset.ovRegime;
+      regGroup.querySelectorAll(".btn").forEach((x) => x.classList.toggle("active", x === b));
+      renderOverviewGrid();
+    });
+  });
+
+  const viewSwitch = document.getElementById("ovViewSwitch");
+  const thumbViews = [...viewOrder, "overlay"];
+  viewSwitch.innerHTML = thumbViews
+    .map((v) => {
+      const label = v === "overlay" ? "烘焙骨骼图" : `${VIEW_LABELS[v] || v}`;
+      return `<button type="button" class="btn${v === ovThumbView ? " active" : ""}" data-ov-view="${v}">${label}</button>`;
+    })
+    .join("");
+  viewSwitch.querySelectorAll(".btn").forEach((b) => {
+    b.addEventListener("click", () => {
+      ovThumbView = b.dataset.ovView;
+      viewSwitch.querySelectorAll(".btn").forEach((x) => x.classList.toggle("active", x === b));
+      renderOverviewGrid();
+    });
+  });
+}
+
+function renderOverviewGrid() {
+  const grid = document.getElementById("overviewGrid");
+  const filtered = poses
+    .map((p, i) => ({ pose: p, index: i }))
+    .filter(({ pose }) => ovRegime === "all" || pose.sampling_regime === ovRegime);
+
+  document.getElementById("overviewCountPill").textContent = `显示 ${filtered.length} / ${poses.length}`;
+  const defaultV = viewOrder.includes("front") ? "front" : viewOrder[0];
+
+  grid.innerHTML = filtered
+    .map(({ pose, index }) => {
+      const num = String(index + 1).padStart(2, "0");
+      const bCount = getPoseBoundaryCount(pose);
+      const regName = REGIME_LABELS[pose.sampling_regime] || pose.sampling_regime;
+      const imgSrc = ovThumbView === "overlay"
+        ? `${pose.pose_id}_overlay_${defaultV}.png`
+        : `${pose.pose_id}_${ovThumbView}.png`;
+      return `
+        <button type="button" class="ov-card${index === idx ? " active" : ""}" data-pose-idx="${index}">
+          <div class="ov-img-wrap">
+            <img loading="lazy" src="${imgSrc}" alt="${pose.pose_id}" onerror="this.src='${pose.pose_id}.png'" />
+            <span class="ov-badge">${bCount} 边界</span>
+          </div>
+          <div class="ov-foot">
+            <strong>#${num}</strong>
+            <span>${regName}</span>
+          </div>
+        </button>
+      `;
+    })
+    .join("");
+
+  grid.querySelectorAll(".ov-card").forEach((card) => {
+    card.addEventListener("click", () => {
+      const targetIdx = Number(card.dataset.poseIdx);
+      overviewDialog.close();
+      goToPose(targetIdx);
+    });
+  });
+}
+
+// Event bindings
+document.getElementById("prevBtn").addEventListener("click", () => goToPose(idx - 1));
+document.getElementById("nextBtn").addEventListener("click", () => goToPose(idx + 1));
+document.getElementById("fitView").addEventListener("click", () => resetTransform());
+
+toggleOverlayBtn.addEventListener("click", () => {
+  showOverlay = !showOverlay;
+  syncOverlayButtons();
+  renderCurrentPose();
+});
+
+cycleLabelModeBtn.addEventListener("click", () => {
+  const order = ["hover", "boundary", "all", "baked"];
+  labelMode = order[(order.indexOf(labelMode) + 1) % order.length];
+  if (!showOverlay) showOverlay = true;
+  syncOverlayButtons();
+  renderCurrentPose();
+});
+
+toggleInspectorBtn.addEventListener("click", () => {
+  inspectorOpen = !inspectorOpen;
+  inspectorDrawer.classList.toggle("collapsed", !inspectorOpen);
+  toggleInspectorBtn.classList.toggle("active", inspectorOpen);
+  requestAnimationFrame(() => updateAllPanelsLayout());
+});
+
+toggleStripBtn.addEventListener("click", () => {
+  stripOpen = !stripOpen;
+  filmstrip.classList.toggle("collapsed", !stripOpen);
+  toggleStripBtn.classList.toggle("active", stripOpen);
+  requestAnimationFrame(() => updateAllPanelsLayout());
+});
+
+document.querySelectorAll(".insp-tab").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    activeTab = tab.dataset.tab;
+    document.querySelectorAll(".insp-tab").forEach((t) => t.classList.toggle("active", t === tab));
+    document.querySelectorAll(".insp-pane").forEach((p) => p.classList.toggle("active", p.id === `pane-${activeTab}`));
+  });
+});
+
+document.querySelectorAll("[data-bone-filter]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    boneFilter = btn.dataset.boneFilter;
+    document.querySelectorAll("[data-bone-filter]").forEach((b) => b.classList.toggle("active", b === btn));
+    renderInspectorBonesPane(poses[idx]);
+  });
+});
+
+document.getElementById("boneSearch").addEventListener("input", (e) => {
+  boneSearchQuery = e.target.value || "";
+  renderInspectorBonesPane(poses[idx]);
+});
+
+document.getElementById("openOverview").addEventListener("click", () => {
+  renderOverviewGrid();
+  overviewDialog.showModal();
+});
+document.getElementById("closeOverview").addEventListener("click", () => overviewDialog.close());
+overviewDialog.addEventListener("click", (e) => {
+  if (e.target === overviewDialog) overviewDialog.close();
+});
+
+window.addEventListener("resize", () => updateAllPanelsLayout());
+
+window.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+  if (overviewDialog.open) return;
+
+  if (e.key === "ArrowRight" || e.key === " ") {
+    e.preventDefault();
+    goToPose(idx + 1);
+  } else if (e.key === "ArrowLeft") {
+    e.preventDefault();
+    goToPose(idx - 1);
+  } else if (e.key === "b" || e.key === "B") {
+    toggleOverlayBtn.click();
+  } else if (e.key === "l" || e.key === "L") {
+    cycleLabelModeBtn.click();
+  } else if (e.key === "i" || e.key === "I") {
+    toggleInspectorBtn.click();
+  } else if (e.key === "f" || e.key === "F") {
+    toggleStripBtn.click();
+  } else if (e.key === "g" || e.key === "G") {
+    document.getElementById("openOverview").click();
+  } else if (e.key === "0") {
+    resetTransform();
+  } else if (e.key === "1") {
+    if (viewOrder.includes("front")) setView("front");
+  } else if (e.key === "2") {
+    if (viewOrder.includes("left")) setView("left");
+    else if (viewOrder.includes("side")) setView("side");
+  } else if (e.key === "3") {
+    if (viewOrder.includes("right")) setView("right");
+  } else if (e.key === "4") {
+    setView("split");
+  } else if (e.key === "5") {
+    setView("all");
+  }
+});
+
+// Initialize
+initToolbarViews();
+buildStageViewports();
+buildFilmstripAndProgress();
+initOverviewControls();
+syncOverlayButtons();
+toggleStripBtn.classList.toggle("active", stripOpen);
+renderCurrentPose();
+</script>
+</body>
+</html>

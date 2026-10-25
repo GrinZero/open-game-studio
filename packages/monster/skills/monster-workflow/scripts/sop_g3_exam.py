@@ -36,6 +36,7 @@ from sop_gate import (  # noqa: E402
     MONSTER_ROOT,
     WORKER_DIR,
     assert_gate,
+    resolve_g1_candidate_files,
     derive_invalidations,
     load_ledger,
     mark_awaiting_review,
@@ -87,11 +88,8 @@ def sync_u2_to_drive(
     dirs = resolve_scratch_dirs(proj, monster_id)
     work_dir = dirs["work_dir"]
 
-    src_blend = work_dir / "g1_candidates" / f"candidate_{selected_cid}_full.blend"
-    src_meta = work_dir / "g1_candidates" / f"candidate_{selected_cid}_rig_meta.json"
+    selected_cid, src_meta, src_blend = resolve_g1_candidate_files(work_dir, g1_info)
     src_limits = work_dir / "joint_limits.json"
-    if not src_blend.is_file() or not src_meta.is_file():
-        raise FileNotFoundError(f"G1 选定候选完整绑定文件缺失: {src_blend} 或 {src_meta}")
 
     m_drive = drv / "monsters" / monster_id
     m_drive.mkdir(parents=True, exist_ok=True)

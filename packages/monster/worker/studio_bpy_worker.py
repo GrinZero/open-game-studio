@@ -1128,6 +1128,26 @@ def _resolve_joint_limits_profile(
     return None, None
 
 
+def extract_complete_rig_skinning(mesh_objs: list[Any], arm_obj: Any, bone_names: list[str]) -> dict[str, Any]:
+    """Measure every bound part, including separate rigid shells and soles."""
+    parts = [o for o in mesh_objs if any(
+        getattr(m, "type", None) == "ARMATURE" and getattr(m, "object", None) == arm_obj
+        for m in getattr(o, "modifiers", [])
+    )]
+    if not parts:
+        raise ValueError("Joint-limit probing requires actual meshes bound to the selected armature")
+    extracted = [extract_rig_lbs_skinning_and_verify_gate(o, arm_obj, bone_names) for o in parts]
+    merged = dict(extracted[0])
+    merged["triangles"] = np.concatenate([
+        part["triangles"] + sum(len(p["rest_verts"]) for p in extracted[:i])
+        for i, part in enumerate(extracted)
+    ], axis=0)
+    for key in ("rest_verts", "skin_indices", "skin_weights"):
+        merged[key] = np.concatenate([part[key] for part in extracted], axis=0)
+    merged["measured_mesh_names"] = [o.name for o in parts]
+    return merged
+
+
 def sop_probe_joint_limits(
     blend_path: str,
     meta_path: str,
@@ -1150,12 +1170,7 @@ def sop_probe_joint_limits(
 
     rig_skinning: dict[str, Any] | None = None
     if arm_obj is not None and mesh_obj is not None and isinstance(meta.get("bones"), dict):
-        try:
-            rig_skinning = extract_rig_lbs_skinning_and_verify_gate(
-                mesh_obj, arm_obj, sorted(meta["bones"])
-            )
-        except Exception:
-            rig_skinning = None
+        rig_skinning = extract_complete_rig_skinning(mesh_objs, arm_obj, sorted(meta["bones"]))
 
     profile = probe_rig_joint_limits(
         meta.get("bones", {}),

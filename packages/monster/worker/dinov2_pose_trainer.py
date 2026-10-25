@@ -1642,6 +1642,7 @@ def main() -> None:
     parser.add_argument("--exam_dir", help="Stage 4 exam sequence directory")
     parser.add_argument("--video_frames_dir", help="Directory of extracted video frames for Stage 5/6")
     parser.add_argument("--out_json", help="Output JSON report or 3D trajectory file")
+    parser.add_argument("--contact_events", help="Reviewed action-scoped contact event JSON; bound to the exact input trajectory")
     parser.add_argument("--epochs", type=int, default=15)
     parser.add_argument("--progress_file", help="Path to write training progress JSON")
     args = parser.parse_args()
@@ -1653,6 +1654,11 @@ def main() -> None:
     elif args.mode == "triangulate_video":
         frames = sorted(Path(args.video_frames_dir).glob("*.jpg")) + sorted(Path(args.video_frames_dir).glob("*.png"))
         res = infer_dual_view_frames(args.ckpt_path, frames)
+        if args.contact_events:
+            from motion_contact import refine_trajectory
+            with open(args.contact_events, encoding="utf-8") as stream:
+                contact_config = json.load(stream)
+            res = refine_trajectory(res, res["bones_meta"], res["joint_limits_profile"], contact_config)
         with open(args.out_json, "w", encoding="utf-8") as f:
             json.dump(res, f, indent=2, ensure_ascii=False)
         print(

@@ -47,6 +47,8 @@ from sop_preflight import (  # noqa: E402
     _worker_command,
     resolve_scratch_dirs,
 )
+from sop_formal_gate import verify_trajectory_formal_gate  # noqa: E402
+from surface_contact import assert_surface_contact_quality  # noqa: E402
 
 
 def parse_action_specs(actions_input: str | list[str]) -> list[dict[str, Any]]:
@@ -114,6 +116,8 @@ def verify_animated_glb_and_loop_seam(
     traj_json_path: Path | None,
     *,
     is_loop: bool = True,
+    rig_bones: dict[str, Any] | None = None,
+    joint_limits_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Verifies a delivered `<action>_animated.glb` and its trajectory JSON."""
     if not glb_path.is_file():
@@ -143,6 +147,7 @@ def verify_animated_glb_and_loop_seam(
     epipolar_px = 0.0
     vert_corr = 1.0
     frames: list[dict[str, Any]] = []
+    formal_gate_passed = True
 
     if traj_json_path and traj_json_path.is_file():
         traj_data = json.loads(traj_json_path.read_text(encoding="utf-8"))
@@ -155,6 +160,17 @@ def verify_animated_glb_and_loop_seam(
                 f"[SOP §6.2 硬拦截] 动作 {glb_path.name} 未通过跨视图竖直极线同步检查 "
                 f"(epipolar_diff={epipolar_px}px, corr={vert_corr})，严禁输出或交付不合格 GLB！"
             )
+        assert_surface_contact_quality(traj_data, action=glb_path.stem)
+        if isinstance(rig_bones, dict) and rig_bones and frames:
+            fg_rep = verify_trajectory_formal_gate(
+                frames,
+                rig_bones,
+                joint_limits_profile,
+                trajectory_meta=traj_data,
+                action=glb_path.stem,
+                assert_passed=True,
+            )
+            formal_gate_passed = bool(fg_rep.get("passed", True))
 
     seam_metrics = compute_loop_seam_metrics(frames) if is_loop else {
         "loop_seam_max_pos_jump": None,
@@ -194,7 +210,8 @@ def verify_animated_glb_and_loop_seam(
         "is_loop": is_loop,
         "loop_seam": seam_metrics,
         "blender_roundtrip_verified": bpy_verified,
-        "valid": gate_passed and bool(seam_metrics["seam_ok"]),
+        "formal_gate_passed": formal_gate_passed,
+        "valid": gate_passed and formal_gate_passed and bool(seam_metrics["seam_ok"]),
     }
 
 

@@ -16,7 +16,7 @@ SOURCE_DIRS = {
     "contracts": {".json"},
     "scripts": {".py", ".sh", ".mjs"},
     "notebooks": {".ipynb"},
-    "skills": {".md", ".yaml", ".txt", ".py"},
+    "skills": {".md", ".yaml", ".txt", ".py", ".html"},
     "licenses": {".txt"},
 }
 

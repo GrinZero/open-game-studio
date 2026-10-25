@@ -1,1 +1,1 @@
-export const studioBuild = "codex-live-collaboration-2026-10-21";
+export const studioBuild = "codex-deep-links-2026-10-25";

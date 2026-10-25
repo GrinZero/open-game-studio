@@ -506,6 +506,14 @@ def apply_floor_and_foot_contact_constraints(
             "contact_bones": [],
         }
 
+    surface_config = classified_bones[root].get("surface_contact")
+    if isinstance(surface_config, dict) and surface_config.get("enabled", False):
+        from surface_contact import apply_surface_floor_constraints
+        return apply_surface_floor_constraints(
+            frames_out, order, root, classified_bones, rest_H, rest_T, rest_R,
+            effective_base_limits, surface_config,
+        )
+
     all_rest_z = [float(rest_H[b][2]) for b in order] + [float(rest_T[b][2]) for b in order]
     z_floor = min(all_rest_z)
     z_top = max(all_rest_z)
@@ -534,7 +542,7 @@ def apply_floor_and_foot_contact_constraints(
             vel[0] = vel[1] if T > 1 else 0.0
 
             near_floor = (tails_seq[:, 2] >= z_floor - 0.03 * rig_h) & (tails_seq[:, 2] <= z_floor + 0.045 * rig_h)
-            low_speed = (vel > 1e-6) & (vel <= 0.012 * rig_h)
+            low_speed = vel <= 0.012 * rig_h
             # Only lock when there is actual micro-skating near the ground and no macro collapse
             contact_mask = near_floor & low_speed & (frame_macro_collapse <= 0.15)
             intervals = _detect_contact_intervals(contact_mask, min_len=3)

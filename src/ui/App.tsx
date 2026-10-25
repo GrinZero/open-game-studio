@@ -1,4 +1,9 @@
 import {
+  resolveWorkbenchTarget,
+  type WorkbenchTarget,
+  type WorkbenchView,
+} from "../shared/workbench-target";
+import {
   ResourceMenu,
   DocumentEditor,
   ResourceLibrary,
@@ -20,8 +25,8 @@ import { VersionBadge } from "./VersionBadge";
 import { CharacterWorkflowPage } from "./CharacterWorkflowPage";
 import {
   launchProject,
+  launchRequest,
   subscribeLaunch,
-  characterLaunch,
 } from "./workbench-launch";
 import { ProjectLiveSync } from "./ProjectLiveSync";
 import {
@@ -46,6 +51,8 @@ import {
   type Node,
   type Edge,
   type ReactFlowInstance,
+  useNodesInitialized,
+  useReactFlow,
 } from "@xyflow/react";
 import {
   Boxes,
@@ -232,8 +239,10 @@ function IconButton({
 
 // Follow the available iframe width, while allowing a manual override until
 // the layout crosses the breakpoint again. No storage is needed in the sandbox.
-function useResponsivePanel(query: string) {
-  const [open, setOpen] = useState(() => !window.matchMedia(query).matches);
+function useResponsivePanel(query: string, initialOpen?: boolean) {
+  const [open, setOpen] = useState(
+    () => initialOpen ?? !window.matchMedia(query).matches,
+  );
   useEffect(() => {
     const media = window.matchMedia(query);
     const update = () => setOpen(!media.matches);
@@ -294,6 +303,12 @@ export function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [snapshot, setSnapshot] = useState<ProjectSnapshot>();
   const [projectId, setProjectId] = useState<string | undefined>(launchProject);
+  const [launchEpoch, setLaunchEpoch] = useState(0);
+  const [loadedLaunch, setLoadedLaunch] = useState<{
+    target: WorkbenchTarget;
+    epoch: number;
+  }>();
+  const activeLaunch = useRef(0);
   const activeProject = useRef(projectId);
   activeProject.current = projectId;
   const [homeNavigation, setHomeNavigation] = useResponsivePanel(
@@ -310,7 +325,15 @@ export function App() {
   const [query, setQuery] = useState("");
   const [archived, setArchived] = useState(false);
 
-  useEffect(() => subscribeLaunch(() => setProjectId(launchProject())), []);
+  useEffect(
+    () =>
+      subscribeLaunch(() => {
+        setProjectId(launchProject());
+        activeLaunch.current += 1;
+        setLaunchEpoch(activeLaunch.current);
+      }),
+    [],
+  );
   useEffect(() => {
     if (
       !homeNavigation ||
@@ -350,8 +373,10 @@ export function App() {
 
   const refresh = useCallback(async () => {
     if (projectId) {
+      const epoch = activeLaunch.current;
       const next = await request<ProjectSnapshot>(`/api/projects/${projectId}`);
-      if (activeProject.current === projectId) setSnapshot(next);
+      if (activeProject.current === projectId && epoch === activeLaunch.current)
+        setSnapshot(next);
     }
     await refreshProjects();
   }, [projectId, refreshProjects]);
@@ -371,14 +396,26 @@ export function App() {
     setLoading(true);
     request<ProjectSnapshot>(`/api/projects/${projectId}`)
       .then((s) => {
-        if (!disposed) setSnapshot(s);
+        if (disposed) return;
+        const intent = launchRequest();
+        const target = resolveWorkbenchTarget(
+          s,
+          intent.projectId === projectId ? intent : { projectId },
+        );
+        setLoadedLaunch({ target, epoch: launchEpoch });
+        setSnapshot(s);
+        setError("");
       })
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
+      .catch((e) => {
+        if (!disposed) setError(e.message);
+      })
+      .finally(() => {
+        if (!disposed) setLoading(false);
+      });
     return () => {
       disposed = true;
     };
-  }, [projectId]);
+  }, [projectId, launchEpoch]);
 
   async function perform(task: () => Promise<unknown>) {
     try {
@@ -405,9 +442,13 @@ export function App() {
       className={`app-shell${homeNavigation ? "" : " home-navigation-collapsed"}`}
     >
       <CodexReferenceBar />
-      {snapshot && projectId ? (
+      {snapshot &&
+      projectId &&
+      snapshot.project.id === projectId &&
+      loadedLaunch ? (
         <Workspace
-          key={projectId}
+          key={`${projectId}:${loadedLaunch.epoch}`}
+          launch={loadedLaunch.target}
           snapshot={snapshot}
           refresh={refresh}
           onBack={() => {
@@ -925,15 +966,10 @@ function ProjectModal({
   );
 }
 
-type View =
-  | "overview"
-  | "assets"
-  | "canvas"
-  | "character"
-  | "runs"
-  | "settings";
+type View = WorkbenchView;
 
 function Workspace({
+  launch,
   snapshot: s,
   refresh,
   onBack,
@@ -942,6 +978,7 @@ function Workspace({
   resolvedTheme,
   toggleTheme,
 }: {
+  launch: WorkbenchTarget;
   snapshot: ProjectSnapshot;
   refresh: () => Promise<void>;
   onBack: () => void;
@@ -950,22 +987,37 @@ function Workspace({
   resolvedTheme: "dark" | "light";
   toggleTheme: () => void;
 }) {
-  const launchTarget = characterLaunch(s.project.id);
-  const [view, setView] = useState<View>(launchTarget ? "character" : "canvas");
+  const [view, setView] = useState<View>(launch.view || "canvas");
   const [canvasId, setCanvasId] = useState(
-    s.canvases.find((c) => !c.archived)?.id || "",
+    launch.canvasId || s.canvases.find((c) => !c.archived)?.id || "",
   );
-  const [selected, setSelected] = useState<string[]>([]);
+  const [selected, setSelected] = useState<string[]>(
+    launch.nodeId ? [launch.nodeId] : [],
+  );
   const activeCanvasId = useRef(canvasId);
   activeCanvasId.current = canvasId;
-  const [assetId, setAssetId] = useState<string>();
-  const [runId, setRunId] = useState<string | undefined>(launchTarget?.runId);
+  const [assetId, setAssetId] = useState<string | undefined>(launch.assetId);
+  const [runId, setRunId] = useState<string | undefined>(launch.runId);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [sidebar, setSidebar] = useResponsivePanel("(max-width: 1100px)");
-  const [assetDock, setAssetDock] = useResponsivePanel("(max-width: 800px)");
-  const [inspector, setInspector] = useResponsivePanel("(max-width: 1200px)");
+  const launchInspector = Boolean(
+    launch.assetId ||
+      (launch.nodeId && !window.matchMedia("(max-width: 1200px)").matches) ||
+      launch.stepKey ||
+      (launch.runId && launch.view === "canvas"),
+  );
+  const [assetDock, setAssetDock] = useResponsivePanel(
+    "(max-width: 800px)",
+    launchInspector && window.matchMedia("(max-width: 800px)").matches
+      ? false
+      : undefined,
+  );
+  const [inspector, setInspector] = useResponsivePanel(
+    "(max-width: 1200px)",
+    launchInspector ? true : undefined,
+  );
   const [modal, setModal] = useState<"canvas" | "note" | "template" | null>(
     null,
   );
@@ -976,7 +1028,9 @@ function Workspace({
     node?: StudioNode;
     inputs: string[];
   }>();
-  const [taskDetailsId, setTaskDetailsId] = useState<string>();
+  const [taskDetailsId, setTaskDetailsId] = useState<string | undefined>(
+    launch.taskId,
+  );
   const [renameNote, setRenameNote] = useState<StudioNode>();
   const [noteAction, setNoteAction] = useState<{
     position?: { x: number; y: number };
@@ -1759,6 +1813,7 @@ function Workspace({
                 canvas={c}
                 snapshot={s}
                 selected={selected}
+                focusNodeId={launch.nodeId}
                 onSelect={chooseNodes}
                 patch={patch}
                 saving={saving || busy}
@@ -1795,7 +1850,13 @@ function Workspace({
                   key={previewRequest}
                   snapshot={s}
                   asset={selectedAsset}
-                  fixedRevisionId={selectedNode?.data.revisionId}
+                  fixedRevisionId={
+                    selectedNode?.data.revisionId ||
+                    (assetId === launch.assetId ? launch.revisionId : undefined)
+                  }
+                  launchStepKey={
+                    run?.id === launch.runId ? launch.stepKey : undefined
+                  }
                   run={run}
                   node={selectedNode}
                   addAsset={addAsset}
@@ -1831,6 +1892,7 @@ function Workspace({
         {view === "character" && (
           <CharacterWorkflowPage
             s={s}
+            launchNodeKey={runId === launch.runId ? launch.nodeKey : undefined}
             activeRunId={runId}
             onSelectRun={(id) => setRunId(id)}
             refresh={refresh}
@@ -3269,10 +3331,36 @@ const layoutSnapshot = (canvas: Canvas) =>
     height,
   }));
 
+function CanvasLaunchFocus({
+  nodeId,
+  focusing,
+}: {
+  nodeId?: string;
+  focusing: { current: boolean };
+}) {
+  const initialized = useNodesInitialized();
+  const flow = useReactFlow();
+  const focused = useRef(false);
+  useEffect(() => {
+    if (!nodeId || !initialized || focused.current) return;
+    focused.current = true;
+    focusing.current = true;
+    void flow.fitView({
+      nodes: [{ id: nodeId }],
+      padding: 0.4,
+      minZoom: 0.2,
+      maxZoom: 1,
+      duration: 0,
+    });
+  }, [nodeId, initialized, flow, focusing]);
+  return null;
+}
+
 function CanvasBoard({
   canvas: c,
   snapshot: s,
   selected,
+  focusNodeId,
   onSelect,
   patch,
   saving,
@@ -3293,6 +3381,7 @@ function CanvasBoard({
   canvas: Canvas;
   snapshot: ProjectSnapshot;
   selected: string[];
+  focusNodeId?: string;
   onSelect: (ids: string[]) => void;
   patch: (target: "graph" | "layout", ops: unknown[]) => Promise<any>;
   saving: boolean;
@@ -3369,6 +3458,7 @@ function CanvasBoard({
   const before = useRef<ReturnType<typeof layoutSnapshot>>([]);
   const flow = useRef<ReactFlowInstance<Node, Edge> | null>(null);
   const dragging = useRef(false);
+  const launchFocusing = useRef(false);
   const [zoom, setZoom] = useState(c.viewport.zoom);
   const [canvasTool, setCanvasTool] = useState<"select" | "pan">("select");
   const panning = canvasTool === "pan";
@@ -4081,7 +4171,11 @@ function CanvasBoard({
           }
         }}
         onMove={(_e, v) => setZoom(v.zoom)}
-        onMoveEnd={(_e, v) => {
+        onMoveEnd={(event, v) => {
+          if (launchFocusing.current) {
+            launchFocusing.current = false;
+            if (!event) return;
+          }
           if (
             Math.abs(v.x - c.viewport.x) > 1 ||
             Math.abs(v.y - c.viewport.y) > 1 ||
@@ -4105,6 +4199,7 @@ function CanvasBoard({
         }
         colorMode={resolvedTheme === "light" ? "light" : "dark"}
       >
+        <CanvasLaunchFocus nodeId={focusNodeId} focusing={launchFocusing} />
         <Background
           color={resolvedTheme === "dark" ? "#27272a" : "#e4e4e7"}
           gap={20}
@@ -4336,6 +4431,7 @@ function Inspector({
   node,
   run,
   fixedRevisionId,
+  launchStepKey,
   addAsset,
   mutate,
   patch,
@@ -4353,6 +4449,7 @@ function Inspector({
   node?: StudioNode;
   run?: WorkflowRun;
   fixedRevisionId?: string;
+  launchStepKey?: string;
   addAsset: (
     a: Asset,
     r?: AssetRevision,
@@ -4370,7 +4467,9 @@ function Inspector({
   onOpenCharacterWorkflow?: (runId?: string) => void;
 }) {
   const [tab, setTab] = useState("preview");
-  const [previewRevisionId, setPreviewRevisionId] = useState("");
+  const [previewRevisionId, setPreviewRevisionId] = useState(
+    fixedRevisionId || asset?.revisions[0]?.id || "",
+  );
   const [note, setNote] = useState(node?.data.text || "");
   const [noteTitle, setNoteTitle] = useState(node?.data.title || "制作便签");
 
@@ -4406,6 +4505,7 @@ function Inspector({
         <WorkflowInspector
           snapshot={s}
           run={run}
+          launchStepKey={launchStepKey}
           instanceId={node?.data.instanceId}
           canvas={canvas}
           mutate={mutate}
@@ -4957,6 +5057,7 @@ function InputSummary({
 
 function WorkflowInspector({
   snapshot: s,
+  launchStepKey,
   run,
   instanceId,
   canvas,
@@ -4965,6 +5066,7 @@ function WorkflowInspector({
   onOpenCharacterWorkflow,
 }: {
   snapshot: ProjectSnapshot;
+  launchStepKey?: string;
   run?: WorkflowRun;
   instanceId?: string;
   canvas: Canvas;
@@ -4975,7 +5077,9 @@ function WorkflowInspector({
   const [chosen, setChosen] = useState<string[]>([]);
   const [comment, setComment] = useState("");
   const [busy, setBusy] = useState(false);
-  const [expanded, setExpanded] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(
+    launchStepKey || null,
+  );
   const [previewId, setPreviewId] = useState<string>();
   const [rerunStep, setRerunStep] = useState("");
   const [rerunInput, setRerunInput] = useState("");
@@ -4992,6 +5096,10 @@ function WorkflowInspector({
     setActionError("");
   }, [instanceId, canvas.id]);
 
+  const launchStepRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    launchStepRef.current?.scrollIntoView({ block: "center" });
+  }, [launchStepKey]);
   const step = run?.steps.find((st) => st.status.startsWith("awaiting"));
 
   useEffect(() => {
@@ -5136,6 +5244,8 @@ function WorkflowInspector({
             {run.steps.map((st, i) => (
               <div
                 key={st.key}
+                ref={st.key === launchStepKey ? launchStepRef : undefined}
+                data-workflow-step={st.key}
                 className={
                   st.status === "succeeded" && !st.stale
                     ? "complete"
@@ -5146,6 +5256,7 @@ function WorkflowInspector({
               >
                 <button
                   className="timeline-step"
+                  aria-expanded={expanded === st.key}
                   onClick={() =>
                     setExpanded(expanded === st.key ? null : st.key)
                   }

@@ -10,3 +10,6 @@ Pillow
 numpy
 imageio-ffmpeg
 websocket-client
+
+# Optional reviewed action-contact optimization (CPU sparse least squares).
+scipy>=1.11,<2

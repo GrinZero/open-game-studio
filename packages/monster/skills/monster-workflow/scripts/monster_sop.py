@@ -12,6 +12,7 @@ needs to write ad-hoc Python/Blender/FFmpeg/JSON glue code:
   6. `g3-exam`      -> `sop_g3_exam.py`      (Stage 4 U2 incremental sync, existing-video exam, 3-boundary report, GLB comparison, G3 HTML)
   7. `deliver`      -> `sop_delivery.py`     (Stage 5 sync hard-stop check, current-batch manifest, local GLB + loop seam check, delivery HTML)
   8. `colab-guard`  -> `sop_colab_guard.py`  (Stage 6 cross-session lease registry & stage-gated safe GPU shutdown)
+  9. `formal-gate`  -> `sop_formal_gate.py`  (Formal verification hard gate: P1 SO(3)/limit/FK soundness, P2 Oracle completeness, P3 collapse invariance, P4 surface contact)
 """
 
 from __future__ import annotations
@@ -38,10 +39,11 @@ def _ensure_venv_site_packages() -> None:
         Path.home() / ".local/share/codex-integrations/game-studio-local/runtime/packages/monster",
         Path("/Users/bugyaluwang/project/codex-game-studio/packages/monster"),
     ]
+    py_ver = f"python{sys.version_info.major}.{sys.version_info.minor}"
     for root in candidate_roots:
         venv_lib = root / ".venv" / "lib"
         if venv_lib.is_dir():
-            for sp in sorted(venv_lib.glob("python*/site-packages")):
+            for sp in sorted(venv_lib.glob(f"{py_ver}/site-packages")):
                 if sp.is_dir() and str(sp) not in sys.path:
                     sys.path.insert(0, str(sp))
 
@@ -57,6 +59,7 @@ DISPATCH_MODULES = {
     "g3-exam": "sop_g3_exam",
     "deliver": "sop_delivery",
     "colab-guard": "sop_colab_guard",
+    "formal-gate": "sop_formal_gate",
 }
 
 
@@ -72,6 +75,7 @@ def print_usage() -> None:
         "  g3-exam       Stage 4 U2 incremental sync, existing-video exam, 3-boundary report, GLB re-render & G3 HTML\n"
         "  deliver       Stage 5 current-batch verification, local GLB round-trip & loop-seam check\n"
         "  colab-guard   Stage 6 cross-session lease registry & stage-gated safe Colab shutdown\n"
+        "  formal-gate   Formal verification hard gate (P1 SO(3)/limit/FK, P2 Oracle completeness, P3 collapse invariance, P4 surface contact)\n"
     )
 
 

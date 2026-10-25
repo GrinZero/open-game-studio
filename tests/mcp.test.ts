@@ -45,6 +45,22 @@ test("真实 stdio MCP 握手、工具发现与 HTTP 同领域项目状态", asy
     assert.equal(list.tools.length, 27);
     assert.ok(list.tools.some((t) => t.name === "workflow_decide"));
     const openTool = list.tools.find((t) => t.name === "studio_open")!;
+    for (const field of [
+      "view",
+      "canvasId",
+      "nodeId",
+      "assetId",
+      "revisionId",
+      "runId",
+      "nodeKey",
+      "stepKey",
+      "taskId",
+    ]) {
+      assert.ok(
+        openTool.inputSchema.properties?.[field],
+        `studio_open exposes ${field}`,
+      );
+    }
     assert.equal(openTool.icons?.[0].mimeType, "image/svg+xml");
     assert.equal(
       Buffer.from(openTool.icons![0].src.split(",")[1], "base64").toString(),

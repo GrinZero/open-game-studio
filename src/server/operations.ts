@@ -1,3 +1,9 @@
+import { randomUUID } from "node:crypto";
+import {
+  resolveWorkbenchTarget,
+  targetQuery,
+  workbenchViews,
+} from "../shared/workbench-target.js";
 import { studioBuild } from "../shared/build.js";
 import { z } from "zod";
 import { StudioCore, StudioError } from "./core.js";
@@ -25,9 +31,18 @@ const id = z.string().min(1).max(100);
 export const tools = {
   studio_open: {
     description:
-      "打开 Open Game Studio 工作台。自动匹配当前会话工作区；调用时请传当前会话的绝对工作目录 workspaceRoot，或显式 projectId。",
+      "打开 Open Game Studio 工作台。自动匹配当前会话工作区；调用时请传当前会话的绝对工作目录 workspaceRoot，或显式 projectId；可传 view、canvasId、nodeId、assetId/revisionId、runId + nodeKey（DAG）或 stepKey（阶段）、taskId 精确定位。返回 navigationStatus=requested 仅表示已发出打开目标，须验证实际界面。",
     schema: z.object({
       projectId: id.optional(),
+      canvasId: id.optional(),
+      view: z.enum(workbenchViews).optional(),
+      nodeId: id.optional(),
+      assetId: id.optional(),
+      revisionId: id.optional(),
+      runId: id.optional(),
+      nodeKey: id.optional(),
+      stepKey: id.optional(),
+      taskId: id.optional(),
       workspaceRoot: z.string().max(4096).optional(),
       workspaceRoots: z.array(z.string().max(4096)).max(32).optional(),
     }),
@@ -313,13 +328,41 @@ export function dispatch(
       }
       const projects = core.listProjects();
       const projectId = a.projectId || workspaceProject(projects, roots);
+      const project = projectId ? core.snapshot(projectId) : undefined;
+      const hasTarget = [
+        "canvasId",
+        "nodeId",
+        "assetId",
+        "revisionId",
+        "runId",
+        "nodeKey",
+        "stepKey",
+        "taskId",
+        "view",
+      ].some((key) => a[key]);
+      if (hasTarget && !project)
+        throw new StudioError(400, "打开目标需要明确项目或匹配的工作区");
+      let target;
+      try {
+        target = project ? resolveWorkbenchTarget(project, a) : undefined;
+      } catch (error) {
+        throw new StudioError(
+          400,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+      const query = targetQuery(target || {});
       return {
         schemaVersion: 1,
         build: studioBuild,
         workspaceRoot: a.workspaceRoot,
         projects,
-        project: projectId ? core.snapshot(projectId) : undefined,
-        url: `http://127.0.0.1:${process.env.PORT || 4310}${projectId ? `/?projectId=${encodeURIComponent(projectId)}` : ""}`,
+        project,
+        ...target,
+        target,
+        navigationId: randomUUID(),
+        navigationStatus: "requested",
+        url: `http://127.0.0.1:${process.env.PORT || 4310}${query.size ? `/?${query}` : ""}`,
         capabilities: {
           webUI: true,
           mcpTools: true,
@@ -456,9 +499,11 @@ export function dispatch(
         );
       if (a.action === "rerun") return core.rerun(a);
       if (a.action === "claim_dag_node") return claimDagNode(core, a);
-      if (a.action === "progress_dag_node") return reportDagNodeProgress(core, a);
+      if (a.action === "progress_dag_node")
+        return reportDagNodeProgress(core, a);
       if (a.action === "advance_dag_node") return advanceDagNode(core, a);
-      if (a.action === "auto_advance_dag") return autoAdvanceToNextGate(core, a);
+      if (a.action === "auto_advance_dag")
+        return autoAdvanceToNextGate(core, a);
       if (a.action === "select_candidate") return selectDagCandidate(core, a);
       if (a.action === "import_charakit") return importCharakitArchive(core, a);
       return core.rerun(a);

@@ -41,11 +41,13 @@ def resolve_monster_root(script_dir: Path = SCRIPT_DIR) -> Path:
         Path.home() / ".local/share/codex-integrations/game-studio-local/runtime/packages/monster",
         Path("/Users/bugyaluwang/project/codex-game-studio/packages/monster"),
     ]
+    py_ver = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    for v_cand in candidates:
+        for sp in sorted((v_cand / ".venv" / "lib").glob(f"{py_ver}/site-packages")):
+            if sp.is_dir() and str(sp) not in sys.path:
+                sys.path.insert(0, str(sp))
     for cand in candidates:
         if (cand / "worker" / "bone_taxonomy.py").is_file():
-            for sp in sorted((cand / ".venv" / "lib").glob("python*/site-packages")):
-                if sp.is_dir() and str(sp) not in sys.path:
-                    sys.path.insert(0, str(sp))
             return cand.resolve()
     return script_dir.parents[2]
 
@@ -390,6 +392,28 @@ def verify_rig_meta_canonical_bones(rig_meta_path: Path | str) -> dict[str, Any]
     }
 
 
+def resolve_g1_candidate_files(work_dir: Path, g1_info: dict[str, Any]) -> tuple[str, Path, Path]:
+    """Resolve the reviewed revision; explicit missing paths must never fall back to old snapshots."""
+    cid = str(g1_info["selected_candidate_id"])
+    mats = g1_info.get("materials") or {}
+    bound_cid = mats.get("selected_candidate_id")
+    if bound_cid is not None and str(bound_cid) != cid:
+        raise ValueError(f"G1 selected revision belongs to candidate {bound_cid}, not {cid}")
+    meta_value = (g1_info.get("bone_naming_validation") or {}).get("rig_meta_path") or mats.get("rig_meta_path")
+    meta = Path(meta_value) if meta_value else work_dir / "g1_candidates" / f"candidate_{cid}_rig_meta.json"
+    blend_value = mats.get("selected_blend_path")
+    candidates = mats.get("candidate_blends") or []
+    if not blend_value and candidates:
+        if not cid.isdigit() or not 0 <= int(cid) < len(candidates):
+            raise ValueError(f"G1 candidate_blends has no entry for selected candidate {cid}")
+        blend_value = candidates[int(cid)]
+    blend = Path(blend_value) if blend_value else work_dir / "g1_candidates" / f"candidate_{cid}_full.blend"
+    for label, path in (("rig metadata", meta), ("full rig", blend)):
+        if not path.is_file():
+            raise FileNotFoundError(f"G1 selected {label} not found: {path}")
+    return cid, meta, blend
+
+
 def mark_awaiting_review(
     ledger: dict[str, Any],
     gate: str,
@@ -489,8 +513,11 @@ def record_user_decision(
             ledger.setdefault("fingerprints", {})["rig_meta_sha256"] = bone_check["rig_meta_sha256"]
             mats = ginfo.get("materials") or {}
             cand_blends = mats.get("candidate_blends") or []
-            if str(cand_id).isdigit() and 0 <= int(str(cand_id)) < len(cand_blends):
-                sel_blend = Path(cand_blends[int(str(cand_id))])
+            selected_blend = mats.get("selected_blend_path")
+            if selected_blend or (str(cand_id).isdigit() and 0 <= int(str(cand_id)) < len(cand_blends)):
+                if mats.get("selected_candidate_id") is not None and str(mats["selected_candidate_id"]) != str(cand_id):
+                    raise ValueError("G1 selected_blend_path belongs to another candidate")
+                sel_blend = Path(selected_blend or cand_blends[int(str(cand_id))])
                 if not sel_blend.is_file() or sel_blend.stat().st_size < 1024:
                     raise ValueError(f"G1 通过被阻断：选定候选 .blend 为空或占位文件: {sel_blend}")
                 ledger["fingerprints"]["selected_candidate_blend_sha256"] = sha256_file(sel_blend)

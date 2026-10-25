@@ -1,3 +1,4 @@
+import { verifyDeepLinks } from "./deep-link-smoke.mjs";
 import { verifyCharacterSource } from "./character-source-smoke.mjs";
 import { verifyNodeSizing } from "./node-sizing-smoke.mjs";
 import { verifyCanvasTools } from "./canvas-tools-smoke.mjs";
@@ -84,6 +85,8 @@ import { AppBridge, PostMessageTransport } from '@modelcontextprotocol/ext-apps/
 const iframe = document.querySelector('iframe');
 const initialMode = new URLSearchParams(location.search).get('mode');
 const bridge = new AppBridge(null, {name:'test-host',version:'1.0.0'}, {serverTools:{},serverResources:{},downloadFile:{},updateModelContext:{text:{}},message:{text:{}}}, {hostContext:{theme:'dark',...(initialMode ? {displayMode:initialMode} : {})}});
+window.__openedLinks = [];
+bridge.onopenlink = async args => { window.__openedLinks.push(args.url); return {}; };
 window.__referenceUpdates = [];
 window.__modelMessages = [];
 bridge.onmessage = async args => {
@@ -101,7 +104,7 @@ window.__sendStudioLaunch = async (args, result) => { await bridge.sendToolInput
 bridge.oncalltool = async args => (await fetch('/tool', {method:'POST',body:JSON.stringify(args)})).json();
 bridge.onreadresource = async args => { const result = await (await fetch('/read-resource', {method:'POST',body:JSON.stringify(args)})).json(); if (result.error) throw new Error(result.error); return result; };
 bridge.ondownloadfile = async args => { await fetch('/download', {method:'POST',body:JSON.stringify(args)}); return {}; };
-bridge.oninitialized = () => { document.body.dataset.connected = 'true'; const projectId = new URLSearchParams(location.search).get('projectId'); if (projectId) bridge.sendToolInput({arguments:{projectId}}); };
+bridge.oninitialized = () => { document.body.dataset.connected = 'true'; const projectId = new URLSearchParams(location.search).get('projectId'); if (projectId) bridge.sendToolInput({arguments:Object.fromEntries(new URLSearchParams(location.search))}); };
 await bridge.connect(new PostMessageTransport(iframe.contentWindow, iframe.contentWindow));
 iframe.srcdoc = await (await fetch('/resource')).text();
 `,
@@ -271,6 +274,68 @@ try {
     await ui
       .getByRole("button", { name: `查看${project.name}项目概览`, exact: true })
       .waitFor();
+    const target = (
+      await client.callTool({
+        name: "canvas_manage",
+        arguments: {
+          action: "create",
+          projectId: project.id,
+          name: "海岛主城资源总览",
+        },
+      })
+    ).structuredContent.result;
+    const targetOpen = (
+      await client.callTool({
+        name: "studio_open",
+        arguments: {
+          projectId: project.id,
+          canvasId: target.id,
+        },
+      })
+    ).structuredContent.result;
+    // An existing app must react to a same-project canvas change, including
+    // when the host sends only a completed tool result.
+    await page.evaluate(
+      (result) => window.__sendStudioLaunch({}, result),
+      targetOpen,
+    );
+    await ui
+      .locator(
+        `select[aria-label="切换画布"] option[value="${target.id}"]:checked`,
+      )
+      .waitFor({ state: "attached" });
+    assert.equal(
+      await ui.getByRole("combobox", { name: "切换画布" }).inputValue(),
+      target.id,
+    );
+    await page.goto(
+      `http://127.0.0.1:${server.address().port}/?projectId=${project.id}&canvasId=${target.id}`,
+    );
+    await ui.locator(".workspace").waitFor();
+    assert.equal(
+      await ui.getByRole("combobox", { name: "切换画布" }).inputValue(),
+      target.id,
+    );
+    await page.goto(
+      targetOpen.url.replace(/http:\/\/127\.0\.0\.1:\d+/, binaryOrigin),
+    );
+    await page.locator(".workspace").waitFor();
+    assert.equal(
+      await page.getByRole("combobox", { name: "切换画布" }).inputValue(),
+      target.id,
+    );
+    await page.goto(
+      `http://127.0.0.1:${server.address().port}/?projectId=${project.id}`,
+    );
+    await ui.locator(".workspace").waitFor();
+    await verifyDeepLinks({
+      page,
+      ui,
+      client,
+      project,
+      hostOrigin: `http://127.0.0.1:${server.address().port}`,
+      binaryOrigin,
+    });
     await page.goto(
       `http://127.0.0.1:${server.address().port}/?projectId=${project.id}`,
     );
@@ -477,7 +542,7 @@ try {
     await ui.locator(".asset-preview img").waitFor();
     await ui.locator(".asset-preview img").evaluate((img) => img.decode());
     await ui
-      .getByRole("button", { name: "添加到当前画布", exact: true })
+      .getByRole("button", { name: "添加到切换画布", exact: true })
       .click();
     await ui.locator(".asset-node img").evaluate((img) => img.decode());
     await ui.getByRole("button", { name: "便签", exact: true }).click();

@@ -4,14 +4,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-const venvPython = path.join(
-  root,
-  process.platform === "win32" ? ".venv/Scripts/python.exe" : ".venv/bin/python",
-);
+const relVenvBin = process.platform === "win32" ? ".venv/Scripts/python.exe" : ".venv/bin/python";
+const venvPython = path.join(root, relVenvBin);
+const fallbackVenvPython = "/Users/bugyaluwang/project/codex-game-studio/packages/monster/" + relVenvBin;
 
 function resolvePython(scriptArg = "") {
   if (process.env.MONSTER_PYTHON) return process.env.MONSTER_PYTHON;
   if (existsSync(venvPython)) return venvPython;
+  if (existsSync(fallbackVenvPython)) return fallbackVenvPython;
   const needsClientDeps =
     scriptArg.includes("monster_client.py") &&
     process.env.MONSTER_SKIP_AUTO_VENV !== "1";

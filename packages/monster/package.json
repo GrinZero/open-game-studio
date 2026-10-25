@@ -1,10 +1,11 @@
 {
   "name": "@open-game-studio/monster",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "private": true,
   "description": "Monster rigging, pose training and animation worker, Colab deployment and client integration",
   "scripts": {
     "check": "node scripts/run-python.mjs scripts/check.py",
+    "formal-gate": "node scripts/run-python.mjs skills/monster-workflow/scripts/sop_formal_gate.py",
     "package": "node scripts/run-python.mjs scripts/package-release.py",
     "call": "node scripts/run-python.mjs integration/monster_client.py",
     "sop": "node scripts/run-python.mjs skills/monster-workflow/scripts/monster_sop.py",

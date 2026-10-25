@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ReactFlow,
   Background,
@@ -60,7 +60,6 @@ import {
   useAssetFileUrl,
 } from "./api";
 import { ModelPreview } from "./ModelPreview";
-import { characterLaunch } from "./workbench-launch";
 import {
   CharacterSourceDialog,
   CharacterTaskDialog,
@@ -393,12 +392,14 @@ const dagNodeTypes = {
 export function CharacterWorkflowPage({
   s,
   activeRunId,
+  launchNodeKey,
   onSelectRun,
   refresh,
   notify,
 }: {
   s: ProjectSnapshot;
   activeRunId?: string;
+  launchNodeKey?: string;
   onSelectRun: (runId: string) => void;
   refresh: () => Promise<void>;
   notify: (msg: string) => void;
@@ -412,15 +413,17 @@ export function CharacterWorkflowPage({
     [runs, activeRunId],
   );
 
-  const launchedNode = run?.dag?.find(
-    (node) => node.key === characterLaunch(s.project.id)?.nodeKey,
-  );
+  const launchedNode = run?.dag?.find((node) => node.key === launchNodeKey);
   const [activeStage, setActiveStage] = useState<CharacterStageGroup>(
     launchedNode?.stageGroup || "reference",
   );
   const [selectedNodeKey, setSelectedNodeKey] = useState<string>(
     launchedNode?.key || "head_multiview",
   );
+  const guideRef = useRef<HTMLLIElement>(null);
+  useEffect(() => {
+    guideRef.current?.scrollIntoView({ block: "center" });
+  }, [launchNodeKey]);
   const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
   const [localCharakuru, setLocalCharakuru] = useState<
@@ -1363,6 +1366,11 @@ export function CharacterWorkflowPage({
                   return (
                     <li
                       key={node.key}
+                      ref={node.key === launchNodeKey ? guideRef : undefined}
+                      data-workflow-node={node.key}
+                      aria-current={
+                        selectedNodeKey === node.key ? "step" : undefined
+                      }
                       className={selectedNodeKey === node.key ? "current" : ""}
                     >
                       <span

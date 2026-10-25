@@ -272,6 +272,16 @@ def fuse_depth_visibility(uv_front, uv_side, conf_front, conf_side, calib,
     zf, zs = cz + (0.5 - uv_front[..., 1] / H) * S, cz + (0.5 - uv_side[..., 1] / H) * S
     s_safe = max(S, 1e-4)
 
+    # Learned depth is a completion cue, not an independent ground-truth ray.
+    # Gate inconsistent depth against a visible direct image coordinate even
+    # when the auxiliary head reports an overconfident variance. Tolerances are
+    # expressed in pixels at the reference resolution, hence resolution invariant.
+    direct_sigma = 3.0 * (H / 768.0) * S / H
+
+    def depth_agreement(predicted, direct, direct_quality):
+        residual = (predicted - direct) / max(1e-8, direct_sigma)
+        return 1.0 / (1.0 + np.clip(direct_quality, 0.0, 1.0) * residual ** 2)
+
     if uv_right is not None and conf_right is not None:
         cr = np.clip(conf_right, 0.001, 1)
         vr = np.clip(visibility_right if visibility_right is not None else np.ones_like(cr), 0, 1)
@@ -287,9 +297,10 @@ def fuse_depth_visibility(uv_front, uv_side, conf_front, conf_side, calib,
         qs = cs * (0.10 + 0.90 * vs)
         qr = cr * (0.10 + 0.90 * vr)
 
-        epi_fs = np.exp(-0.5 * (np.abs(zf - zs) / (0.065 * s_safe)) ** 2)
-        epi_fr = np.exp(-0.5 * (np.abs(zf - zr) / (0.065 * s_safe)) ** 2)
-        epi_sr = np.exp(-0.5 * (np.abs(zs - zr) / (0.065 * s_safe)) ** 2)
+        epi_sigma = 8.0 * (H / 768.0) * S / H
+        epi_fs = np.exp(-0.5 * (np.abs(zf - zs) / epi_sigma) ** 2)
+        epi_fr = np.exp(-0.5 * (np.abs(zf - zr) / epi_sigma) ** 2)
+        epi_sr = np.exp(-0.5 * (np.abs(zs - zr) / epi_sigma) ** 2)
 
         q_all = np.maximum(1e-6, qf + qs + qr)
         f_dom = (3.0 * qf / q_all) ** 2
@@ -343,6 +354,11 @@ def fuse_depth_visibility(uv_front, uv_side, conf_front, conf_side, calib,
             * r_occ_boost
             / (1.0 + np.exp(np.clip(lvr, -6, 3)) / (0.05 ** 2))
         )
+
+        y_geometry = (ws_y * y_direct + wr_y * y_direct_r) / np.maximum(1e-12, ws_y + wr_y)
+        wdf *= depth_agreement(y_depth, y_geometry, np.maximum(cs * vs * epi_fs, cr * vr * epi_fr))
+        wds *= depth_agreement(x_depth, x_direct, cf * vf)
+        wdr *= depth_agreement(x_depth_r, x_direct, cf * vf)
 
         points = np.stack(
             (

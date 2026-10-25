@@ -1,3 +1,4 @@
+import { launchRequest } from "./workbench-launch";
 import { useEffect, useState } from "react";
 import type { App } from "@modelcontextprotocol/ext-apps";
 import { AssetFileCache, type AssetFile } from "./asset-file-cache";
@@ -60,7 +61,15 @@ export async function reloadWorkbench() {
   )
     throw new Error("服务未返回工作台页面，请重试。");
   const url = URL.createObjectURL(
-    new Blob([shell.text], { type: "text/html" }),
+    new Blob(
+      [
+        shell.text.replace(
+          "</head>",
+          `<script type="application/json" id="studio-launch">${JSON.stringify(launchRequest()).replaceAll("<", "\\u003c")}</script></head>`,
+        ),
+      ],
+      { type: "text/html" },
+    ),
   );
   // Do not tear down the current bridge before navigation succeeds. A failed
   // resource read leaves the existing workbench fully usable.
