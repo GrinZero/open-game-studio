@@ -1669,6 +1669,7 @@ function setHighlightedBone(boneName, fromStage = false) {
 // Render Inspector Panes
 function renderInspectorPosePane(pose) {
   const m = getPoseMetrics(pose);
+  const measured = pose.metrics_available !== false;
   const bCount = getPoseBoundaryCount(pose);
   const maxUtil = Math.round((pose.max_utilization ?? pose.boundary?.max_utilization ?? 0) * 100);
   const hardPairs = m.new_hard_intersection_pairs ?? 0;
@@ -1678,8 +1679,8 @@ function renderInspectorPosePane(pose) {
 
   const passBadge = document.getElementById("posePassBadge");
   const isOk = hardPairs === 0 && (m.bad_edge_ratio || 0) <= 0.02;
-  passBadge.textContent = isOk ? "门禁通过 PASS" : "需关注 CHECK";
-  passBadge.style.color = isOk ? "var(--emerald)" : "var(--amber)";
+  passBadge.textContent = measured ? (isOk ? "门禁通过 PASS" : "需关注 CHECK") : "未提供网格测量 · 请查看姿态";
+  passBadge.style.color = measured && isOk ? "var(--emerald)" : "var(--amber)";
 
   document.getElementById("poseMetricsGrid").innerHTML = `
     <div class="stat-card">
@@ -1694,13 +1695,13 @@ function renderInspectorPosePane(pose) {
     </div>
     <div class="stat-card">
       <div class="k">新增硬部件穿插</div>
-      <div class="v" style="color:${hardPairs === 0 ? "var(--emerald)" : "var(--rose)"}">${hardPairs} 对</div>
-      <div class="sub">柔性接触 ${m.new_flexible_intersection_pairs ?? 0} 对</div>
+      <div class="v" style="color:${measured && hardPairs === 0 ? "var(--emerald)" : "var(--amber)"}">${measured ? hardPairs + " 对" : "未测量"}</div>
+      <div class="sub">柔性接触 ${measured ? (m.new_flexible_intersection_pairs ?? 0) + " 对" : "未测量"}</div>
     </div>
     <div class="stat-card">
       <div class="k">网格拉伸坏边率</div>
-      <div class="v">${badEdgePct}%</div>
-      <div class="sub">柔性 ${flexBadPct}% · 阈值 ≤ 2.00%</div>
+      <div class="v">${measured ? badEdgePct + "%" : "未测量"}</div>
+      <div class="sub">柔性 ${measured ? flexBadPct + "%" : "未测量"} · 阈值 ≤ 2.00%</div>
     </div>
     <div class="stat-card">
       <div class="k">全局 ROOT 位移 (m)</div>
@@ -1709,8 +1710,8 @@ function renderInspectorPosePane(pose) {
     </div>
     <div class="stat-card">
       <div class="k">胸腔刚体拟合误差</div>
-      <div class="v">${Number(m.chest_rigid_fit_max_m || 0).toFixed(6)} m</div>
-      <div class="sub">最大边拉伸比 ${m.max_stretch_ratio ?? "-"}</div>
+      <div class="v">${measured ? Number(m.chest_rigid_fit_max_m || 0).toFixed(6) + " m" : "未测量"}</div>
+      <div class="sub">最大边拉伸比 ${measured ? (m.max_stretch_ratio ?? "-") : "未测量"}</div>
     </div>
   `;
 
@@ -1935,7 +1936,7 @@ function renderCurrentPose() {
   document.getElementById("quickMetrics").innerHTML = `
     <span class="metric-pill">边界关节 <strong>${bCount}</strong></span>
     <span class="metric-pill">包络峰值 <strong>${maxUtil}%</strong></span>
-    <span class="metric-pill ${hardPairs === 0 ? "ok" : "warn"}">硬穿插 <strong>${hardPairs}</strong></span>
+    <span class="metric-pill ${pose.metrics_available !== false && hardPairs === 0 ? "ok" : "warn"}">硬穿插 <strong>${pose.metrics_available === false ? "未测量" : hardPairs}</strong></span>
   `;
 
   // Update stage viewport images

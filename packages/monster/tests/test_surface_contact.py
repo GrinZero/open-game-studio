@@ -24,6 +24,7 @@ class SurfaceContactTests(unittest.TestCase):
         parts=[SimpleNamespace(name=n,modifiers=[SimpleNamespace(type='ARMATURE',object=arm)]) for n in ['body','sole']]
         parts.append(SimpleNamespace(name='unbound_ground',modifiers=[]))
         data={'bone_names':['root'],'rest_verts':np.zeros((3,3)),
+              'rest_coords':np.zeros((3,3)),'start_verts':np.ones((3,3)),
               'skin_indices':np.zeros((3,4),dtype=int),'skin_weights':np.ones((3,4))*.25,
               'triangles':np.array([[0,1,2]]),'rest_heads':np.zeros((1,3)),'rest_R':np.eye(3)[None]}
         with patch.object(bpy_worker,'extract_rig_lbs_skinning_and_verify_gate',return_value=data) as extract:
@@ -31,6 +32,8 @@ class SurfaceContactTests(unittest.TestCase):
         self.assertEqual(extract.call_count,2)
         self.assertEqual(merged['measured_mesh_names'],['body','sole'])
         self.assertEqual(merged['rest_verts'].shape,(6,3))
+        self.assertEqual(merged['start_verts'].shape,(6,3))
+        np.testing.assert_array_equal(merged['start_verts'],np.ones((6,3)))
         np.testing.assert_array_equal(merged['triangles'],[[0,1,2],[3,4,5]])
 
     def test_view_sync_cannot_approve_an_unresolved_contact(self):

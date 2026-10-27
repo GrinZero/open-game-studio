@@ -530,6 +530,9 @@ def build_g1_review_pack(
                 dest_sub_dir = g1_cand_dir / cand_key
                 dest_sub_dir.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(staged_blend, dest_blend)
+                for auxiliary in ('shell.npz','skeleton_postprocess.json'):
+                    source_aux=stage_dir/cand_key/auxiliary
+                    if source_aux.is_file(): shutil.copy2(source_aux,dest_sub_dir/auxiliary)
 
                 staged_full_glb = stage_dir / f"candidate_{cid}_full.glb"
                 if staged_full_glb.is_file():

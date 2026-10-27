@@ -10,8 +10,11 @@ def runtime_metadata():
     protocol = json.loads((PACKAGE_ROOT / "contracts/protocol.json").read_text())
     manifest_path = PACKAGE_ROOT / "release-manifest.json"
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    blender = json.loads((PACKAGE_ROOT / "contracts/blender-runtime.json").read_text())
     return {
         "package_version": package["version"],
+        "blender_target": blender["blender_version"],
+        "blender_python": blender["python_version"],
         "protocol_version": protocol["protocol_version"],
         "release_id": manifest.get("release_id", "source-checkout"),
     }

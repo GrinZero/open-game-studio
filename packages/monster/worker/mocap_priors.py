@@ -507,7 +507,9 @@ def apply_floor_and_foot_contact_constraints(
         }
 
     surface_config = classified_bones[root].get("surface_contact")
-    if isinstance(surface_config, dict) and surface_config.get("enabled", False):
+    from pose_features import surface_contact_enabled
+
+    if surface_contact_enabled() and isinstance(surface_config, dict) and surface_config.get("enabled", False):
         from surface_contact import apply_surface_floor_constraints
         return apply_surface_floor_constraints(
             frames_out, order, root, classified_bones, rest_H, rest_T, rest_R,

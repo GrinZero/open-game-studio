@@ -35,7 +35,7 @@ AGPL 允许商用、收费分发和收费托管服务，不要求合规商业用
 核心依赖及模型见 [第三方清单](THIRD_PARTY.md)。本模块的 AGPL 不授予 SkinTokens、Blender、ComfyUI、H3 等上游的额外权利。
 
 - MIT、BSD 与 Apache 的代码可在满足各自声明和其他条件后纳入适用 AGPL 的作品，原许可和版权声明仍需保留。
-- ComfyUI 与 VideoHelperSuite 使用 GPL v3；Blender 的核心使用 GPL-2.0-or-later，所用 bpy 4.2 路径须考虑 GPL v3 选项及 GPL/AGPL 第 13 条的组合规则。上游 GPL 部分不因此改成 AGPL。`studio_bpy_worker.py`、`pose_visibility.py` 及部分评测代码直接调用 Blender API，不能宣称它们与 Blender 一定相互独立。
+- ComfyUI 与 VideoHelperSuite 使用 GPL v3；Blender 的核心使用 GPL-2.0-or-later，所用 bpy 5.2 渲染与 4.5 SkinTokens 内部路径须考虑 GPL v3 选项及 GPL/AGPL 第 13 条的组合规则。上游 GPL 部分不因此改成 AGPL。`studio_bpy_worker.py`、`pose_visibility.py` 及部分评测代码直接调用 Blender API，不能宣称它们与 Blender 一定相互独立。
 - H3 的权重社区许可包含地域、商业门槛、展示及用途义务；它不是本模块的 AGPL。当前部署脚本单独下载并通过 ComfyUI 服务使用权重，没有把权重装入源码归档。此结构并非对任何再打包、组合分发或商业部署的全面合规保证。
 
 ## 发布前与部署时

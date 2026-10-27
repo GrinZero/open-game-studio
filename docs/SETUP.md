@@ -51,6 +51,8 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.codex.game-studio.
 
 Plugin removal does not delete project files, asset revisions or the registry.
 
+Character production data follows the [character workspace v1 contract](../packages/monster/skills/monster-workflow/references/character-workspace.md): one stable character directory under the user's project, with versioned inputs, training and actions. Existing SOP paths and review ledgers remain in place until the documented path-adapter migration is implemented.
+
 ## Paths and configuration
 
 | Setting | Default | Meaning |

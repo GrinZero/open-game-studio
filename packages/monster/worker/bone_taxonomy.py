@@ -51,7 +51,8 @@ from mocap_priors import (  # noqa: E402
     whittaker_charbonnier_smooth_trajectory,
 )
 
-BONE_TAXONOMY_SCHEMA = "monster-bone-taxonomy-v2"
+BONE_TAXONOMY_SCHEMA = "monster-bone-taxonomy-v3"
+from anatomical_names import parse_anatomical_name, anatomical_names, LEG_PLANS
 JOINT_LIMITS_SCHEMA = "monster-joint-limits-v1"
 DEFAULT_SYNTH_SAMPLES = 5000
 
@@ -97,6 +98,9 @@ _CANONICAL_NAME_RE = re.compile(
 
 def parse_canonical_bone_name(name: str) -> dict[str, Any] | None:
     """Parses a canonical `<KIND>_<SIDE>_<GROUP>_<INDEX>` bone name if it matches the v2 contract."""
+    v3 = parse_anatomical_name(name.strip())
+    if v3 is not None:
+        return v3
     m = _CANONICAL_NAME_RE.match(name.strip())
     if not m:
         return None
@@ -341,6 +345,7 @@ def classify_rig_bones(
     for b in bone_names:
         info = meta[b]
         n_kind, n_side = infer_kind_and_side_from_name(b)
+        named_anatomy = parse_anatomical_name(b)
         if b == primary_root or info.get("parent") is None or n_kind == "root":
             assigned_kind[b] = "root"
             assigned_sub_role[b] = "root"
@@ -361,6 +366,32 @@ def classify_rig_bones(
             assigned_sub_role[b] = "rigid_support"
             assigned_side[b] = n_side or _geom_side(b)
 
+        elif (named_anatomy is None or named_anatomy["kind"] == "wing") and (
+            n_kind == "wing"
+            or info.get("kind") == "wing"
+            or info.get("winged")
+            or float(info.get("flatness") or 0.0) > 5.0
+            or infer_kind_and_side_from_name(b, role_hint=info.get("role"))[0] == "wing"
+        ):
+            assigned_kind[b] = "wing"
+            assigned_sub_role[b] = "wing_chain"
+            assigned_side[b] = n_side or _geom_side(b)
+
+    # A flat distal wing can be attached through round proximal joints. Carry its
+    # measured semantics up the unbranched limb, stopping at a body/other-kind hub.
+    for wing in [b for b in bone_names if assigned_kind.get(b) == "wing"]:
+        parent = meta[wing].get("parent")
+        while parent in meta and parent not in assigned_kind:
+            hint, _ = infer_kind_and_side_from_name(parent, role_hint=meta[parent].get("role"))
+            if len(children_map[parent]) != 1 or hint not in (None, "limb", "wing"):
+                break
+            if meta[parent].get("kind") not in (None, "limb", "wing"):
+                break
+            assigned_kind[parent] = "wing"
+            assigned_sub_role[parent] = "wing_chain"
+            assigned_side[parent] = assigned_side[wing]
+            parent = meta[parent].get("parent")
+
     # Step 2: Detect Multi-Branch Hand/Foot Hubs (>= 3 digit-chain children) and Downstream DIGIT Clusters
     def _is_digit_chain_subtree(root_child: str) -> bool:
         c_kind_name, _ = infer_kind_and_side_from_name(root_child)
@@ -378,7 +409,7 @@ def classify_rig_bones(
 
     hand_hubs: list[str] = []
     for b in bone_names:
-        if b in assigned_kind:
+        if b in assigned_kind and assigned_kind[b] != "wing":
             continue
         ch = children_map[b]
         if len(ch) >= 3:
@@ -386,7 +417,7 @@ def classify_rig_bones(
             if len(short_ch) >= 3:
                 hand_hubs.append(b)
                 side_h = infer_kind_and_side_from_name(b)[1] or _geom_side(b)
-                assigned_kind[b] = "limb"
+                assigned_kind[b] = assigned_kind.get(b, "limb")
                 assigned_sub_role[b] = "hand_hub"
                 assigned_side[b] = side_h
                 for sc in short_ch:
@@ -600,7 +631,19 @@ def classify_rig_bones(
         if assigned_sub_role.get(b) == "hand_hub":
             limb_hub_group[b] = bone_group_id[b]
 
-    # Number digit chains per parent hand_hub sorted by X/Y rest coordinates
+    # Number from the character's inner side to its outer side. Mirror X on the
+    # right, and use the distal tip so a fan sharing one head is still ordered.
+    def _digit_spatial_key(name: str, side: str) -> tuple[float, float, float, str]:
+        end = name
+        while True:
+            descendants = [c for c in children_map[end] if assigned_kind[c] == "digit"]
+            if len(descendants) != 1:
+                break
+            end = descendants[0]
+        point = meta[end].get("rest_tail_world", meta[name].get("rest_head_world", [root_x, 0.0, 0.0]))
+        sign = -1.0 if side == "R" else 1.0
+        return (sign * (float(point[0]) - root_x), float(point[1]), float(point[2]), name)
+
     for b in topo_sorted:
         if assigned_kind[b] != "digit":
             continue
@@ -612,7 +655,7 @@ def classify_rig_bones(
         else:
             hub_grp = limb_hub_group.get(p or "", 1)
             siblings = [c for c in children_map.get(p or "", []) if assigned_kind.get(c) == "digit"]
-            siblings.sort(key=lambda c: tuple(meta[c].get("rest_head_world", [0.0, 0.0, 0.0])))
+            siblings.sort(key=lambda c: _digit_spatial_key(c, s))
             finger_idx = (siblings.index(b) + 1) if b in siblings else (group_counters.get(("digit", s), 0) + 1)
             group_counters[("digit", s)] = max(group_counters.get(("digit", s), 0), finger_idx)
             bone_group_id[b] = min(99, hub_grp * 10 + finger_idx)
@@ -622,7 +665,11 @@ def classify_rig_bones(
     for b in bone_names:
         info = meta[b]
         parsed_canon = parse_canonical_bone_name(b)
-        if parsed_canon is not None:
+        if parsed_canon is not None and not (
+            assigned_kind[b] == "wing"
+            and parsed_canon["kind"] != "wing"
+            and parsed_canon.get("schema_version") != 3
+        ):
             k = parsed_canon["kind"]
             s = parsed_canon["side"]
             grp = int(parsed_canon["group_id"])
@@ -636,7 +683,8 @@ def classify_rig_bones(
             c_idx = bone_chain_idx.get(b, 1)
         is_leaf = len(children_map[b]) == 0
         lim_src = str(info.get("limits_source", ""))
-        has_custom_limits = bool(info.get("limits_rad")) and lim_src != "stage1_heuristic"
+        default_sources = ("stage1_heuristic", "canonical_default")
+        has_custom_limits = bool(info.get("limits_rad")) and lim_src not in default_sources
         def_lims, def_corr, def_fixed = default_limits_and_corr_for_kind(k, sub, is_leaf=is_leaf)
 
         info["kind"] = k
@@ -654,9 +702,19 @@ def classify_rig_bones(
             info["limits_rad"] = [[round(lo, 4), round(hi, 4)] for (lo, hi) in def_lims]
             if not lim_src or lim_src == "stage1_heuristic":
                 info["limits_source"] = "canonical_default"
-        if "chain_corr" not in info or info["chain_corr"] is None or lim_src == "stage1_heuristic":
+        if "chain_corr" not in info or info["chain_corr"] is None or lim_src in default_sources:
             info["chain_corr"] = 0.0 if has_custom_limits else def_corr
 
+    from pose_features import rig_contract_v3_enabled
+
+    if rig_contract_v3_enabled():
+        names_v3 = anatomical_names(meta, height)
+        for old, new in names_v3.items():
+            meta[old]["canonical_name"] = new
+            meta[old]["anatomical_role"] = new.split(".")[0]
+            if new.startswith(("Rigid", "Weapon")):
+                meta[old]["fixed_local"] = True
+                meta[old]["limits_rad"] = [[0.0, 0.0]] * 3
     return meta
 
 
@@ -677,7 +735,7 @@ def canonicalize_rig_bone_names_in_blender(
             idx = int(info.get("chain_index", 1))
             while cand in used_names:
                 idx += 1
-                cand = format_canonical_bone_name(info["kind"], info["side"], info["group_id"], idx)
+                cand = f"Limb{idx}_1" + ("." + info["side"] if info["side"] in ("L", "R") else "")
         used_names.add(cand)
         rename_map[old_name] = cand
 
@@ -704,15 +762,37 @@ def canonicalize_rig_bone_names_in_blender(
             if hasattr(m, "vertex_groups") and tmp_name in m.vertex_groups:
                 m.vertex_groups[tmp_name].name = new_name
 
-    # Update animation fCurves if present
-    anim = getattr(arm_obj, "animation_data", None)
-    if anim and getattr(anim, "action", None):
-        for fc in anim.action.fcurves:
-            dp = getattr(fc, "data_path", "")
-            for old_name, new_name in rename_map.items():
-                if old_name != new_name and f'pose.bones["{old_name}"]' in dp:
-                    fc.data_path = dp.replace(f'pose.bones["{old_name}"]', f'pose.bones["{new_name}"]')
-                    break
+    # Update all actions bound to this armature, including NLA and Blender 4.4+ channel bags.
+    anim = getattr(arm_obj, 'animation_data', None)
+    actions=[]
+    if anim:
+        if getattr(anim,'action',None): actions.append(anim.action)
+        for track in getattr(anim,'nla_tracks',()):
+            for strip in track.strips:
+                if getattr(strip,'action',None) and strip.action not in actions: actions.append(strip.action)
+    curves=list(getattr(anim,'drivers',())) if anim else []
+    for action in actions:
+        curves.extend(getattr(action,'fcurves',()))
+        for layer in getattr(action,'layers',()):
+            for strip in layer.strips:
+                for bag in getattr(strip,'channelbags',()): curves.extend(bag.fcurves)
+    for fc in curves:
+        path=getattr(fc,'data_path','')
+        for old,new in rename_map.items():
+            old_token=json.dumps(old); new_token=json.dumps(new)
+            path=path.replace('pose.bones['+old_token+']','pose.bones['+new_token+']')
+        fc.data_path=path
+    try:
+        import bpy
+        for obj in bpy.data.objects:
+            if obj.parent==arm_obj and obj.parent_type=='BONE': obj.parent_bone=rename_map.get(obj.parent_bone,obj.parent_bone)
+            owners=[obj]+(list(obj.pose.bones) if obj.type=='ARMATURE' else [])
+            for owner in owners:
+                for constraint in getattr(owner,'constraints',()):
+                    if getattr(constraint,'target',None)==arm_obj and hasattr(constraint,'subtarget'):
+                        constraint.subtarget=rename_map.get(constraint.subtarget,constraint.subtarget)
+    except ImportError:
+        pass  # Metadata-only callers do not require bpy.
 
     return rename_map
 
@@ -2819,6 +2899,9 @@ def apply_joint_limits_profile(
                 info["chain_corr"] = round(float(b_prof["chain_corr"]), 3)
             if "axis_semantics" in b_prof:
                 info["axis_semantics"] = copy.deepcopy(b_prof["axis_semantics"])
+            for geometry_key in ("axis_roles", "axis_role_source", "hinge", "frozen_start_channels_rad"):
+                if geometry_key in b_prof:
+                    info[geometry_key] = copy.deepcopy(b_prof[geometry_key])
             if "probe_safe_limits_deg" in b_prof:
                 info["probe_safe_limits_deg"] = copy.deepcopy(b_prof["probe_safe_limits_deg"])
             if "canonical_default_limits_deg" in b_prof:
@@ -2829,6 +2912,24 @@ def apply_joint_limits_profile(
                 info["allow_leaf_twist"] = bool(b_prof["allow_leaf_twist"])
             if "intra_bone_coupling" in b_prof and isinstance(b_prof["intra_bone_coupling"], dict):
                 info["intra_bone_coupling"] = copy.deepcopy(b_prof["intra_bone_coupling"])
+            for channel, value in b_prof.get("frozen_start_channels_rad", {}).items():
+                index = ("rx", "ry", "rz").index(channel)
+                info["limits_rad"][index] = [float(value), float(value)]
+                info["limits_deg"][index] = [math.degrees(value), math.degrees(value)]
+            if info.get("hinge") and not info.get("fixed_local"):
+                hinge = info["hinge"]
+                hinge_axis = int(hinge.get("axis", 0))
+                lower, upper = hinge["limits"]
+                safe = info.get("probe_safe_limits_deg")
+                if safe:
+                    lower = max(lower, math.radians(safe[hinge_axis][0]))
+                    upper = min(upper, math.radians(safe[hinge_axis][1]))
+                lower = max(lower, info["limits_rad"][hinge_axis][0])
+                upper = min(upper, info["limits_rad"][hinge_axis][1])
+                if lower > upper:
+                    raise ValueError(f"{b_name}: joint profile and safe geometric hinge do not intersect")
+                info["limits_rad"][hinge_axis] = [lower, upper]
+                info["limits_deg"][hinge_axis] = [math.degrees(lower), math.degrees(upper)]
             src_cand = (
                 "agent_custom"
                 if "agent_custom" in (b_prof.get("source"), b_prof.get("limits_source"))
@@ -3038,8 +3139,7 @@ def probe_rig_joint_limits(
         if not test_angles or test_angles[-1] < ceiling_abs_deg - 1e-3:
             test_angles.append(float(ceiling_abs_deg))
 
-        last_safe = min(15.0, float(ceiling_abs_deg))
-        for ang_deg in test_angles:
+        def is_safe(ang_deg: float) -> bool:
             ang_rad = math.radians(sign_dir * ang_deg)
             eul = [0.0, 0.0, 0.0]
             eul[axis_idx] = ang_rad
@@ -3055,7 +3155,7 @@ def probe_rig_joint_limits(
                     posed_heads[bi] = h_rot + R_world_rot @ (lbs_rest_heads[bi] - h_rot)
                     posed_R[bi] = R_world_rot @ lbs_rest_R[bi]
 
-            posed_v = lbs_deform_vertices_numpy(
+            posed_v = (lbs_evaluator_fn or lbs_deform_vertices_numpy)(
                 lbs_rest_verts,
                 lbs_skin_indices,
                 lbs_skin_weights,
@@ -3064,18 +3164,29 @@ def probe_rig_joint_limits(
                 posed_heads,
                 posed_R,
             )
-            stretch = compute_mesh_edge_stretch_metric(
+            stretch = (stretch_metric_fn or compute_mesh_edge_stretch_metric)(
                 lbs_rest_verts,
                 posed_v,
                 lbs_triangles,
                 max_stretch=max_stretch_ratio,
                 max_bad_ratio=max_bad_edge_ratio,
             )
-            if stretch["passed"]:
+            return bool(stretch["passed"])
+
+        last_safe = 0.0
+        for ang_deg in test_angles:
+            if is_safe(ang_deg):
                 last_safe = float(ang_deg)
             else:
+                first_bad = float(ang_deg)
+                for _ in range(8):
+                    middle = (last_safe + first_bad) / 2
+                    if is_safe(middle):
+                        last_safe = middle
+                    else:
+                        first_bad = middle
                 break
-        return round(float(last_safe), 1)
+        return math.floor(last_safe * 10 + 1e-8) / 10
 
     global_root = {
         "rotation_limits_deg": [[-28.0, 32.0], [-22.0, 22.0], [-25.0, 25.0]],
@@ -3095,6 +3206,9 @@ def probe_rig_joint_limits(
         ),
     }
 
+    if any(b.get('rotation_parameterization')=='axis_angle' for b in classified.values()):
+        global_root.update(rotation_limits_deg=[[-180.,180.]]*3,rotation_parameterization='axis_angle',
+            rationale='V3 whole-body SO(3) root motion; local joint limits remain constrained independently.')
     bones_profile: dict[str, dict[str, Any]] = {}
     delta_probe_rad = math.radians(15.0)
     axis_names = ("rx", "ry", "rz")
@@ -3133,13 +3247,46 @@ def probe_rig_joint_limits(
         def_lims_rad, def_corr, _ = default_limits_and_corr_for_kind(kind, sub_role, is_leaf=is_leaf)
         def_lims_deg = [[round(math.degrees(lo), 1), round(math.degrees(hi), 1)] for (lo, hi) in def_lims_rad]
         ceil_deg = _probe_safe_ceiling_deg_for_kind(kind, sub_role, is_leaf=is_leaf)
+        hinge_info = info.get("hinge") or info.get("jaw_hinge")
+        is_jaw_hinge = bool(info.get("jaw_hinge"))
+        hinge_axis = int(hinge_info.get("axis", 0)) if hinge_info else None
+        if hinge_axis == 2:
+            # Canonical defaults are bend-X/side-Z; imported rolled axes can swap them.
+            def_lims_deg[0], def_lims_deg[2] = def_lims_deg[2], def_lims_deg[0]
+            ceil_deg[0], ceil_deg[2] = ceil_deg[2], ceil_deg[0]
+        if hinge_info:
+            anatomical = hinge_info.get("anatomical_limits", hinge_info["limits"])
+            ceil_deg[hinge_axis] = [
+                min(ceil_deg[hinge_axis][0], math.degrees(anatomical[0])),
+                max(ceil_deg[hinge_axis][1], math.degrees(anatomical[1])),
+            ]
+            if is_jaw_hinge:
+                jaw_side_deg = round(math.degrees(0.08), 1)
+                for other_ax in range(3):
+                    if other_ax != hinge_axis:
+                        ceil_deg[other_ax] = [-jaw_side_deg, jaw_side_deg]
+                        def_lims_deg[other_ax] = [-jaw_side_deg, jaw_side_deg]
+        if info.get("allow_leaf_twist") and not fixed_local: ceil_deg[1]=[-180.,180.]
 
         probe_safe_deg: list[list[float]] = []
         recommended_deg: list[list[float]] = []
+        frozen_start_channels = {}
         for ax_i in range(3):
-            if fixed_local or (is_leaf and ax_i == 1):
+            if fixed_local:
                 probe_safe_deg.append([0.0, 0.0])
                 recommended_deg.append([0.0, 0.0])
+                continue
+            if is_leaf and ax_i == 1 and (
+                not info.get("allow_leaf_twist") or "ry" in info.get("frozen_start_channels_rad", {})
+            ):
+                angle = 0.0
+                if info.get("axis_role_source") == "geometry_start_pose":
+                    basis = np.asarray(info.get("pose_basis", np.eye(4)), dtype=float)
+                    angle = float(matrix_to_euler_xyz_numpy(basis[:3, :3])[1])
+                    frozen_start_channels["ry"] = angle
+                value = math.degrees(angle)
+                probe_safe_deg.append([value, value])
+                recommended_deg.append([value, value])
                 continue
             c_lo, c_hi = float(ceil_deg[ax_i][0]), float(ceil_deg[ax_i][1])
             safe_neg = -_measure_max_safe_angle_deg(b, ax_i, -1.0, abs(c_lo)) if c_lo < 0.0 else 0.0
@@ -3157,9 +3304,25 @@ def probe_rig_joint_limits(
                     # Slight conservative damping when rigid/flex decorations attach directly to this bone
                     rec_lo = round(0.88 * rec_lo, 1)
                     rec_hi = round(0.88 * rec_hi, 1)
-            recommended_deg.append([round(rec_lo, 1), round(rec_hi, 1)])
+            if ax_i == hinge_axis and hinge_info:
+                hinge = hinge_info["limits"]
+                rec_lo = max(safe_neg, math.degrees(hinge[0]))
+                rec_hi = min(safe_pos, math.degrees(hinge[1]))
+                if rec_hi < rec_lo:
+                    raise ValueError(f"{b}: geometric hinge and measured LBS envelope do not intersect")
+            recommended_deg.append(
+                [float(rec_lo), float(rec_hi)] if ax_i == hinge_axis
+                else [round(rec_lo, 1), round(rec_hi, 1)]
+            )
 
         limits_rad = [[round(math.radians(pair[0]), 4), round(math.radians(pair[1]), 4)] for pair in recommended_deg]
+        if hinge_info:
+            limits_rad[hinge_axis] = [
+                max(math.radians(recommended_deg[hinge_axis][0]), hinge_info["limits"][0]),
+                min(math.radians(recommended_deg[hinge_axis][1]), hinge_info["limits"][1]),
+            ]
+        for channel, value in frozen_start_channels.items():
+            limits_rad[("rx", "ry", "rz").index(channel)] = [value, value]
         decor_note = f"; attached decorations={decor_by_bone[b]}" if b in decor_by_bone else ""
         bones_profile[b] = {
             "kind": kind,
@@ -3169,6 +3332,12 @@ def probe_rig_joint_limits(
             "chain_index": c_idx,
             "parent": info.get("parent"),
             "is_leaf": is_leaf,
+            "allow_leaf_twist": bool(info.get("allow_leaf_twist",False))
+            or abs(frozen_start_channels.get("ry", 0.0)) > 1e-8,
+            "frozen_start_channels_rad": frozen_start_channels,
+            "hinge": info.get("hinge"),
+            "axis_roles": copy.deepcopy(info.get("axis_roles", {})),
+            "axis_role_source": info.get("axis_role_source"),
             "fixed_local": fixed_local,
             "axis_semantics": axis_semantics,
             "axis_probe": axis_semantics,

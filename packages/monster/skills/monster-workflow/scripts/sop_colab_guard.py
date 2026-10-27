@@ -37,6 +37,7 @@ from sop_gate import (  # noqa: E402
     load_ledger,
     now_taipei_iso,
     save_ledger,
+    assert_gate,
 )
 REPO_ROOT = MONSTER_ROOT.parents[1]
 INTEGRATION_DIR = MONSTER_ROOT / "integration"
@@ -227,6 +228,10 @@ def evaluate_safe_shutdown(
             )
 
     elif reason == "final_batch_approved":
+        try:
+            assert_gate(ledger, 'final_batch')
+        except RuntimeError as exc:
+            blockers.append(str(exc))
         fb_gate = ledger.get("gates", {}).get("final_batch", {})
         if fb_gate.get("user_decision") != "approved" or fb_gate.get("status") != "approved":
             blockers.append(

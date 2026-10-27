@@ -7,7 +7,7 @@ Designed for Pattern B (Local MCP Server / Blender Plugin / Codex CLI + Remote C
                          `use_postprocess=True`, 4 seeds), repairs air-bridging chords, and returns
                          4 `.glb` candidates + `candidates_contact_sheet.jpg` + `rigged_pruned.blend`
                          and `studio_rig_meta.json`.
-     - `train_monster_probe`: Renders 3,000 dual-ortho poses in headless `bpy==4.2.0`, trains the
+     - `train_monster_probe`: Renders 3,000 dual-ortho poses in headless `bpy==5.2.3`, trains the
                               frozen DINOv2 + Deconv Probe, and runs the 96-frame Studio Exam.
      - `generate_actions_batch`: Drives the 15-node ComfyUI MiniMax H3 FL2VA workflow (8-step Turbo,
                                  loop-locked), runs the DINOv2 Epipolar Consistency Gate, and returns
@@ -51,6 +51,7 @@ DRIVE_ROOT = Path(os.environ.get("MONSTER_DRIVE_ROOT", "/content/drive/MyDrive/M
 WORK_ROOT = Path(os.environ.get("MONSTER_WORK_ROOT", "/content/monster-studio"))
 SKINTOKENS_ROOT = Path(os.environ.get("SKINTOKENS_ROOT", "/content/skintokens-service"))
 SKINTOKENS_PY = SKINTOKENS_ROOT / "venv" / "bin" / "python"
+from blender_runtime import resolve_bpy_python
 COMFY_URL = os.environ.get("H3_COMFY_URL", "http://127.0.0.1:8193")
 REGISTRY_PATH = DRIVE_ROOT / "runtime" / "endpoint_registry.json"
 
@@ -288,7 +289,7 @@ def api_rig_candidates(monster_id: str, input_glb_file: str, run_auto_audit: boo
                     shutil.copy2(c, drive_cand_dir / c.name)
             GUARD.touch()
 
-            py_bpy = str(SKINTOKENS_PY) if SKINTOKENS_PY.exists() else sys.executable
+            py_bpy = resolve_bpy_python()
             blend_path = m_drive / "rigged_pruned.blend"
             meta_path = m_drive / "studio_rig_meta.json"
             if run_auto_audit:
@@ -376,7 +377,7 @@ def api_train_monster_probe(
             if custom_meta_json and custom_meta_json.strip():
                 meta_path.write_text(custom_meta_json, encoding="utf-8")
 
-            py_bpy = str(SKINTOKENS_PY) if SKINTOKENS_PY.exists() else sys.executable
+            py_bpy = resolve_bpy_python()
             here = Path(__file__).resolve().parent
             bpy_worker = here / "studio_bpy_worker.py"
             dino_worker = here / "dinov2_pose_trainer.py"
@@ -463,12 +464,15 @@ def api_train_monster_probe(
                 ],
                 check=True,
             )
+            training_report = json.loads(ckpt_path.with_suffix(".training.json").read_text())
             save_stage_state(
                 monster_id,
                 "stage3_dinov2",
                 {
                     "ckpt": str(ckpt_path),
                     "epochs": int(epochs),
+                    "training_config": training_report["training_config"],
+                    "best_validation_loss": training_report["best_validation_loss"],
                     "depth_visibility_enabled": features_enabled(),
                     "dense_surface_enabled": dense_surface_enabled(),
                     "feature_version": FEATURE_VERSION,

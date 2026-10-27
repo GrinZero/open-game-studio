@@ -165,7 +165,7 @@ def evaluate_g3_exam_by_gt_boundary(
     gt_3d_frames: list[dict[str, Any]] | None = None,
     gt_2d_frames: list[dict[str, Any]] | None = None,
     epipolar_diff_px: float = 6.5,
-    vertical_corr: float = 0.94,
+    vertical_corr: float | None = 0.94,
 ) -> dict[str, Any]:
     """Evaluates G3 exam predictions strictly according to the 3 SOP §5.2 ground-truth boundaries:
       - `3d_gt`: Has 3D bone ground truth (`gt_3d_frames`). Outputs `all_bones`, `primary_bones`, and `by_kind`.
@@ -174,7 +174,7 @@ def evaluate_g3_exam_by_gt_boundary(
     """
     panel_h = int(calibration.get("panel_height", 768))
     max_epipolar_px = epipolar_sync_threshold_px(panel_h)
-    sync_passed = (epipolar_diff_px < max_epipolar_px) and (vertical_corr > 0.82)
+    sync_passed = (epipolar_diff_px < max_epipolar_px) and (vertical_corr is None or vertical_corr > 0.82)
 
     # Measure bone length consistency & per-frame confidence across pred_frames
     frame_confidences: list[float] = []
@@ -201,7 +201,7 @@ def evaluate_g3_exam_by_gt_boundary(
                 f_len_errs.append(rel_err)
 
         frame_anomaly_scores.append({
-            "frame": int(f_item.get("frame", f_idx)),
+            "frame": float(f_item.get("frame", f_idx)),
             "mean_confidence": round(f_conf, 4),
             "bone_length_rel_err": round(float(np.mean(f_len_errs)) if f_len_errs else 0.0, 5),
         })
@@ -217,7 +217,7 @@ def evaluate_g3_exam_by_gt_boundary(
         "epipolar_sync": {
             "mean_epipolar_diff_px": round(float(epipolar_diff_px), 3),
             "threshold_px": max_epipolar_px,
-            "vertical_trajectory_corr": round(float(vertical_corr), 4),
+            "vertical_trajectory_corr": round(float(vertical_corr), 4) if vertical_corr is not None else None,
             "min_corr_threshold": 0.82,
             "sync_gate_passed": sync_passed,
         },
@@ -254,7 +254,8 @@ def evaluate_g3_exam_by_gt_boundary(
             "ground_truth_mode": "2d_only",
             "stratified_3d_metrics": None,
             "reprojection_2d_gt_metrics": {
-                "uv_reprojection_mae_px": round(float(np.mean(mae_list)) if mae_list else 0.0, 3),
+                "uv_reprojection_mae_px": round(float(np.mean(mae_list)), 3) if mae_list else None,
+                "measured_points": len(mae_list),
                 "note": "仅具 2D 标注，按 SOP §5.2.3 不编造 3D MPJPE / SO(3) 数值",
             },
         }
@@ -265,6 +266,32 @@ def evaluate_g3_exam_by_gt_boundary(
         "stratified_3d_metrics": None,
         "reprojection_2d_gt_metrics": None,
         "note": "无标注原视频考试，按 SOP §5.2.3 仅报告跨视图同步、置信度自一致性与骨长守恒，不编造 MPJPE / SO(3) 数值",
+    }
+
+
+def joint_limit_review(pred_data: dict[str, Any]) -> dict[str, Any]:
+    """Expose measured saturation separately from missing historical diagnostics."""
+    diagnostics = pred_data.get("taxonomy_diagnostics") or {}
+    warnings = diagnostics.get("at_limit")
+    if warnings is not None:
+        if not isinstance(warnings, list):
+            raise ValueError("at_limit diagnostics must be a list")
+        for warning in warnings:
+            if (
+                not isinstance(warning, dict)
+                or not isinstance(warning.get("bone"), str)
+                or not warning["bone"]
+                or isinstance(warning.get("share"), bool)
+                or not isinstance(warning.get("share"), (int, float))
+                or not np.isfinite(warning["share"])
+                or not 0.25 < warning["share"] <= 1
+            ):
+                raise ValueError("Invalid at_limit bone/frame share")
+    return {
+        "available": warnings is not None,
+        "near_limit_degrees": 2,
+        "warning_share_above": 0.25,
+        "warnings": warnings,
     }
 
 
@@ -282,6 +309,17 @@ def build_g3_review_html(
     sync = report["epipolar_sync"]
     cons = report["self_consistency"]
     calib = report["calibration"]
+    limits = report.get("joint_limit_diagnostics") or {}
+    if not limits.get("available"):
+        limit_status = "本轨迹未提供卡限诊断，无法判断。"
+    elif limits["warnings"]:
+        limit_status = "以下非铰链骨超过25%帧距关节极限不超过2°，请结合审查视频检查动作幅度与限制。"
+    else:
+        limit_status = "已测量：没有非铰链骨超过25%帧距关节极限不超过2°。"
+    limit_rows = "".join(
+        f"<tr><td><code>{html.escape(w['bone'])}</code></td><td>{w['share']:.1%}</td></tr>"
+        for w in limits.get("warnings") or []
+    )
 
     strat_html = ""
     if gt_mode == "3d_gt" and report.get("stratified_3d_metrics"):
@@ -306,10 +344,12 @@ def build_g3_review_html(
         """
     elif gt_mode == "2d_only":
         rep2d = report.get("reprojection_2d_gt_metrics") or {}
+        error_2d=rep2d.get('uv_reprojection_mae_px')
+        error_display='未测量（缺少可比较的投影点）' if error_2d is None else f'{error_2d:.2f} px'
         strat_html = f"""
         <section class="card">
           <h2>2D 标注考试指标 (<code>ground_truth_mode = 2d_only</code>)</h2>
-          <p>2D 重投影平均误差：<strong>{rep2d.get('uv_reprojection_mae_px', 0.0):.2f} px</strong></p>
+          <p>2D 重投影平均误差：<strong>{error_display}</strong></p>
           <p class="meta">按 SOP §5.2.3 边界规范：当前考试源仅具 2D 标注，3D MPJPE 与 SO(3) 显式留空 (<code>null</code>)。</p>
         </section>
         """
@@ -351,7 +391,7 @@ def build_g3_review_html(
       <div class="card">
         <div>跨视图竖直极线同步差</div>
         <div class="metric">{sync['mean_epipolar_diff_px']} px</div>
-        <div class="meta">阈值 &lt; {sync['threshold_px']} px · 竖直相关系数 {sync['vertical_trajectory_corr']} (&gt; 0.82)</div>
+        <div class="meta">阈值 &lt; {sync['threshold_px']} px · 竖直相关系数 {sync['vertical_trajectory_corr']}（v3 校准相机使用重投影一致性；无共享竖直轴时留空）</div>
       </div>
       <div class="card">
         <div>DINOv2 平均预测置信度</div>
@@ -373,6 +413,12 @@ def build_g3_review_html(
     </section>
 
     {strat_html}
+
+    <section class="card">
+      <h2>关节极限卡住诊断</h2>
+      <p>{limit_status}</p>
+      <table><thead><tr><th>骨骼</th><th>近极限帧占比</th></tr></thead><tbody>{limit_rows}</tbody></table>
+    </section>
 
     <section class="card">
       <h2>异常帧定位 (Top-5 最低置信度 / 残差帧)</h2>
@@ -450,6 +496,9 @@ def build_g3_exam_pack(
         "view_order": views,
     }
 
+    pred_data = {}
+    if rig_meta.get("reader_contract") == "monster-reader-v3" and (not pred_traj_json or not Path(pred_traj_json).is_file()):
+        raise ValueError("V3 G3 requires an actual inferred trajectory; ground truth and rest poses cannot stand in for prediction")
     gt_3d_frames = None
     if gt_3d_json and Path(gt_3d_json).is_file():
         gt_3d_data = json.loads(Path(gt_3d_json).read_text(encoding="utf-8"))
@@ -464,7 +513,7 @@ def build_g3_exam_pack(
         pred_data = json.loads(Path(pred_traj_json).read_text(encoding="utf-8"))
         pred_frames = pred_data.get("frames", [])
         epipolar_diff = float(pred_data.get("mean_epipolar_diff_px", 5.8))
-        vert_corr = float(pred_data.get("vertical_trajectory_corr", 0.95))
+        vert_corr = None if pred_data.get("reader_contract") == "monster-reader-v3" else float(pred_data.get("vertical_trajectory_corr", 0.95))
     elif gt_3d_frames:
         pred_frames = gt_3d_frames
         epipolar_diff = 4.5
@@ -489,14 +538,32 @@ def build_g3_exam_pack(
         epipolar_diff = 6.2
         vert_corr = 0.93
 
+    actual_readback = None
+    if pred_data.get('reader_contract') == 'monster-reader-v3':
+        if pred_data.get('gate_passed') is not True:
+            raise ValueError('V3 G3 requires an actual passed calibrated reading gate')
+        from sop_formal_gate import verify_trajectory_formal_gate
+        formal_report = verify_trajectory_formal_gate(pred_frames, rig_meta['bones'],
+            pred_data.get('joint_limits_profile'), trajectory_meta=pred_data, assert_passed=True)
+        from sop_preflight import _worker_command
+        _,selected_meta,selected_blend=resolve_g1_candidate_files(work_dir,g1_info)
+        if not exam_video or not Path(exam_video).is_file(): raise ValueError('V3 G3 requires its independent source video')
+        command=_worker_command(['--mode','render_v3_review','--blend_path',str(selected_blend),'--meta_path',str(selected_meta),
+            '--joints_json',str(pred_traj_json),'--video_path',str(exam_video),'--out_dir',str(g3_dir)])
+        if command is None: raise RuntimeError('Actual Blender is required for v3 G3 review')
+        subprocess.run(command,check=True)
+        actual_readback=json.loads((g3_dir/'glb_readback.json').read_text())
+        calib=pred_data['calibration']
     baked_glb = g3_dir / "stage4_exam_reconstructed.glb"
     if not baked_glb.is_file():
+        if actual_readback is not None:raise RuntimeError('V3 G3 readback did not produce its actual GLB')
         baked_glb.write_bytes(b"glTF\x02\x00\x00\x00")
 
     sync_frames_dir = g3_dir / "sync_frames"
     sync_frames_dir.mkdir(parents=True, exist_ok=True)
     frame_images = sorted(sync_frames_dir.glob("sync_frame_*.png"))
     if not frame_images:
+        if actual_readback is not None:raise RuntimeError('V3 G3 readback did not produce actual comparison frames')
         from PIL import Image, ImageDraw
 
         n_render = max(8, min(len(pred_frames), 24))
@@ -520,7 +587,10 @@ def build_g3_exam_pack(
             frame_images.append(f_path)
 
     comp_mp4 = g3_dir / "g3_comparison_sync.mp4"
-    _encode_sync_comparison_video(comp_mp4, frame_images, fps=24)
+    if actual_readback is None:
+        _encode_sync_comparison_video(comp_mp4, frame_images, fps=24)
+    elif not comp_mp4.is_file():
+        raise RuntimeError('V3 G3 readback did not produce its timed comparison video')
 
     report = evaluate_g3_exam_by_gt_boundary(
         pred_frames=pred_frames,
@@ -531,6 +601,11 @@ def build_g3_exam_pack(
         epipolar_diff_px=epipolar_diff,
         vertical_corr=vert_corr,
     )
+    report["joint_limit_diagnostics"] = joint_limit_review(pred_data)
+    if actual_readback is not None:
+        report['formal_gate'] = formal_report
+        report['glb_readback']=actual_readback
+        report['review_media']=['g3_comparison_sync.mp4','g3_three_quarter.mp4','g3_silhouette_overlay.mp4']
     report_path = g3_dir / "g3_exam_report.json"
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
@@ -542,6 +617,11 @@ def build_g3_exam_pack(
         baked_glb_path=str(baked_glb),
         out_html_path=html_path,
     )
+    if actual_readback is not None:
+        html_text=html_path.read_text()
+        media='<section><h2>实际 GLB 3/4 与轮廓叠加</h2>'+''.join(f'<video controls src="{name}"></video>' for name in ('g3_three_quarter.mp4','g3_silhouette_overlay.mp4'))+'</section>'
+        html_path.write_text(html_text.replace('</body>',media+'</body>'))
+
 
     ckpt = Path(checkpoint_path) if checkpoint_path else (drv / "monsters" / monster_id / "dinov2_head.pt")
     fp_updates: dict[str, Any] = {}
@@ -553,10 +633,15 @@ def build_g3_exam_pack(
         "G3",
         review_pack_path=str(html_path),
         materials={
+            "reader_contract": pred_data.get("reader_contract"),
             "ground_truth_mode": report["ground_truth_mode"],
             "exam_report_json": str(report_path),
+            "prediction_trajectory_json": str(Path(pred_traj_json).resolve()) if pred_traj_json else None,
+            "source_exam_video": str(Path(exam_video).resolve()) if exam_video else None,
             "comparison_video_mp4": str(comp_mp4),
             "baked_glb": str(baked_glb),
+            "three_quarter_video": str(g3_dir / "g3_three_quarter.mp4") if actual_readback is not None else None,
+            "silhouette_video": str(g3_dir / "g3_silhouette_overlay.mp4") if actual_readback is not None else None,
             "checkpoint_path": str(ckpt) if ckpt.is_file() else None,
         },
         fingerprints=fp_updates or None,

@@ -6,6 +6,8 @@ Monster 是 Open Game Studio monorepo 中的角色绑定、姿态训练与动作
 
 ## 目录与运行边界
 
+角色制作资料遵循 [角色独立工作目录规范 v1](skills/monster-workflow/references/character-workspace.md)：每个角色使用用户项目的 `scratch/work/<character_id>/`，通过 `character.json` 索引输入、绑定、摄影棚、数据集、训练及动作版本，审核与项目登记沿用现有权威位置。该规范已确定；自动路径适配和历史数据迁移是后续实施项，现有 SOP 继续使用规范中的兼容路径。
+
 | 目录           | 用途                                                    | 运行位置       |
 | -------------- | ------------------------------------------------------- | -------------- |
 | `worker/`      | SkinTokens 候选绑定、Blender、DINOv2、MiniMax H3 流水线 | Colab G4       |
@@ -59,6 +61,10 @@ npm run monster:call -- shutdown
 
 如需指定其他登记文件或输出目录，仍可显式传入 `--registry /absolute/path/endpoint_registry.json --output /absolute/path/results`。
 
+## DINOv2 主干微调
+
+默认采用部分微调：检测头热身 1 轮后，解冻 DINOv2-base 最后 8 层及输出 LayerNorm，主干学习率 `1e-4`。Notebook Cell 1 可切换 `TRAINING_MODE="frozen"` 做同配置冻结对照。按姿态固定留出 5% 验证集、保存验证最优 checkpoint，微调主干与检测头一起保存并加载；支持 `--init_checkpoint` 从兼容旧权重继续训练。原生分辨率保持，默认 micro-batch 2、累积 16 次、activation checkpointing。完整配置与 A/B 操作见 [运行说明](skills/monster-workflow/references/runtime.md#主干微调与冻结对照)。正式效果仍须独立 G3 考试确认。
+
 ## 检查与离线打包
 
 在仓库根目录运行（Node.js 24+、Python 3.11.8+）：
@@ -101,3 +107,16 @@ Monster 的项目代码、文档和技能采用 **[GNU AGPL v3 only](LICENSE)**�
 AGPL 允许商业使用、收费分发和收费服务。分发时须履行对应源码等义务；修改版通过网络供用户交互时，须按第 13 条向这些用户免费提供该版本的对应源码。这不意味着任何 SaaS、独立客户端或生成资产都自动适用 AGPL，也不要求把独立服务的全部源码公开。
 
 第三方代码、依赖和模型保留自己的许可。特别是 **MiniMax H3 使用带地域、商业门槛和可接受用途限制的社区许可**，不能因为 Monster 改为 AGPL 就视为已获所有商业部署授权。核心上游版本、证据及保留的许可文本见 [第三方声明](THIRD_PARTY.md)。部署归档附带这些说明与许可文本；它不包含模型权重或第三方仓库检出。
+
+
+## v3 Video2Rig integration
+
+New candidates use anatomical v3 names and retain fingers/toes. The v3 Reader adds calibrated orthographic/perspective cameras, 896→448 moving windows, temporal heatmaps, bone-local dense targets, 224-pixel hand/paw refinement and direct multi-view 2D reprojection fitting. Legacy v2 evaluation data and checkpoints keep their existing inference route. New rigs/labels require retraining and renewed G1/G2/G3 approval; no user character files are migrated automatically. See [runtime parameters and compatibility](skills/monster-workflow/references/video2rig-v3.md).
+
+Local CPU and Blender fixture checks validate the code paths, including real GLB export/readback. They do not establish accuracy or GPU throughput on a production character.
+
+
+Stage 2 默认 EEVEE 8 spp 动画条带渲染，最多 16 副本，按图像宽度自动拆批；v3 原图以 896px 渲染并按完整网格紧致框同步裁剪到 448px Reader 输入。配置及缓存兼容说明见 [EEVEE 动画条带渲染](skills/monster-workflow/references/video2rig-v3.md#eevee-动画条带渲染)。
+
+
+Blender 渲染环境已升级至 `bpy==5.2.3` / Python 3.13，直接依赖固定于 `worker/blender-requirements.txt`；Colab Cell 2 自动准备独立环境 `/content/monster-bpy/venv`，与 SkinTokens 的 Python 3.11（内部最新兼容 LTS bpy 4.5.15）分开。旧 `ready.json` 需通过版本核对，避免跳过升级。参考 [Blender 运行版本](contracts/blender-runtime.json)。

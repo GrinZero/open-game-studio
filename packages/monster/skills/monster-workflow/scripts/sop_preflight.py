@@ -247,11 +247,8 @@ def inspect_glb_binary_preflight(glb_path: Path) -> dict[str, Any]:
 
 def _find_bpy_python() -> str | None:
     """Finds a Python interpreter with `bpy` installed, or returns None if unavailable."""
-    candidates = [
-        os.environ.get("MONSTER_BPY_PYTHON"),
-        "/content/skintokens-service/venv/bin/python",
-        sys.executable,
-    ]
+    from blender_runtime import bpy_python_candidates
+    candidates = bpy_python_candidates()
     for cand in candidates:
         if not cand or not Path(cand).is_file():
             continue
@@ -282,6 +279,7 @@ def _worker_command(arguments: list[str]) -> list[str] | None:
             expression = (
                 "import sys,runpy; "
                 f"sys.path.insert(0, {str(WORKER_DIR)!r}); "
+                f"sys.path.extend({[p for p in sys.path if 'site-packages' in p]!r} if sys.version_info[:2]=={sys.version_info[:2]!r} else []); "
                 f"sys.argv={[str(worker), *arguments]!r}; "
                 f"runpy.run_path({str(worker)!r}, run_name='__main__')"
             )

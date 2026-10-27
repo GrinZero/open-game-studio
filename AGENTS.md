@@ -1,5 +1,9 @@
 # 项目协作要求
 
+## 角色制作目录
+
+- 新建角色、接续制作或整理角色数据时，先读 [角色独立工作目录规范 v1](packages/monster/skills/monster-workflow/references/character-workspace.md)，核对角色根、固定版本与现有脚本兼容路径；目录契约与实际路径迁移分别验收。
+
 ## 工作台版本标识
 
 - 每次插件更新（功能、修复、界面、技能、配置或文档）都执行 `npm run build`，刷新顶部版本标识，再同步到运行目录。

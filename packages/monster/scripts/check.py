@@ -1,4 +1,4 @@
-"""CPU-only migration checks; never import torch/bpy or connect to a GPU runtime."""
+"""CPU-only migration checks, plus optional PyTorch CPU tests; never connect to a GPU runtime."""
 import ast
 import json
 import subprocess
@@ -13,7 +13,8 @@ for directory in ("worker", "scripts", "integration", "tests", "evals", "skills"
     for file in (ROOT / directory).rglob("*.py"):
         if "__pycache__" not in file.parts:
             compile(file.read_text(), str(file), "exec")
-subprocess.run(["bash", "-n", str(ROOT / "scripts/bootstrap-skintokens.sh")], check=True)
+for bootstrap in ("bootstrap-skintokens.sh", "bootstrap-blender.sh"):
+    subprocess.run(["bash", "-n", str(ROOT / "scripts" / bootstrap)], check=True)
 notebook = json.loads((ROOT / "notebooks/colab.ipynb").read_text())
 assert notebook["nbformat"] == 4
 for cell in notebook["cells"]:

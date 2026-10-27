@@ -11,7 +11,7 @@ export UV_CACHE_DIR="${MONSTER_UV_CACHE_DIR:-$ROOT/cache_local/uv}"
 if [ "${MONSTER_UV_CACHE_SESSION:-0}" != 1 ]; then
   command -v uv >/dev/null || python -m pip install 'uv==0.9.5'
   UV_VERSION="$(uv --version | awk '{print $2}')"
-  CACHE_KEY="linux-x86_64-py311-torch291-cu130-sm120-uv${UV_VERSION}-${UPSTREAM}-${FLASH}"
+  CACHE_KEY="linux-x86_64-py311-torch291-cu130-sm120-bpy4515-uv${UV_VERSION}-${UPSTREAM}-${FLASH}"
   exec python "$SCRIPT_DIR/uv_cache_session.py" run \
     --cache-dir "$UV_CACHE_DIR" --drive-root "$CACHE/uv_snapshots" --key "$CACHE_KEY" \
     -- bash "$0" "$@"
@@ -54,7 +54,7 @@ fi
 uv pip install --python "$PY" "$TORCH_REQUIREMENT" torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu130
 uv pip install --python "$PY" -r upstream/requirements.txt \
   transformers==4.57.6 diffusers==0.35.2 gradio==5.49.1 \
-  numpy==1.26.4 scipy==1.15.3 bpy==4.2.0 lightning==2.5.5 ninja packaging psutil wheel setuptools
+  numpy==1.26.4 scipy==1.15.3 scikit-image==0.24.0 threadpoolctl==3.6.0 opencv-python-headless==4.11.0.86 bpy==4.5.15 lightning==2.5.5 ninja packaging psutil wheel setuptools
 if [ ! -f flash-ready ]; then
   WHEEL_DIR="$CACHE/wheels/py311-torch291-cu130-$FLASH"
   mkdir -p "$WHEEL_DIR"
@@ -89,7 +89,7 @@ s = p.read_text()
 s = s.replace("host='0.0.0.0'", "host='127.0.0.1'")
 p.write_text(s)
 # Upstream clears indices 0..989 even on smaller parts (e.g. hair).
-# bpy 4.2 can segfault on out-of-range vertex indices.
+# Keep the parser index guard across bpy versions.
 p = Path('upstream/src/rig_package/parser/bpy.py')
 s = p.read_text()
 old = 'ob.vertex_groups[name].remove(range(990))'
@@ -108,14 +108,14 @@ fi
 cd "$ROOT"
 uv pip freeze --python "$PY" > installed-packages.txt
 "$PY" - <<'PY'
-import json, torch, platform, subprocess, sys
+import json, torch, platform, subprocess, sys, bpy
 from pathlib import Path
 sys.path.insert(0, str(Path('upstream').resolve()))
 import demo
 Path('ready.json').write_text(json.dumps({
     'gpu': torch.cuda.get_device_name(), 'capability': torch.cuda.get_device_capability(),
     'vram_gib': torch.cuda.get_device_properties(0).total_memory / 2**30,
-    'python': platform.python_version(), 'torch': torch.__version__,
+    'python': platform.python_version(), 'torch': torch.__version__, 'bpy': bpy.app.version_string.split()[0],
     'upstream': subprocess.check_output(['git', '-C', 'upstream', 'rev-parse', 'HEAD'], text=True).strip(),
 }, indent=2))
 print(Path('ready.json').read_text())

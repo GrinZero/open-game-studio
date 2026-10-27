@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""studio_bpy_worker.py — Headless Blender 4.2 (bpy) Worker for Colab G4 & Local Monster Studio.
+"""studio_bpy_worker.py — Headless Blender 5.2 (bpy) Worker for Colab G4 & Local Monster Studio.
 
 Bridges VAST-AI SkinTokens output (.glb) with:
   0. [Pre-Stage 1] `sanitize_input_mesh_for_skintokens` (`--mode sanitize_input`):
@@ -28,16 +28,30 @@ import json
 import math
 import os
 import random
+import sys
+from pathlib import Path
+_dependency_dir=os.environ.get('MONSTER_BLENDER_DEPS')
+if _dependency_dir:
+    sys.path.append(_dependency_dir)
+else:
+    _local_deps=Path(__file__).resolve().parents[1]/'.venv'/'lib'/f'python{sys.version_info.major}.{sys.version_info.minor}'/'site-packages'
+    if _local_deps.is_dir(): sys.path.append(str(_local_deps))
 from pose_features import (
     bone_motion_blur_speed_factor,
     compute_mesh_edge_stretch_metric,
     dejitter_velocity_gated,
+    export_npz_labels_enabled,
     features_enabled,
+    fold_digits_enabled,
+    keypoint_mode,
     dense_surface_enabled,
     dense_grid_shape,
     lbs_deform_vertices_numpy,
     mocap_priors_enabled,
+    pipeline_feature_flags,
     rasterize_ortho_dense_rest_map_numpy,
+    rig_contract_v3_enabled,
+    visibility_mode,
     DATASET_SCHEMA,
     dataset_signature,
     studio_resolution,
@@ -95,8 +109,8 @@ except ImportError:
 def require_bpy() -> None:
     if not HAS_BPY:
         raise RuntimeError(
-            "studio_bpy_worker.py requires `bpy==4.2.0` for 3D scene operations "
-            "(e.g. `/content/skintokens-service/venv/bin/python` on Colab G4 or local Blender Python)."
+            "studio_bpy_worker.py requires `bpy==5.2.3` for 3D scene operations "
+            "(e.g. `/content/monster-bpy/venv/bin/python` on Colab G4 or local Blender Python)."
         )
 
 
@@ -122,13 +136,18 @@ def sanitize_input_mesh_for_skintokens(
     if not mesh_objs:
         raise ValueError(f"No MESH objects found in {input_glb_path}")
 
+    # glTF placement/axis/unit transforms commonly live on parent empties.
+    # Detaching and deleting those nodes must not discard the visible world mesh.
+    mesh_worlds = {obj: obj.matrix_world.copy() for obj in mesh_objs}
+    for obj in mesh_objs:
+        obj.parent = None
     for obj in list(bpy.data.objects):
         if obj.type != "MESH":
             bpy.data.objects.remove(obj, do_unlink=True)
 
     bpy.ops.object.select_all(action="DESELECT")
     for m in mesh_objs:
-        m.parent = None
+        m.matrix_world = mesh_worlds[m]
         m.select_set(True)
     bpy.context.view_layer.objects.active = mesh_objs[0]
     if len(mesh_objs) > 1:
@@ -136,7 +155,14 @@ def sanitize_input_mesh_for_skintokens(
     mesh_obj = bpy.context.view_layer.objects.active
 
     bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+    if abs(yaw_deg)<1e-3 and os.environ.get('MONSTER_AUTO_FACING','1')=='1':
+        from skeleton_postprocess import find_facing
+        mesh_obj.data.calc_loop_triangles()
+        orientation=find_facing(np.array([list(v.co) for v in mesh_obj.data.vertices]),
+            triangles=np.array([list(t.vertices) for t in mesh_obj.data.loop_triangles]))
+        yaw_deg=orientation['yaw_to_minus_y_deg']
     if abs(yaw_deg) > 1e-3:
+        mesh_obj.rotation_mode = "XYZ"
         mesh_obj.rotation_euler = Euler((0.0, 0.0, math.radians(yaw_deg)), "XYZ")
         bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
 
@@ -190,9 +216,12 @@ def ensure_mesh_has_visible_material(mesh_obj: Any) -> None:
     mesh_obj.data.materials.append(mat)
 
 
-def load_glb_and_find_rig(glb_path: str) -> tuple[Any, Any]:
+def load_glb_and_find_rig(glb_path: str, fps: float | None = None) -> tuple[Any, Any]:
     """Imports a .glb file, removes `glTF_not_exported` empties, and returns (mesh_obj, armature_obj)."""
     clear_scene()
+    if fps is not None:
+        from video_timing import set_scene_fps
+        set_scene_fps(bpy.context.scene,fps)
     bpy.ops.import_scene.gltf(filepath=str(glb_path))
     mesh_objs = [o for o in bpy.data.objects if o.type == "MESH"]
     arm_objs = [o for o in bpy.data.objects if o.type == "ARMATURE"]
@@ -426,7 +455,7 @@ def classify_anonymous_bones_and_assign_limits(
     width = float(max(1e-4, extent[0]))
 
     if prune_digits is None:
-        prune_digits = os.environ.get("MONSTER_PRUNE_DIGITS", "1").strip().lower() in ("1", "true", "on")
+        prune_digits = os.environ.get("MONSTER_PRUNE_DIGITS", "0").strip().lower() in ("1", "true", "on")
     if canonicalize_names is None:
         canonicalize_names = os.environ.get("MONSTER_CANONICALIZE_BONE_NAMES", "1").strip().lower() in ("1", "true", "on")
 
@@ -496,7 +525,9 @@ def classify_anonymous_bones_and_assign_limits(
             "rest_head_world": [round(float(h_w.x), 5), round(float(h_w.y), 5), round(float(h_w.z), 5)],
             "rest_tail_world": [round(float(t_w.x), 5), round(float(t_w.y), 5), round(float(t_w.z), 5)],
             "rest_length": round(float(vec.length), 5),
-            "rest_rot_mat_world": [[round(float(v), 5) for v in row] for row in (mw_arm @ bone.matrix_local).to_3x3()],
+            "rest_rot_mat_world": [[float(v) for v in row] for row in (mw_arm @ bone.matrix_local).to_3x3()],
+            "matrix_local": [[float(v) for v in row] for row in bone.matrix_local],
+            "pose_basis": [[float(v) for v in row] for row in arm_obj.pose.bones[bone.name].matrix_basis],
             "limits_rad": [[round(lo, 4), round(hi, 4)] for (lo, hi) in limits],
             "limits_source": "stage1_heuristic",
             "chain_corr": chain_corr,
@@ -591,14 +622,18 @@ def render_candidates_contact_sheet(reports: list[dict[str, Any]], out_jpg_path:
 # ==============================================================================
 
 def configure_blender_gpu_rendering(scene: Any, samples: int | None = None) -> dict[str, Any]:
-    """Configures hardware-accelerated Cycles GPU rendering (`OPTIX` / `CUDA` / `METAL` / `HIP` / `ONEAPI`)
-    with GPU OpenImageDenoise (`denoising_use_gpu=True`), adaptive sampling, and persistent scene data
-    so GPU VRAM retains geometry/BVH across frames and camera switches without falling back to CPU.
+    """Default to EEVEE 8 spp; opt-in Cycles retains GPU OIDN and persistent data.
+
+    Resolve both legacy EEVEE and EEVEE Next identifiers. Never silently use
+    Workbench for production images; report the actual backend in calibration.
     """
     require_bpy()
     if samples is None:
         samples = int(os.environ.get("MONSTER_CYCLES_SAMPLES", "16"))
-    preferred_engine = os.environ.get("MONSTER_RENDER_ENGINE", "CYCLES").strip().upper()
+    preferred_engine = os.environ.get("MONSTER_RENDER_ENGINE", "EEVEE").strip().upper()
+    eevee_samples = max(1, int(os.environ.get("MONSTER_EEVEE_SAMPLES", "8")))
+    if preferred_engine not in ("CYCLES", "AUTO", "EEVEE", "BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"):
+        raise ValueError(f"Unsupported MONSTER_RENDER_ENGINE: {preferred_engine}")
     active_backend: str | None = None
     gpu_enabled = False
 
@@ -644,13 +679,18 @@ def configure_blender_gpu_rendering(scene: Any, samples: int | None = None) -> d
         except Exception:
             pass
 
-    if scene.render.engine != "CYCLES" or (not gpu_enabled and preferred_engine == "EEVEE"):
-        for eng in ("BLENDER_EEVEE_NEXT", "BLENDER_EEVEE", "BLENDER_WORKBENCH"):
+    if preferred_engine not in ("CYCLES", "AUTO") or scene.render.engine != "CYCLES" or not gpu_enabled:
+        for eng in ("BLENDER_EEVEE_NEXT", "BLENDER_EEVEE"):
             try:
                 scene.render.engine = eng
                 break
             except TypeError:
                 continue
+        else:
+            raise RuntimeError("No supported GPU render engine available")
+        scene.eevee.taa_render_samples = eevee_samples
+        active_backend = "EEVEE"
+        gpu_enabled = True
 
     for vt in ("AgX", "Filmic", "Standard"):
         try:
@@ -663,9 +703,11 @@ def configure_blender_gpu_rendering(scene: Any, samples: int | None = None) -> d
 
     return {
         "engine": str(scene.render.engine),
+        "requested_engine": preferred_engine,
+        "blender_version": bpy.app.version_string,
         "device": str(getattr(scene.cycles, "device", "CPU")) if scene.render.engine == "CYCLES" else "GPU",
         "backend": active_backend,
-        "samples": int(getattr(scene.cycles, "samples", samples)) if scene.render.engine == "CYCLES" else 0,
+        "samples": int(getattr(scene.cycles, "samples", samples)) if scene.render.engine == "CYCLES" else eevee_samples,
         "denoiser": str(getattr(scene.cycles, "denoiser", "")) if scene.render.engine == "CYCLES" else None,
         "denoising_use_gpu": bool(getattr(scene.cycles, "denoising_use_gpu", False))
         if scene.render.engine == "CYCLES"
@@ -681,7 +723,7 @@ def setup_dual_orthographic_studio(
     panel_h: int | None = None,
     enable_3view: bool | None = None,
 ) -> dict[str, Any]:
-    """Configures GPU-accelerated renderer (Cycles OptiX/CUDA/Metal + GPU OpenImageDenoise),
+    """Configures GPU-accelerated renderer (EEVEE by default, optional Cycles GPU OIDN),
     aimed studio lighting, and strictly calibrated orthographic cameras (`Cam_Front` looking +Y,
     `Cam_Side` looking -X, and optional `Cam_Right` looking +X when 3-view mode is enabled)
     with `sensor_fit="VERTICAL"`.
@@ -724,6 +766,9 @@ def setup_dual_orthographic_studio(
         ("FillLight", (-3.0, 2.5, 3.0), 550.0),
         ("RimLight", (0.0, 3.5, 4.5), 700.0),
     ]:
+        old_light = bpy.data.objects.get(l_name)
+        if old_light is not None:
+            bpy.data.objects.remove(old_light, do_unlink=True)
         ldata = bpy.data.lights.new(name=l_name, type="AREA")
         ldata.energy = energy
         ldata.size = 3.0
@@ -734,7 +779,9 @@ def setup_dual_orthographic_studio(
 
     def make_ortho_cam(name: str, loc: tuple[float, float, float], rot: tuple[float, float, float]) -> Any:
         cdata = bpy.data.cameras.new(name=name)
-        cdata.type = "ORTHO"
+        lens = float(os.environ.get("MONSTER_CAMERA_LENS", "0"))
+        cdata.type = "PERSP" if lens > 0 else "ORTHO"
+        if lens > 0: cdata.lens = lens
         cdata.sensor_fit = "VERTICAL"
         cdata.ortho_scale = ortho_scale
         cdata.clip_start = 0.05
@@ -764,7 +811,17 @@ def setup_dual_orthographic_studio(
         if use_3view
         else None
     )
+    if os.environ.get('MONSTER_STUDIO_LAYOUT') == 'stacked':
+        if cam_right is not None: raise ValueError('stacked layout requires two cameras')
+        cam_front.location = (float(center[0]+dist), float(center[1]), float(center[2]))
+        cam_front.rotation_euler = (math.pi/2, 0, math.pi/2)
+        cam_side.location = (float(center[0]), float(center[1]), float(center[2]+dist))
+        cam_side.rotation_euler = (0, 0, math.pi/2)
+        view_order = ['side','top']
     bpy.context.view_layer.update()
+    from studio_camera import Camera
+    named_cameras = dict(zip(view_order, [cam_side,cam_front,cam_right] if cam_right is not None else [cam_front,cam_side]))
+    camera_payload = {name: Camera.from_blender(obj,panel_w,panel_h).as_dict() for name,obj in named_cameras.items()}
 
     return {
         "cam_front": cam_front,
@@ -776,11 +833,13 @@ def setup_dual_orthographic_studio(
             "ortho_scale": round(ortho_scale, 5),
             "panel_width": panel_w,
             "panel_height": panel_h,
-            "composite_width": panel_w * num_views,
-            "composite_height": panel_h,
+            "composite_width": panel_w if os.environ.get('MONSTER_STUDIO_LAYOUT')=='stacked' else panel_w*num_views,
+            "composite_height": panel_h*num_views if os.environ.get('MONSTER_STUDIO_LAYOUT')=='stacked' else panel_h,
             "num_views": num_views,
             "view_order": view_order,
             "render_config": render_config,
+            "cameras": camera_payload,
+            "layout": os.environ.get('MONSTER_STUDIO_LAYOUT','horizontal'),
         },
     }
 
@@ -794,6 +853,11 @@ def project_3d_to_dual_ortho_pixels(
     else:
         px, py, pz = float(pt_world[0]), float(pt_world[1]), float(pt_world[2])
 
+    if calib.get('cameras'):
+        from studio_camera import cameras_from_calibration
+        cams=cameras_from_calibration(calib); views=calib['view_order']
+        front=cams.get('front',cams[views[0]]); side=cams.get('side',cams[views[1]])
+        return front.project([px,py,pz]).tolist(),side.project([px,py,pz]).tolist()
     cx, cy, cz = calib["center"]
     S = float(calib["ortho_scale"])
     W = float(calib["panel_width"])
@@ -817,6 +881,10 @@ def project_3d_to_right_ortho_pixels(pt_world: Any, calib: dict[str, Any]) -> li
     else:
         _, py, pz = float(pt_world[0]), float(pt_world[1]), float(pt_world[2])
 
+    if calib.get('cameras'):
+        from studio_camera import cameras_from_calibration
+        point=[float(x) for x in pt_world]
+        return cameras_from_calibration(calib)['right'].project(point).tolist()
     _, cy, cz = calib["center"]
     S = float(calib["ortho_scale"])
     W = float(calib["panel_width"])
@@ -915,9 +983,9 @@ def render_split_screen_frame(
             comp.save(out_png_path)
             return
 
-        comp = Image.new("RGB", (im_f.width + im_s.width, im_f.height))
-        comp.paste(im_f, (0, 0))
-        comp.paste(im_s, (im_f.width, 0))
+        stacked=os.environ.get('MONSTER_STUDIO_LAYOUT')=='stacked'
+        comp = Image.new('RGB',(im_f.width,im_f.height*2) if stacked else (im_f.width+im_s.width,im_f.height))
+        comp.paste(im_f,(0,0)); comp.paste(im_s,(0,im_f.height) if stacked else (im_f.width,0))
         comp.save(out_png_path)
     except ImportError:
         def _load_rgba_array(img_path: Path) -> tuple[np.ndarray, int, int]:
@@ -939,8 +1007,10 @@ def render_split_screen_frame(
             merged = np.concatenate([arr_s, arr_f, arr_r], axis=1)
             total_w = ws + wf + wr
         else:
-            merged = np.concatenate([arr_f, arr_s], axis=1)
-            total_w = wf + ws
+            stacked=os.environ.get('MONSTER_STUDIO_LAYOUT')=='stacked'
+            merged = np.concatenate([arr_f, arr_s], axis=0 if stacked else 1)
+            total_w = wf if stacked else wf+ws
+            if stacked: hf*=2
         out_img = bpy.data.images.new("Studio_Split_Frame", width=total_w, height=hf, alpha=True)
         out_img.pixels.foreach_set(merged.ravel())
         out_img.filepath_raw = str(out_png_path)
@@ -953,6 +1023,47 @@ def render_split_screen_frame(
 # 3. Stage 2 (5,000 Stratified Poses + 50% Motion Blur + Coverage Audit) & Stage 4 (96-Frame Exam)
 # ==============================================================================
 
+def keyframe_pose_shutter(arm_obj, bones_meta, pose, rng, *, reader_v3=False, events=None, report=None):
+    """Center labels stay exact; only fitted joints receive shutter motion."""
+    events, report = events or {}, report or {}
+    use_speed_prior = mocap_priors_enabled()
+    fitted = set(report.get('fitted_bones', ()))
+    roots = set(report.get('motion_roots', ()))
+    for name, rot in pose.items():
+        pb = arm_obj.pose.bones[name]
+        info = bones_meta[name]
+        limits = effective_sampling_limits_for_bone(info, enforce_anatomical_floor=True)
+        speed = (
+            0.55 * bone_motion_blur_speed_factor(
+                str(info.get('kind', 'limb')), str(info.get('sub_role', '')),
+                int(info.get('chain_index', 0)),
+            ) if use_speed_prior else 1.0
+        )
+        if reader_v3 and info.get('kind') in ('limb', 'wing') and events.get('strike'):
+            speed *= 2.5
+        if reader_v3 and name in roots and not name.startswith('Prop_'):
+            limits = [[-math.pi, math.pi]] * 3
+            if events.get('lunge'):
+                speed *= 2.5
+        delta = [rng.uniform(-0.5, 0.5) * speed for _ in range(3)]
+        fixed = bool(info.get('fixed_local') or info.get('kind') == 'rigid')
+        frozen = fixed or (reader_v3 and name not in fitted)
+        if not pb.children and not info.get('allow_leaf_twist', False):
+            delta[1] = 0.0
+        if fixed:
+            delta = [0.0, 0.0, 0.0]
+        for frame, sign in ((0, -1), (1, 0), (2, 1)):
+            # A frozen saved basis is not a zero-angle joint. Neither random
+            # shutter offsets nor limit clipping may alter it, including p0.
+            angles = rot if reader_v3 and (frozen or sign == 0) else [
+                float(np.clip(rot[i] + sign * delta[i], limits[i][0], limits[i][1]))
+                for i in range(3)
+            ]
+            pb.rotation_euler = Euler(angles, 'XYZ')
+            pb.keyframe_insert(data_path='rotation_euler', frame=frame)
+    bpy.context.scene.frame_set(1)
+
+
 def sample_in_limit_pose(
     arm_obj: Any,
     bones_meta: dict[str, Any],
@@ -962,6 +1073,10 @@ def sample_in_limit_pose(
     rig_height: float = 1.0,
     joint_limits_profile: dict[str, Any] | None = None,
     boundary_exploration: bool = False,
+    sampling_skin=None,
+    sampling_cameras=None,
+    sampling_events=None,
+    sampling_report=None,
 ) -> dict[str, list[float]]:
     """Samples a biomechanically valid pose using either the 4-Regime Stratified Decoupled Sampler
     or the 5-Regime Stratified Boundary-Exploration Sampler and applies it to `arm_obj.pose.bones`.
@@ -974,18 +1089,62 @@ def sample_in_limit_pose(
         joint_limits_profile=joint_limits_profile,
         boundary_exploration=boundary_exploration,
     )
+    v3 = any(b.get('anatomical_role') for b in bones_meta.values()) and all('.' in n or n in ('Root','Hips','Head','Jaw') or n.startswith(('Spine','Neck','Tail','Flex','Ear','Limb','Rigid','Prop_')) for n in bones_meta)
+    v3_translation=None; prop_translations={}
+    v3_report={} if sampling_report is None else sampling_report
+    if v3:
+        from reprojection_solver import sample_v3_pose, RigModel
+        root_offsets = None
+        if boundary_exploration:
+            fitted = RigModel(bones_meta, skin=sampling_skin)
+            root_offsets = {n: sample_root_translation_offset(
+                bones_meta, rng, sample_idx=sample_idx,
+                joint_limits_profile=joint_limits_profile, boundary_exploration=True,
+            ) for n in fitted.order if n in fitted.motion_roots}
+        sampled_raw,v3_translation,prop_translations=sample_v3_pose(bones_meta,sampled_raw,rng,
+            skin=sampling_skin,cameras=sampling_cameras,
+            events={} if boundary_exploration else sampling_events,diagnostics=v3_report,
+            root_offsets=root_offsets)
+        v3_report['sampling_purpose'] = 'boundary_exploration' if boundary_exploration else 'training'
+        # The solver already resolved frozen ancestor bases and promoted world
+        # roots. Apply its complete local pose without resetting those offsets.
+        for b_name, raw in sampled_raw.items():
+            pb = arm_obj.pose.bones.get(b_name)
+            if pb is not None:
+                pb.rotation_mode = 'XYZ'
+                pb.rotation_euler = Euler(raw, 'XYZ')
+                pb.location = v3_report['local_translations'].get(b_name, (0., 0., 0.))
+        bpy.context.view_layer.update()
+        return sampled_raw
+    for b_name,raw in sampled_raw.items():
+        pb=arm_obj.pose.bones.get(b_name)
+        if pb is not None:
+            pb.rotation_mode='XYZ'
+            pb.rotation_euler=Euler(raw,'XYZ')
+            pb.location=(0.,0.,0.)
+    bpy.context.view_layer.update()
     sampled_eulers: dict[str, list[float]] = {}
     for b_name, raw in sampled_raw.items():
         pbone = arm_obj.pose.bones.get(b_name)
         if not pbone:
             continue
         rot = list(raw)
-        if not pbone.children and not bool(bones_meta.get(b_name, {}).get("allow_leaf_twist", False)):
+        if not pbone.children and pbone.parent is not None and not b_name.startswith('Prop_') and not bool(bones_meta.get(b_name, {}).get("allow_leaf_twist", False)):
             rot[1] = 0.0
         pbone.rotation_mode = "XYZ"
         pbone.rotation_euler = Euler(rot, "XYZ")
-        if pbone.parent is None:
-            if sample_root_location:
+        motion_roots=set(v3_report.get('motion_roots',()))
+        if pbone.parent is None or b_name in motion_roots:
+            if v3_translation is not None:
+                xyz=prop_translations.get(b_name,v3_translation) if b_name in motion_roots else (0.,0.,0.)
+                if pbone.parent is not None:
+                    parent=pbone.parent
+                    basis=(arm_obj.matrix_world @ parent.matrix @ parent.bone.matrix_local.inverted() @ pbone.bone.matrix_local).to_3x3()
+                    pbone.location=basis.inverted() @ Vector(xyz)
+                else:
+                    delta_arm=arm_obj.matrix_world.to_3x3().inverted() @ Vector(xyz)
+                    pbone.location=pbone.bone.matrix_local.to_3x3().inverted() @ delta_arm
+            elif sample_root_location:
                 dx, dy, dz = sample_root_translation_offset(
                     bones_meta=bones_meta,
                     rng=rng,
@@ -1002,7 +1161,7 @@ def sample_in_limit_pose(
     return sampled_eulers
 
 
-def extract_rig_lbs_skinning_and_verify_gate(
+def _extract_rig_lbs_skinning_in_rest(
     mesh_obj: Any,
     arm_obj: Any,
     bone_names: list[str],
@@ -1019,6 +1178,14 @@ def extract_rig_lbs_skinning_and_verify_gate(
         if getattr(mod, "type", None) == "ARMATURE" and hasattr(mod, "use_deform_preserve_volume"):
             mod.use_deform_preserve_volume = False
 
+    start_basis={pb.name:np.array(pb.matrix_basis).tolist() for pb in arm_obj.pose.bones}
+    start_matrices=np.array([np.array(arm_obj.matrix_world@arm_obj.pose.bones[n].matrix) for n in bone_names])
+    evaluated=mesh_obj.evaluated_get(bpy.context.evaluated_depsgraph_get())
+    evaluated_mesh=evaluated.to_mesh()
+    try:
+        posed_source=np.array([list(evaluated.matrix_world@v.co) for v in evaluated_mesh.vertices])
+    finally:
+        evaluated.to_mesh_clear()
     for pbone in arm_obj.pose.bones:
         pbone.rotation_mode = "XYZ"
         pbone.rotation_euler = (0.0, 0.0, 0.0)
@@ -1080,6 +1247,14 @@ def extract_rig_lbs_skinning_and_verify_gate(
             skin_indices[v_idx, k_i] = int(b_idx)
             skin_weights[v_idx, k_i] = float(w_val / w_sum)
 
+    if posed_source is not None:
+        if len(posed_source)!=len(rest_verts): raise ValueError('Inverse LBS requires unchanged vertex topology')
+        from skeleton_postprocess import rest_coords
+        matrices=np.repeat(np.eye(4)[None],len(bone_names),axis=0); matrices[:,:3,:3]=rest_R; matrices[:,:3,3]=rest_heads
+        recovered=rest_coords(posed_source,skin_indices,skin_weights,matrices,start_matrices)
+        if np.max(np.linalg.norm(recovered-rest_verts,axis=-1))>1e-3:
+            raise ValueError('Posed source is inconsistent with exported linear skinning; preserve source for repair')
+        rest_verts=recovered.astype(np.float32)
     lbs_rest = lbs_deform_vertices_numpy(
         rest_verts, skin_indices, skin_weights, rest_heads, rest_R, rest_heads, rest_R
     )
@@ -1093,6 +1268,10 @@ def extract_rig_lbs_skinning_and_verify_gate(
         }
     return {
         "bone_names": list(bone_names),
+        "pose_basis": start_basis,
+        "start_verts": posed_source.astype(np.float32),
+        "start_matrices_world": start_matrices,
+        "rest_coords": rest_verts,
         "rest_verts": rest_verts,
         "skin_indices": skin_indices,
         "skin_weights": skin_weights,
@@ -1100,6 +1279,23 @@ def extract_rig_lbs_skinning_and_verify_gate(
         "rest_heads": rest_heads.astype(np.float32),
         "rest_R": rest_R.astype(np.float32),
     }
+
+
+def extract_rig_lbs_skinning_and_verify_gate(mesh_obj, arm_obj, bone_names, calib=None):
+    """Read bind/start geometry without leaving the caller in a different pose.
+
+    All meshes in a split character must be evaluated at the same saved p0. Each
+    extraction restores matrix_basis and rotation modes even if validation fails.
+    """
+    pose={pb.name:(pb.rotation_mode,pb.matrix_basis.copy()) for pb in arm_obj.pose.bones}
+    try:
+        return _extract_rig_lbs_skinning_in_rest(mesh_obj,arm_obj,bone_names,calib)
+    finally:
+        for pb in arm_obj.pose.bones:
+            mode,basis=pose[pb.name]
+            pb.rotation_mode=mode
+            pb.matrix_basis=basis
+        bpy.context.view_layer.update()
 
 
 def _resolve_joint_limits_profile(
@@ -1142,7 +1338,7 @@ def extract_complete_rig_skinning(mesh_objs: list[Any], arm_obj: Any, bone_names
         part["triangles"] + sum(len(p["rest_verts"]) for p in extracted[:i])
         for i, part in enumerate(extracted)
     ], axis=0)
-    for key in ("rest_verts", "skin_indices", "skin_weights"):
+    for key in ("rest_verts", "rest_coords", "start_verts", "skin_indices", "skin_weights"):
         merged[key] = np.concatenate([part[key] for part in extracted], axis=0)
     merged["measured_mesh_names"] = [o.name for o in parts]
     return merged
@@ -1220,6 +1416,9 @@ def generate_stage2_synthetic_dataset(
         studio["calibration"],
     )
     meta["calibration"] = calib
+    from studio_camera import export_cameras
+    camera_names=dict(zip(calib['view_order'],[cam_s,cam_f,cam_r] if cam_r is not None else [cam_f,cam_s]))
+    export_cameras(Path(meta_path).parent/'cameras.json',camera_names,calib['panel_width'],calib['panel_height'])
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
 
@@ -1227,9 +1426,17 @@ def generate_stage2_synthetic_dataset(
     img_dir = out_path / "images"
     img_dir.mkdir(parents=True, exist_ok=True)
 
-    for pbone in arm_obj.pose.bones:
-        pbone.rotation_mode = "XYZ"
-        pbone.rotation_euler = (0.0, 0.0, 0.0)
+    reader_v3 = rig_contract_v3_enabled() and meta.get('reader_contract') == 'monster-reader-v3'
+    if reader_v3:
+        # The source's saved p0 is the generator's first frame, not the bind pose.
+        for pbone in arm_obj.pose.bones:
+            basis=meta['bones'].get(pbone.name,{}).get('pose_basis')
+            if basis is not None:
+                pbone.matrix_basis=Matrix(basis)
+    else:
+        for pbone in arm_obj.pose.bones:
+            pbone.rotation_mode = 'XYZ'
+            pbone.rotation_euler = (0.,0.,0.)
     bpy.context.view_layer.update()
     idle_name = idle_split_filename(
         calib["composite_width"],
@@ -1238,8 +1445,14 @@ def generate_stage2_synthetic_dataset(
     )
     render_split_screen_frame(cam_f, cam_s, out_path / idle_name, out_path, cam_right=cam_r)
 
+    reader_v3 = rig_contract_v3_enabled() and meta.get('reader_contract') == 'monster-reader-v3'
+    video_calib = dict(calib)
+    if reader_v3 and not boundary_exploration:
+        studio = setup_dual_orthographic_studio(meta['bbox_min'],meta['bbox_max'],panel_w=896,panel_h=896)
+        cam_f,cam_s,cam_r,calib = studio['cam_front'],studio['cam_side'],studio.get('cam_right'),studio['calibration']
     enhanced = features_enabled()
-    dense_enabled = bool(enhanced and dense_surface_enabled() and mesh_obj is not None)
+    if reader_v3 and not enhanced: raise ValueError('V3 Reader requires depth/visibility labels enabled')
+    dense_enabled = bool(enhanced and (reader_v3 or dense_surface_enabled()) and mesh_obj is not None)
     rig_skinning: dict[str, Any] | None = None
     dense_dir = out_path / "dense"
     dense_hm_h, dense_hm_w = dense_grid_shape(int(calib["panel_width"]), int(calib["panel_height"]))
@@ -1249,6 +1462,7 @@ def generate_stage2_synthetic_dataset(
         calib["depth_scale"] = max(1e-4, float(np.max(np.array(meta["bbox_max"])-np.array(meta["bbox_min"]))))
         calib["depth_reference"] = "fixed_studio_center"
         calib["camera_contract"] = (
+            "monster-calibrated-camera-v1" if reader_v3 else
             "left_minus_x_front_plus_y_right_plus_x_orthographic"
             if cam_r is not None
             else "front_plus_y_side_minus_x_orthographic"
@@ -1261,18 +1475,22 @@ def generate_stage2_synthetic_dataset(
             calib["camera_world_matrices"]["right"] = [list(row) for row in cam_r.matrix_world]
         if dense_enabled and mesh_obj is not None:
             dense_dir.mkdir(parents=True, exist_ok=True)
-            rig_skinning = extract_rig_lbs_skinning_and_verify_gate(
-                mesh_obj, arm_obj, sorted_bones_for_skin, calib=calib
-            )
+            rig_skinning = extract_complete_rig_skinning(mesh_objs, arm_obj, sorted_bones_for_skin)
+            rig_skinning['rest_lengths'] = np.array([meta['bones'][n]['rest_length'] for n in sorted_bones_for_skin])
+            rig_skinning['height'] = float(meta['bbox_max'][2]-meta['bbox_min'][2])
             np.savez_compressed(
                 out_path / "rig_skinning.npz",
                 bone_names=np.asarray(rig_skinning["bone_names"]),
                 rest_verts=rig_skinning["rest_verts"],
+                start_verts=rig_skinning["start_verts"],
+                start_matrices_world=rig_skinning["start_matrices_world"],
+                start_pose_basis=np.array([rig_skinning['pose_basis'][name] for name in sorted_bones_for_skin]),
                 skin_indices=rig_skinning["skin_indices"],
                 skin_weights=rig_skinning["skin_weights"],
                 triangles=rig_skinning["triangles"],
                 rest_heads=rig_skinning["rest_heads"],
                 rest_R=rig_skinning["rest_R"],
+                rest_lengths=rig_skinning['rest_lengths'],height=rig_skinning['height'],
             )
         meta["calibration"] = calib
         Path(meta_path).write_text(json.dumps(meta, indent=2), encoding="utf-8")
@@ -1292,7 +1510,19 @@ def generate_stage2_synthetic_dataset(
         bones_meta = apply_joint_limits_profile(bones_meta, joint_limits_profile)
     bone_names = list(bones_meta.keys())
     records = []
-
+    from video2rig_blender import attach_reader_points,StripRenderer
+    from reprojection_solver import surface_keypoints
+    from reader_v3 import rasterize_dense_fields
+    from studio_camera import Camera
+    extra_points = (
+        surface_keypoints(bones_meta, sorted_bones_for_skin, rig_skinning)
+        if (reader_v3 and keypoint_mode() == "video2rig")
+        else []
+    )
+    camera_objects = dict(zip(calib['view_order'],[cam_s,cam_f,cam_r] if cam_r is not None else [cam_f,cam_s]))
+    sampling_cameras=[Camera.from_blender(camera,calib['panel_width'],calib['panel_height']) for camera in camera_objects.values()]
+    from strip_renderer import strip_settings
+    strip = StripRenderer(camera_objects, out_path, layout=calib.get('layout', 'horizontal')) if not boundary_exploration and all(c.data.type=='ORTHO' for c in camera_objects.values()) and strip_settings()['enabled'] else None
     for idx in range(num_samples):
         use_blur = idx >= (num_samples // 2)
         arm_obj.animation_data_clear()
@@ -1304,6 +1534,9 @@ def generate_stage2_synthetic_dataset(
             if boundary_exploration
             else select_pose_sampling_regime(idx, rng)
         )
+        from pose_sampling_v3 import sampling_events as choose_v3_events
+        sample_events=choose_v3_events(rng,motion_blur=use_blur) if reader_v3 else None
+        sample_report={}
         pose_f1 = sample_in_limit_pose(
             arm_obj,
             bones_meta,
@@ -1312,40 +1545,21 @@ def generate_stage2_synthetic_dataset(
             sample_root_location=bool(boundary_exploration or joint_limits_profile is not None),
             joint_limits_profile=joint_limits_profile,
             boundary_exploration=boundary_exploration,
+            sampling_skin=rig_skinning if reader_v3 else None,
+            sampling_cameras=sampling_cameras if reader_v3 else None,
+            sampling_events=sample_events,
+            sampling_report=sample_report,
         )
         if enhanced and use_blur:
             # Symmetric shutter samples around the labeled pose at frame 1.
             # Put keyframes on both sides; labels always refer to the center pose.
-            use_speed_prior = mocap_priors_enabled()
-            for b_name, rot in pose_f1.items():
-                pb = arm_obj.pose.bones[b_name]
-                b_info = bones_meta[b_name]
-                lims = effective_sampling_limits_for_bone(b_info, enforce_anatomical_floor=True)
-                speed_mul = (
-                    0.55
-                    * bone_motion_blur_speed_factor(
-                        str(b_info.get("kind", "limb")),
-                        str(b_info.get("sub_role", "")),
-                        int(b_info.get("chain_index", 0)),
-                    )
-                    if use_speed_prior
-                    else 1.0
-                )
-                delta = [rng.uniform(-0.5, 0.5) * speed_mul for _ in range(3)]
-                if (
-                    (not pb.children and not bool(b_info.get("allow_leaf_twist", False)))
-                    or b_info.get("fixed_local")
-                    or b_info.get("kind") == "rigid"
-                ):
-                    delta[1] = 0.0
-                if b_info.get("fixed_local") or b_info.get("kind") == "rigid":
-                    delta = [0.0, 0.0, 0.0]
-                for frame, sign in ((0, -1), (1, 0), (2, 1)):
-                    pb.rotation_euler = Euler([float(np.clip(rot[i]+sign*delta[i], lims[i][0], lims[i][1])) for i in range(3)], "XYZ")
-                    pb.keyframe_insert(data_path="rotation_euler", frame=frame)
-            scene.frame_set(1)
+            keyframe_pose_shutter(
+                arm_obj, bones_meta, pose_f1, rng,
+                reader_v3=reader_v3, events=sample_events, report=sample_report,
+            )
             scene.render.use_motion_blur = True
-            scene.render.motion_blur_shutter = light_rng.uniform(0.35, 0.9)
+            sampled_shutter = light_rng.uniform(0.35, 0.9)
+            scene.render.motion_blur_shutter = 0.5 if strip is not None else sampled_shutter
         elif use_blur:
             for b_name, rot in pose_f1.items():
                 pb = arm_obj.pose.bones[b_name]
@@ -1368,7 +1582,7 @@ def generate_stage2_synthetic_dataset(
                 pb.keyframe_insert(data_path="rotation_euler", frame=2)
             scene.frame_set(1)
             scene.render.use_motion_blur = True
-            scene.render.motion_blur_shutter = 0.65
+            scene.render.motion_blur_shutter = 0.5 if strip is not None else 0.65
         else:
             scene.render.use_motion_blur = False
 
@@ -1378,7 +1592,8 @@ def generate_stage2_synthetic_dataset(
         if enhanced:
             visibility.update()
         img_name = f"pose_{idx:05d}.jpg"
-        render_split_screen_frame(cam_f, cam_s, img_dir / img_name, out_path, cam_right=cam_r)
+        if strip is not None: strip.enqueue(img_dir / img_name)
+        else: render_split_screen_frame(cam_f, cam_s, img_dir / img_name, out_path, cam_right=cam_r)
 
         joints_gt = {}
         mw = arm_obj.matrix_world
@@ -1415,7 +1630,19 @@ def generate_stage2_synthetic_dataset(
             "label_frame": 1,
             "shutter": float(scene.render.motion_blur_shutter) if use_blur else 0.0,
             "lighting": lighting,
+            "v3_sampling":sample_report if reader_v3 else None,
         }
+        reader_pts_3d = None
+        reader_owners = None
+        if reader_v3:
+            reader_pts_3d, reader_owners = attach_reader_points(record_item,arm_obj,sorted_bones_for_skin,extra_points,camera_objects,visibility,calib)
+            from video2rig_blender import _evaluated_vertices_world
+            from reader_v3 import creature_crop_box
+            surface = np.concatenate([_evaluated_vertices_world(obj) for obj in mesh_objs if not obj.hide_render])
+            record_item['creature_crops'] = {
+                view: creature_crop_box(camera.project(surface)).tolist()
+                for view, camera in zip(camera_objects, sampling_cameras)
+            }
         if dense_enabled and rig_skinning is not None:
             posed_heads = np.zeros((len(sorted_bones_for_skin), 3), dtype=np.float64)
             posed_R = np.zeros((len(sorted_bones_for_skin), 3, 3), dtype=np.float64)
@@ -1436,7 +1663,21 @@ def generate_stage2_synthetic_dataset(
             )
             dense_payload: dict[str, np.ndarray] = {}
             dense_views_to_render = ["front", "side"] + (["right"] if cam_r is not None else [])
-            for v_key in dense_views_to_render:
+            vis_mode = visibility_mode()
+            for v_key in (list(camera_objects) if reader_v3 else dense_views_to_render):
+                if reader_v3:
+                    v_cam = Camera.from_blender(camera_objects[v_key],calib['panel_width'],calib['panel_height'])
+                    fields=rasterize_dense_fields(posed_verts,rig_skinning,v_cam)
+                    for key,value in fields.items(): dense_payload[f'{v_key}_{key}']=value
+                    if reader_pts_3d is not None and reader_owners is not None and vis_mode in ("zbuffer", "hybrid"):
+                        from reader_v3 import compute_zbuffer_visibility
+                        zb_vis = compute_zbuffer_visibility(
+                            posed_verts, rig_skinning, v_cam, reader_pts_3d, reader_owners, bones_meta, bone_names=sorted_bones_for_skin
+                        )
+                        record_item["reader_points"][v_key]["zbuffer_visible"] = [bool(x > 0.5) for x in zb_vis]
+                        if vis_mode == "zbuffer":
+                            record_item["reader_points"][v_key]["visibility"] = [float(x) for x in zb_vis]
+                    continue
                 d_map = rasterize_ortho_dense_rest_map_numpy(
                     posed_verts,
                     rig_skinning["rest_verts"],
@@ -1459,12 +1700,16 @@ def generate_stage2_synthetic_dataset(
                 record_item["bad_edge_ratio"] = stretch_metric["bad_edge_ratio"]
         records.append(record_item)
 
+    if strip is not None: strip.flush()
+    from pose_sampling_v3 import sampling_audit_inputs
+    audit_records, audit_meta = sampling_audit_inputs(records, bones_meta)
     coverage_audit = audit_pose_dataset_coverage(
-        records, bones_meta, enforce_anatomical_floor=not boundary_exploration
+        audit_records, audit_meta, enforce_anatomical_floor=not boundary_exploration
     )
     if boundary_exploration:
         coverage_audit["boundary_exploration_audit"] = audit_boundary_exploration_coverage(
-            records, bones_meta, joint_limits_profile=joint_limits_profile
+            audit_records, audit_meta,
+            joint_limits_profile=None if reader_v3 else joint_limits_profile
         )
     if resolved_limits_path is not None:
         coverage_audit["joint_limits_path"] = str(resolved_limits_path)
@@ -1475,15 +1720,30 @@ def generate_stage2_synthetic_dataset(
             f"[Stage 2 Pose Coverage Audit Gate Failed] {coverage_audit.get('failures')}"
         )
 
+    kp_names = [n+'.'+e for n in sorted_bones_for_skin for e in ('head','tail')]+[p['name'] for p in extra_points]
+    if reader_v3 and export_npz_labels_enabled():
+        from reader_v3 import export_video2rig_npz_labels
+        export_video2rig_npz_labels(
+            out_path, records, bones_meta, sorted_bones_for_skin, extra_points, calib, keypoint_names=kp_names
+        )
     with open(out_path / "keypoints_gt.json", "w", encoding="utf-8") as f:
         json.dump({"schema": DATASET_SCHEMA if enhanced else "monster-pose-legacy-v1",
                    "signature": signature, "depth_visibility_enabled": enhanced,
+                   "render_pipeline": strip.stats if strip is not None else {"mode": "individual", "render_calls": num_samples * len(camera_objects)},
                    "dense_surface_enabled": dense_enabled,
                    "bone_names": sorted(bone_names), "visibility_method": "skin_weight_surface_proxy_v1" if enhanced else None,
                    "joint_limits_schema": joint_limits_profile.get("schema") if isinstance(joint_limits_profile, dict) else None,
                    "joint_limits_profile": joint_limits_profile,
                    "coverage_audit": coverage_audit,
-                   "calibration": calib, "samples": records}, f, indent=2, ensure_ascii=False)
+                   "calibration": video_calib if reader_v3 else calib, "samples": records,
+                   "training_calibration": calib, "reader_contract": 'monster-reader-v3' if reader_v3 else None,
+                   "start_pose_contract": "monster-start-pose-v1" if reader_v3 else None,
+                   "context_geometry_contract": "monster-context-pose-v1" if reader_v3 else None,
+                   "sampling_contract": "monster-calibrated-sampling-v1" if reader_v3 else None,
+                   "bones": bones_meta if reader_v3 else None,
+                   "idle_reference": idle_name, "extra_points": extra_points,
+                   "pipeline_feature_flags": pipeline_feature_flags(),
+                   "keypoint_names": kp_names}, f, indent=2, ensure_ascii=False)
 
 
 def synthesize_stage4_exam_sequence(
@@ -1523,6 +1783,9 @@ def synthesize_stage4_exam_sequence(
 
     rng = random.Random(seed)
     bones_meta = meta["bones"]
+    from studio_camera import cameras_from_calibration
+    exam_cameras=list(cameras_from_calibration(calib).values())
+    exam_skin=extract_complete_rig_skinning([obj for obj in bpy.context.scene.objects if obj.type=='MESH'],arm_obj,sorted(bones_meta)) if meta.get('reader_contract')=='monster-reader-v3' else None
     arm_obj.animation_data_clear()
     arm_obj.animation_data_create()
 
@@ -1535,14 +1798,22 @@ def synthesize_stage4_exam_sequence(
             sample_idx=f_idx // max(1, key_step),
             joint_limits_profile=joint_limits_profile,
             sample_root_location=bool(joint_limits_profile is not None),
+            sampling_skin=exam_skin,
+            sampling_cameras=exam_cameras,
         )
         for pbone in arm_obj.pose.bones:
             pbone.keyframe_insert(data_path="rotation_euler", frame=f_idx)
-            if pbone.parent is None and joint_limits_profile is not None:
+            if (pbone.parent is None and joint_limits_profile is not None) or meta.get('reader_contract')=='monster-reader-v3':
                 pbone.keyframe_insert(data_path="location", frame=f_idx)
 
     if arm_obj.animation_data and arm_obj.animation_data.action:
-        for fc in arm_obj.animation_data.action.fcurves:
+        action = arm_obj.animation_data.action
+        fcurves = list(getattr(action, "fcurves", ()))
+        for layer in getattr(action, "layers", ()):
+            for strip in getattr(layer, "strips", ()):
+                for bag in getattr(strip, "channelbags", ()):
+                    fcurves.extend(getattr(bag, "fcurves", ()))
+        for fc in fcurves:
             for kp in fc.keyframe_points:
                 kp.interpolation = "BEZIER"
                 kp.handle_left_type = "AUTO_CLAMPED"
@@ -1911,7 +2182,7 @@ def bake_3d_joints_to_animated_glb(
     blend_path: str,
     joints_3d_json: str,
     out_glb_path: str,
-    fps: int = 24,
+    fps: float | None = None,
     meta_path: str | None = None,
     limits_path: str | None = None,
 ) -> None:
@@ -1926,6 +2197,10 @@ def bake_3d_joints_to_animated_glb(
     bpy.ops.wm.open_mainfile(filepath=str(blend_path))
     with open(joints_3d_json, "r", encoding="utf-8") as f:
         traj_data = json.load(f)
+    from video_timing import VideoTiming,set_scene_fps
+    timing=VideoTiming.from_trajectory(traj_data,24 if fps is None else fps)
+    if fps is not None and not math.isclose(float(fps),timing.fps,rel_tol=1e-9):
+        raise ValueError('Explicit bake FPS differs from trajectory FPS')
 
     bones_meta: dict[str, Any] = {}
     if meta_path and Path(meta_path).exists():
@@ -1942,9 +2217,9 @@ def bake_3d_joints_to_animated_glb(
     frames_list = traj_data["frames"]
     total_frames = len(frames_list)
     scene = bpy.context.scene
-    scene.render.fps = fps
+    set_scene_fps(scene,timing.fps)
     scene.frame_start = 0
-    scene.frame_end = max(0, total_frames - 1)
+    scene.frame_end = max(0, math.ceil(max((float(f.get("frame",i)) for i,f in enumerate(frames_list)), default=0)))
 
     arm_obj = [o for o in bpy.data.objects if o.type == "ARMATURE"][0]
     mesh_objs = [o for o in bpy.data.objects if o.type == "MESH"]
@@ -2009,6 +2284,14 @@ def bake_3d_joints_to_animated_glb(
         isinstance(b_info, dict) and "rot_mat_world" in b_info
         for b_info in first_frame_bones.values()
     )
+    if traj_data.get('reader_contract')=='monster-reader-v3':
+        for frame in frames_list:
+            for pb in topo_bones:
+                observed=frame.get('bones',{}).get(pb.name,{})
+                rotation=np.asarray(observed.get('rot_mat_world',[]),float)
+                head=np.asarray(observed.get('head_3d',[]),float)
+                if rotation.shape!=(3,3) or head.shape!=(3,) or not np.isfinite(rotation).all() or not np.isfinite(head).all() or not np.allclose(rotation.T@rotation,np.eye(3),atol=1e-4) or np.linalg.det(rotation)<.999:
+                    raise ValueError(f'V3 bake requires a finite world pose for {pb.name} in every frame')
     if total_frames > 0 and not any_precomputed_rot:
         sorted_bnames = sorted(bones_meta.keys())
         num_b = len(sorted_bnames)
@@ -2056,10 +2339,16 @@ def bake_3d_joints_to_animated_glb(
                 continue
             if "rot_mat_world" in b_dict[b_name]:
                 R_pre = np.array(b_dict[b_name]["rot_mat_world"], dtype=np.float64)
-                if joint_limits_profile is not None and b_name in bones_meta:
+                if joint_limits_profile is not None and b_name in bones_meta and not (traj_data.get("reader_contract") == "monster-reader-v3" and (p_name is None or bones_meta[b_name].get('kind')=='root')):
                     b_info = bones_meta[b_name]
                     if b_info.get("kind") == "rigid" or bool(b_info.get("fixed_local", False)):
                         R_pre = R_init
+                        if traj_data.get("reader_contract") == "monster-reader-v3":
+                            # Zero fitted DOF fixes a bone at its saved local
+                            # basis, which need not be the identity bind pose.
+                            R_pre = R_init @ np.asarray(
+                                b_info.get("pose_basis", np.eye(4)), dtype=float
+                            )[:3, :3]
                     elif "limits_rad" in b_info:
                         delta_pre = clamp_local_delta_euler(R_init.T @ R_pre, b_info["limits_rad"])
                         R_pre = R_init @ delta_pre
@@ -2096,7 +2385,8 @@ def bake_3d_joints_to_animated_glb(
     # Step 3: Bake smoothed world rotation matrices into Blender PoseBones
     prev_quats: dict[str, Any] = {}
     for f_idx, frame_item in enumerate(frames_list):
-        scene.frame_set(f_idx)
+        bake_frame=float(frame_item.get("frame",f_idx))
+        scene.frame_set(math.floor(bake_frame),subframe=bake_frame%1)
         b_dict = frame_item["bones"]
 
         for pb in topo_bones:
@@ -2111,10 +2401,26 @@ def bake_3d_joints_to_animated_glb(
             if b_name not in b_dict:
                 continue
             head_gt = Vector(b_dict[b_name]["head_3d"])
+            if traj_data.get('reader_contract')=='monster-reader-v3':
+                target=Matrix.Identity(4)
+                rotation=solved_world_R[b_name][f_idx]
+                for row in range(3):
+                    for col in range(3):target[row][col]=float(rotation[row,col])
+                target.translation=head_gt
+                pbone.matrix=mw_inv@target
+                bpy.context.view_layer.update()
+                quat=pbone.rotation_quaternion.copy()
+                if b_name in prev_quats and quat.dot(prev_quats[b_name])<0:
+                    quat=-quat
+                    pbone.rotation_quaternion=quat
+                prev_quats[b_name]=quat.copy()
+                pbone.keyframe_insert(data_path='location',frame=bake_frame)
+                pbone.keyframe_insert(data_path='rotation_quaternion',frame=bake_frame)
+                continue
             if pbone.parent is None:
                 delta_arm = mw_inv @ head_gt - pbone.bone.head_local
                 pbone.location = pbone.bone.matrix_local.to_3x3().inverted() @ delta_arm
-                pbone.keyframe_insert(data_path="location", frame=f_idx)
+                pbone.keyframe_insert(data_path="location", frame=bake_frame)
 
             R_targ_w = solved_world_R[b_name][f_idx]
             R_curr_w = np.array((mw_arm @ pbone.matrix).to_3x3(), dtype=np.float64)
@@ -2128,7 +2434,7 @@ def bake_3d_joints_to_animated_glb(
             prev_quats[b_name] = q_new.copy()
 
             pbone.rotation_quaternion = q_new
-            pbone.keyframe_insert(data_path="rotation_quaternion", frame=f_idx)
+            pbone.keyframe_insert(data_path="rotation_quaternion", frame=bake_frame)
             bpy.context.view_layer.update()
 
     bpy.ops.object.mode_set(mode="OBJECT")
@@ -2138,6 +2444,7 @@ def bake_3d_joints_to_animated_glb(
         export_format="GLB",
         export_animations=True,
         export_frame_range=True,
+        export_force_sampling=traj_data.get("reader_contract") != "monster-reader-v3",
     )
 
 
@@ -2152,9 +2459,11 @@ def verify_exam_glb_roundtrip(
     `exam_gt.json`.
     """
     require_bpy()
-    _, arm_obj = load_glb_and_find_rig(baked_glb_path)
     with open(exam_gt_json_path, "r", encoding="utf-8") as f:
         gt_data = json.load(f)
+    from video_timing import VideoTiming
+    fps=VideoTiming.from_trajectory(gt_data).fps if gt_data.get('reader_contract')=='monster-reader-v3' else None
+    _, arm_obj = load_glb_and_find_rig(baked_glb_path,fps=fps)
 
     dir_errors: dict[str, list[float]] = {}
     full_rot_errors: dict[str, list[float]] = {}
@@ -2164,8 +2473,8 @@ def verify_exam_glb_roundtrip(
     leaf_bones = {b.name for b in arm_obj.data.bones if len(b.children) == 0}
 
     for f_item in gt_data["frames"]:
-        f_idx = int(f_item["frame"])
-        bpy.context.scene.frame_set(f_idx)
+        f_idx = float(f_item["frame"])
+        bpy.context.scene.frame_set(math.floor(f_idx),subframe=f_idx%1)
         bpy.context.view_layer.update()
         for b_name, b_gt in f_item["bones"].items():
             pb = arm_obj.pose.bones.get(b_name)
@@ -2380,6 +2689,8 @@ def sop_preflight_check(
             obj.matrix_world = Matrix.Identity(4)
             obj.data.update()
         bpy.context.view_layer.update()
+    from video2rig_blender import export_shell
+    export_shell(meshes, out_p / 'shell.npz')
     rig_meta = {}
     for arm in arms:
         _, meta = classify_anonymous_bones_and_assign_limits(meshes[0], arm, prune_digits=False, canonicalize_names=False)
@@ -2593,6 +2904,7 @@ def _classify_and_canonicalize_candidate_rig(
     mesh_objs: list[Any],
     arm_obj: Any,
     audit_report: dict[str, Any] | None = None,
+    prepared_bones: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Classifies bones across all scene meshes and canonicalizes bone + vertex-group names across every sub-mesh."""
     bmin, bmax = _preflight_bounds(mesh_objs)
@@ -2605,7 +2917,27 @@ def _classify_and_canonicalize_candidate_rig(
     meta["bbox_min"] = [round(float(x), 5) for x in bmin]
     meta["bbox_max"] = [round(float(x), 5) for x in bmax]
 
+    if prepared_bones is not None:
+        # Rest geometry has already measured the anatomy (notably flat wings).
+        # Preserve those semantics before the final classification/name decision.
+        for name, info in meta["bones"].items():
+            prepared = prepared_bones.get(name, {})
+            for key in ("kind", "flatness", "winged", "role"):
+                if key in prepared:
+                    info[key] = prepared[key]
     bone_meta = classify_rig_bones(meta["bones"], meta["bbox_min"], meta["bbox_max"])
+    if prepared_bones is not None:
+        for name,info in bone_meta.items():
+            for key in ('hinge','jaw_hinge','axis_roles','axis_role_source','limits_rad','fixed_local','weapon','paired_arc_fractions','pose_basis'):
+                if key in prepared_bones.get(name,{}): info[key]=prepared_bones[name][key]
+            if info.get('hinge'): info['limits_source']='geometry_hinge'
+            elif info.get('jaw_hinge'): info['limits_source']='geometry_jaw_hinge'
+            if info.get('canonical_name','').startswith(('Hand','Foot','FrontPaw','HindPaw','WingHand','Head')) and not info.get('fixed_local'):
+                info['allow_leaf_twist']=True
+                info['limits_rad'][1]=[-math.pi,math.pi]
+                info['limits_source']='v3_observable_twist'
+            if info.get('parent') is None:
+                info.update(rotation_parameterization='axis_angle',limits_rad=[[-math.pi,math.pi]]*3,limits_source='v3_global_so3')
     rename_map = canonicalize_rig_bone_names_in_blender(arm_obj, mesh_objs, bone_meta)
     remapped_meta: dict[str, Any] = {}
     for old_name, info in bone_meta.items():
@@ -2628,7 +2960,7 @@ def _classify_and_canonicalize_candidate_rig(
         )
 
     return {
-        "bone_taxonomy_schema": BONE_TAXONOMY_SCHEMA,
+        "bone_taxonomy_schema": BONE_TAXONOMY_SCHEMA if rig_contract_v3_enabled() else "monster-bone-taxonomy-v2",
         "bbox_min": meta["bbox_min"],
         "bbox_max": meta["bbox_max"],
         "num_active_bones": len(remapped_meta),
@@ -3134,7 +3466,19 @@ def sop_prepare_g1_candidates(
             _ensure_armature_modifier(m_obj, arm_obj)
 
         audit_rep = _evaluate_candidate_rig_geometry(mesh_objs, arm_obj, str(c_path))
-        rig_meta = _classify_and_canonicalize_candidate_rig(mesh_objs, arm_obj, audit_report=audit_rep)
+        if rig_contract_v3_enabled():
+            from video2rig_blender import prepare_candidate, ensure_prop_bones
+            ensure_prop_bones(mesh_objs, arm_obj)
+            _, raw_meta = classify_anonymous_bones_and_assign_limits(mesh_objs[0], arm_obj, prune_digits=False, canonicalize_names=False)
+            prepared, geometry_report = prepare_candidate(
+                mesh_objs, arm_obj, out_p / cid, raw_meta['bones'], fold_digits=fold_digits_enabled()
+            )
+            rig_meta = _classify_and_canonicalize_candidate_rig(mesh_objs, arm_obj, audit_report=audit_rep, prepared_bones=prepared)
+            rig_meta['skeleton_postprocess'] = geometry_report
+            rig_meta['reader_contract'] = 'monster-reader-v3'
+        else:
+            rig_meta = _classify_and_canonicalize_candidate_rig(mesh_objs, arm_obj, audit_report=audit_rep, prepared_bones=None)
+        rig_meta['pipeline_feature_flags'] = pipeline_feature_flags()
         restored_decor = _restore_detached_decorations(mesh_objs, arm_obj, decor_manifest)
         rig_meta["restored_decorations"] = restored_decor
 
@@ -3418,47 +3762,65 @@ def sop_prepare_g1_candidates(
     return summary
 
 
-def sop_verify_delivery_glb(glb_path: str, is_loop: bool = False, out_report: str | None = None) -> dict[str, Any]:
-    """SOP Stage 5: Headless Blender GLB round-trip & loop seam verification."""
+def sop_verify_delivery_glb(glb_path: str, is_loop: bool = False, out_report: str | None = None, joints_json: str | None = None) -> dict[str, Any]:
+    """Read the delivered file in Blender, including actual animation endpoints/predicted poses."""
     require_bpy()
+    trajectory = json.loads(Path(joints_json).read_text()) if joints_json else None
     clear_scene()
+    if trajectory:
+        from video_timing import VideoTiming, set_scene_fps
+        set_scene_fps(bpy.context.scene, VideoTiming.from_trajectory(trajectory).fps)
     bpy.ops.import_scene.gltf(filepath=str(glb_path))
     bpy.context.view_layer.update()
-    arms = [o for o in bpy.data.objects if o.type == "ARMATURE"]
+    arms = [o for o in bpy.data.objects if o.type == 'ARMATURE']
+    report = {'glb_path':str(glb_path), 'valid':False, 'is_loop':bool(is_loop)}
     if not arms:
-        report = {"glb_path": str(glb_path), "valid": False, "reason": "no_armature"}
+        report['reason'] = 'no_armature'
     else:
-        arm_obj = arms[0]
-        scene = bpy.context.scene
-        f_start = int(scene.frame_start)
-        f_end = int(scene.frame_end)
-        scene.frame_set(f_start)
-        bpy.context.view_layer.update()
-        mw = arm_obj.matrix_world
-        first_pos = {pb.name: np.array([float((mw @ pb.head).x), float((mw @ pb.head).y), float((mw @ pb.head).z)]) for pb in arm_obj.pose.bones}
-        scene.frame_set(f_end)
-        bpy.context.view_layer.update()
-        mw = arm_obj.matrix_world
-        last_pos = {pb.name: np.array([float((mw @ pb.head).x), float((mw @ pb.head).y), float((mw @ pb.head).z)]) for pb in arm_obj.pose.bones}
-        jumps = [float(np.linalg.norm(last_pos[k] - first_pos[k])) for k in first_pos if k in last_pos]
-        max_jump = round(max(jumps), 5) if jumps else 0.0
-        report = {
-            "glb_path": str(glb_path),
-            "valid": True,
-            "is_loop": bool(is_loop),
-            "frame_start": f_start,
-            "frame_end": f_end,
-            "max_joint_seam_jump": max_jump,
-            "seam_passed": (max_jump <= 0.12) if is_loop else True,
-        }
+        arm = arms[0]
+        data = arm.animation_data
+        actions = [data.action] if data and data.action else [strip.action for track in (data.nla_tracks if data else []) for strip in track.strips if strip.action]
+        skinned = any(m.type == 'ARMATURE' and m.object == arm for obj in bpy.data.objects if obj.type == 'MESH' for m in obj.modifiers)
+        naming = validate_canonical_rig_bone_names({b.name:{} for b in arm.data.bones})
+        if (not actions and (trajectory is not None or is_loop)) or not skinned or not naming['valid']:
+            report['reason'] = 'missing_animation_or_skin_or_canonical_bones'
+        else:
+            first = min(float(a.frame_range[0]) for a in actions) if actions else 0.0
+            last = max(float(a.frame_range[1]) for a in actions) if actions else 0.0
+            scene = bpy.context.scene
+            def snapshot(frame):
+                scene.frame_set(math.floor(frame), subframe=frame % 1)
+                bpy.context.view_layer.update()
+                return {pb.name: np.asarray(arm.matrix_world @ pb.matrix,dtype=float) for pb in arm.pose.bones}
+            a,b = snapshot(first),snapshot(last)
+            jump = max(float(np.linalg.norm(a[n][:3,3]-b[n][:3,3])) for n in a)
+            angle = max(math.degrees(math.acos(float(np.clip((np.trace(a[n][:3,:3].T @ b[n][:3,:3])-1)/2,-1,1)))) for n in a)
+            head_error = rotation_error = 0.0
+            checked = 0
+            errors = []
+            for frame in (trajectory or {}).get('frames',[]):
+                actual = snapshot(float(frame['frame']))
+                for name,expected in frame['bones'].items():
+                    if name not in actual:
+                        errors.append('missing_bone:'+name)
+                        continue
+                    head_error = max(head_error,float(np.linalg.norm(actual[name][:3,3]-expected['head_3d'])))
+                    rotation_error = max(rotation_error,float(np.linalg.norm(actual[name][:3,:3]-expected['rot_mat_world'])))
+                checked += 1
+            if head_error > 2e-4 or rotation_error > 1e-3:
+                errors.append('delivered_animation_differs_from_trajectory')
+            report.update(valid=not errors, reason=errors or None, frame_start=first,frame_end=last,
+                max_joint_seam_jump=jump,max_joint_seam_rotation_deg=angle,
+                seam_passed=(jump<=.12 and angle<=18) if is_loop else True,
+                trajectory_frames_checked=checked,pose_max_head_error=head_error,pose_max_rotation_error=rotation_error)
     if out_report:
-        Path(out_report).parent.mkdir(parents=True, exist_ok=True)
-        Path(out_report).write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+        Path(out_report).parent.mkdir(parents=True,exist_ok=True)
+        Path(out_report).write_text(json.dumps(report,indent=2,ensure_ascii=False)+'\n')
     return report
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Headless Blender 4.2 Studio Worker for Monster Pipeline")
+    parser = argparse.ArgumentParser(description="Headless Blender 5.2 Studio Worker for Monster Pipeline")
     parser.add_argument(
         "--mode",
         required=True,
@@ -3475,6 +3837,8 @@ def main() -> None:
             "preflight_check",
             "prepare_g1_candidates",
             "verify_delivery_glb",
+            "render_v3_review",
+            "export_cameras",
         ],
     )
     parser.add_argument("--input_glb", help="Raw input GLB for sanitize_input or preflight_check mode")
@@ -3487,6 +3851,9 @@ def main() -> None:
     parser.add_argument("--blend_path", help="Path to rigged_pruned.blend")
     parser.add_argument("--meta_path", help="Path to studio_rig_meta.json")
     parser.add_argument("--limits_path", help="Path to joint_limits.json (monster-joint-limits-v1)")
+    parser.add_argument("--fold-digits", action="store_true", help="Explicitly fold short digit branches; default keeps fingers/toes")
+    parser.add_argument("--lens", type=float, help="Pinhole focal length in millimeters; zero uses orthographic cameras")
+    parser.add_argument("--video_path", help="Independent source video for actual v3 GLB readback review")
     parser.add_argument("--out_dir", help="Output directory for renders / metadata")
     parser.add_argument("--joints_json", help="Input 3D joint trajectory JSON for Stage 6 IK baking")
     parser.add_argument("--out_glb", help="Output GLB path for sanitize_input or Stage 6 bake_ik")
@@ -3504,7 +3871,17 @@ def main() -> None:
         raw_argv = raw_argv[raw_argv.index("--") + 1 :]
     args = parser.parse_args(raw_argv)
 
-    if args.mode == "sanitize_input":
+    if args.fold_digits: os.environ["MONSTER_FOLD_DIGITS"]="1"
+    if args.lens is not None:
+        if args.lens<0: raise ValueError('--lens must be nonnegative')
+        os.environ['MONSTER_CAMERA_LENS']=str(args.lens)
+    if args.mode == 'export_cameras':
+        bpy.ops.wm.open_mainfile(filepath=str(args.blend_path))
+        from studio_camera import export_cameras
+        scene=bpy.context.scene
+        export_cameras(args.out_report or str(Path(args.blend_path).with_name('cameras.json')),
+            {o.name:o for o in scene.objects if o.type=='CAMERA'},scene.render.resolution_x,scene.render.resolution_y)
+    elif args.mode == "sanitize_input":
         sanitize_input_mesh_for_skintokens(args.input_glb, args.out_glb, yaw_deg=args.yaw_deg)
 
     elif args.mode == "preflight_check":
@@ -3520,6 +3897,10 @@ def main() -> None:
             archetype=args.archetype,
         )
 
+    elif args.mode == 'render_v3_review':
+        from video2rig_blender import render_v3_review
+        render_v3_review(args.blend_path,args.meta_path,args.joints_json,args.video_path,args.out_dir)
+
     elif args.mode == "audit":
         reports = [score_candidate_rig(c) for c in (args.candidates or [])]
         contact_path = Path(args.meta_path).parent / "candidates_contact_sheet.jpg"
@@ -3533,7 +3914,16 @@ def main() -> None:
             best["protruding_bones"],
             best.get("air_bridging_bones", []),
         )
-        _, rig_meta = classify_anonymous_bones_and_assign_limits(mesh_obj, arm_obj)
+        meshes=[o for o in bpy.context.scene.objects if o.type=='MESH']
+        if rig_contract_v3_enabled():
+            from video2rig_blender import prepare_candidate
+            _, raw = classify_anonymous_bones_and_assign_limits(mesh_obj,arm_obj,prune_digits=False,canonicalize_names=False)
+            prepared, geometry_report=prepare_candidate(meshes,arm_obj,Path(args.meta_path).parent,raw['bones'],fold_digits_enabled())
+            rig_meta=_classify_and_canonicalize_candidate_rig(meshes,arm_obj,prepared_bones=prepared)
+            rig_meta.update(reader_contract='monster-reader-v3',skeleton_postprocess=geometry_report)
+        else:
+            rig_meta=_classify_and_canonicalize_candidate_rig(meshes,arm_obj,prepared_bones=None)
+        rig_meta["pipeline_feature_flags"] = pipeline_feature_flags()
         rig_meta["audit_reports"] = reports
         rig_meta["selected_candidate"] = best["path"]
         rig_meta["contact_sheet_path"] = str(contact_path)
@@ -3590,7 +3980,7 @@ def main() -> None:
         verify_exam_glb_roundtrip(args.out_glb or args.input_glb, args.exam_gt_json, args.out_report)
 
     elif args.mode == "verify_delivery_glb":
-        sop_verify_delivery_glb(args.glb_path or args.out_glb or args.input_glb, bool(args.is_loop), args.out_report)
+        sop_verify_delivery_glb(args.glb_path or args.out_glb or args.input_glb, bool(args.is_loop), args.out_report, args.joints_json)
 
 
 if __name__ == "__main__":

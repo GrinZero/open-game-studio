@@ -52,6 +52,11 @@ from surface_contact import (  # noqa: E402
 FORMAL_GATE_SCHEMA = "monster-formal-verification-gate-v1"
 
 
+def _v3_bones(bones):
+    from anatomical_names import parse_anatomical_name
+    return bool(bones) and all(parse_anatomical_name(n) for n in bones)
+
+
 def build_canonical_verification_rig() -> dict[str, dict[str, Any]]:
     """Constructs a canonical 12-bone multi-branch skeleton spanning all 9 solver roles:
     root, spine (axial_flex), clavicle_socket, ball_socket (limb_ball), forearm_hinge,
@@ -345,6 +350,12 @@ def verify_trajectory_formal_gate(
     and P4 (surface contact quality if metadata present) across all frames of a trajectory.
     """
     classified = _prepare_classified_bones(rig_bones, joint_limits_profile)
+    v3 = (trajectory_meta or {}).get('reader_contract') == 'monster-reader-v3' or _v3_bones(classified)
+    structure = (trajectory_meta or {}).get('motion_structure') or {}
+    fitted = set(structure.get('fitted_bones', classified))
+    motion_roots = set(structure.get('motion_roots', [n for n,b in classified.items() if b.get('kind') == 'root' or (not b.get('parent') and not b.get('fixed_local'))]))
+    if not motion_roots <= fitted <= set(classified) or any(classified[n].get('kind') != 'root' and not n.startswith('Prop_') and classified[n].get('parent') for n in motion_roots):
+        raise ValueError('Invalid v3 fitted-channel/motion-root structure')
     order = _topo_order(classified)
     rest_R = _compute_rest_rot_matrices(classified, order)
     rest_H = {}
@@ -362,6 +373,8 @@ def verify_trajectory_formal_gate(
     max_length_err_m = 0.0
     max_offset_err_m = 0.0
     violations: list[str] = []
+    if v3 and not frames:
+        violations.append('P1_EMPTY_TRAJECTORY')
 
     for f_idx, frame in enumerate(frames):
         if not isinstance(frame, dict):
@@ -372,15 +385,20 @@ def verify_trajectory_formal_gate(
         for b in order:
             b_state = bones_map.get(b)
             if not isinstance(b_state, dict):
+                if v3: violations.append(f'P1_MISSING_POSE frame={f_idx} bone={b}')
                 continue
             h_raw = b_state.get("head_3d") if "head_3d" in b_state else b_state.get("head")
             t_raw = b_state.get("tail_3d") if "tail_3d" in b_state else b_state.get("tail")
             r_raw = b_state.get("rot_mat_world") if "rot_mat_world" in b_state else b_state.get("matrix_3x3")
             if h_raw is None or t_raw is None or r_raw is None:
+                if v3: violations.append(f'P1_MISSING_POSE frame={f_idx} bone={b}')
                 continue
             H_b = np.asarray(h_raw, dtype=np.float64)
             T_b = np.asarray(t_raw, dtype=np.float64)
             R_b = np.asarray(r_raw, dtype=np.float64)
+            if v3 and (H_b.shape != (3,) or T_b.shape != (3,) or R_b.shape != (3,3) or not np.isfinite(H_b).all() or not np.isfinite(T_b).all() or not np.isfinite(R_b).all()):
+                violations.append(f'P1_INVALID_POSE frame={f_idx} bone={b}')
+                continue
             world_R[b] = R_b
             pose_H[b] = H_b
 
@@ -402,17 +420,30 @@ def verify_trajectory_formal_gate(
                 violations.append(
                     f"P1_BONE_LENGTH frame={f_idx} bone={b}: len_err={len_err * 1000.0:.3f}mm > {length_tol_m * 1000.0:.3f}mm"
                 )
+            if v3:
+                tail_err = float(np.linalg.norm(T_b - H_b - R_b @ (rest_R[b].T @ (rest_T[b] - rest_H[b]))))
+                if tail_err > length_tol_m:
+                    violations.append(f'P1_TAIL_FRAME frame={f_idx} bone={b}: error={tail_err}')
 
             # 3. Parent-child head offset conservation & local Euler box compliance
             p = classified[b].get("parent")
-            if p and p in pose_H and p in world_R:
+            basis = np.asarray(classified[b].get('pose_basis', np.eye(4)))
+            fixed = b not in fitted or bool(classified[b].get('fixed_local')) or classified[b].get('kind') == 'rigid'
+            if p and p in pose_H and p in world_R and not (v3 and b in motion_roots):
                 expected_H = pose_H[p] + world_R[p] @ (rest_R[p].T @ (rest_H[b] - rest_H[p]))
+                if v3 and fixed:
+                    expected_H += world_R[p] @ rest_R[p].T @ rest_R[b] @ basis[:3,3]
                 off_err = float(np.linalg.norm(H_b - expected_H))
                 max_offset_err_m = max(max_offset_err_m, off_err)
                 if off_err > offset_tol_m:
                     violations.append(
                         f"P1_HEAD_OFFSET frame={f_idx} bone={b}: offset_err={off_err * 1000.0:.3f}mm > {offset_tol_m * 1000.0:.3f}mm"
                     )
+            elif v3 and not p and b not in motion_roots:
+                off_err = float(np.linalg.norm(H_b - rest_H[b] - rest_R[b] @ basis[:3,3]))
+                max_offset_err_m = max(max_offset_err_m, off_err)
+                if off_err > offset_tol_m:
+                    violations.append(f'P1_HEAD_OFFSET frame={f_idx} bone={b}: fixed root translated')
 
             R_init = rest_R[b] if (p is None or p not in world_R) else world_R[p] @ (rest_R[p].T @ rest_R[b])
             R_delta = R_init.T @ R_b
@@ -421,8 +452,12 @@ def verify_trajectory_formal_gate(
                 or classified[b].get("kind") == "rigid"
                 or classified[b].get("sub_role") in ("fixed_local", "rigid")
             )
+            if v3:
+                if b in motion_roots:
+                    continue
+                is_fixed = fixed
             if is_fixed:
-                fixed_err_deg = _geodesic_angle_deg(R_delta, np.eye(3, dtype=np.float64))
+                fixed_err_deg = _geodesic_angle_deg(R_delta, basis[:3,:3] if v3 else np.eye(3, dtype=np.float64))
                 max_limit_violation_deg = max(max_limit_violation_deg, fixed_err_deg)
                 if fixed_err_deg > limit_tol_deg:
                     violations.append(
@@ -479,6 +514,171 @@ def verify_trajectory_formal_gate(
     return report
 
 
+def _v3_oracle_probes(rig, seed, num_random_poses):
+    """Deterministic feasible targets; never hand their parameters to the solver.
+
+    Boundary checks sample up to twelve fitted scalar channels, spread over the
+    channel list. They are an audit sample, not an exhaustive proof of the box.
+    Guard-infeasible targets remain in the receipt as excluded, never as passes.
+    """
+    rng = np.random.default_rng(seed)
+    start = rig.start_params()
+    probes = [("neutral", start)]
+    excluded = []
+    finite = np.flatnonzero(np.isfinite(rig.lower) & np.isfinite(rig.upper))
+    selected = finite[np.unique(np.linspace(0, len(finite) - 1, min(12, len(finite))).astype(int))] if len(finite) else []
+
+    def add(label, params):
+        points, jac, _, _ = rig.fk(params, jac=True)
+        guard, _ = rig.guard(points, jac)
+        worst = float(np.max(guard, initial=0.0))
+        if worst > 1e-5:
+            excluded.append({"pose": label, "reason": "guard_infeasible", "max_guard_residual": worst})
+            return False
+        probes.append((label, params))
+        return True
+
+    for channel in selected:
+        for side, value in (("lower", rig.lower[channel]), ("upper", rig.upper[channel])):
+            params = start.copy()
+            params[channel] = value
+            add(f"boundary_{int(channel)}_{side}", params)
+    # World roots have no finite angular/translation bounds. Exercise their full
+    # motion interface with a finite displacement, while staying above the floor.
+    for name, entry in rig.slices.items():
+        if isinstance(entry, slice):
+            params = start.copy()
+            params[entry.start:entry.start + 3] += [0.12, -0.08, 0.2]
+            params[entry.start + 3:entry.stop] += rig.height * np.array([0.04, -0.03, 0.08])
+            add(f"root_motion_{name}", params)
+    accepted = 0
+    for attempt in range(max(0, num_random_poses) * 12):
+        if accepted >= num_random_poses:
+            break
+        params = start.copy()
+        for entry in rig.slices.values():
+            if isinstance(entry, slice):
+                params[entry.start:entry.start + 3] += rng.uniform(-0.35, 0.35, 3)
+                params[entry.start + 3:entry.stop] += rig.height * rng.uniform([-0.05, -0.05, 0.0], [0.05, 0.05, 0.08])
+            else:
+                indices, _ = entry
+                params[indices] = rng.uniform(rig.lower[indices], rig.upper[indices])
+        if add(f"random_{attempt:03d}", params):
+            accepted += 1
+    return probes, {
+        "scope": "sampled guard-feasible poses and locally identifiable world rotations",
+        "exhaustive": False,
+        "finite_channels": len(finite),
+        "boundary_channels_sampled": [int(i) for i in selected],
+        "boundary_channels_unsampled": [int(i) for i in finite if i not in selected],
+        "random_requested": num_random_poses,
+        "random_checked": accepted,
+        "excluded_poses": excluded,
+    }
+
+
+def _v3_identifiable_rotations(rig, params, jac, rotations):
+    """A world rotation is identifiable only if point-Jacobian null modes cannot change it."""
+    if not rig.size:
+        return list(rig.names)
+    matrix = jac.reshape(-1, rig.size)
+    _, singular, right = np.linalg.svd(matrix, full_matrices=matrix.shape[0] < matrix.shape[1])
+    cutoff = max(float(singular.max(initial=0.0)) * 1e-8, 1e-10)
+    rank = int(np.count_nonzero(singular > cutoff))
+    null = right[rank:].T
+    if not null.shape[1]:
+        return list(rig.names)
+    identifiable = []
+    for name in rig.names:
+        rotation_jac = np.concatenate([
+            rig.vector_jacobian(params, rotations, name, axis)[1]
+            for axis in np.eye(3)
+        ], axis=0)
+        if np.linalg.norm(rotation_jac @ null, ord="fro") <= 1e-7:
+            identifiable.append(name)
+    return identifiable
+
+
+def _verify_v3_rig(classified, skin, seed, num_random_poses, assert_passed):
+    from reprojection_solver import RigModel, fit_clip_2d_reprojection
+    from studio_camera import cameras_from_calibration
+    from v3_verification import verify_v3_numerics
+    from threadpoolctl import threadpool_limits
+
+    rig = RigModel(classified, skin=skin)
+    structure = {"motion_roots": sorted(rig.motion_roots), "fitted_bones": sorted(
+        n for n, entry in rig.slices.items() if isinstance(entry, slice) or len(entry[0]))}
+    probes, coverage = _v3_oracle_probes(rig, seed, num_random_poses)
+    params = np.asarray([p for _, p in probes])
+    confidence = np.ones((len(params), 2, len(rig.point_names)))
+    frames = rig.frames(params, confidence)
+    p1 = verify_trajectory_formal_gate(frames, classified, trajectory_meta={
+        "reader_contract": "monster-reader-v3", "motion_structure": structure}, assert_passed=False)
+    numerical = verify_v3_numerics(classified, seed, skin=skin)
+    points = np.array([rig.fk(p)[0] for p in params])
+    cameras = list(cameras_from_calibration({"center": points[0].mean(0).tolist(),
+        "ortho_scale": max(rig.height * 3, 1.0), "panel_width": 448, "panel_height": 448}).values())
+    observed = np.array([[c.project(x) for c in cameras] for x in points])
+    # One real clip starts from its saved p0 and estimates subsequent frames from
+    # readings/previous solutions. No ground-truth initial channels enter fitting.
+    fit, _ = fit_clip_2d_reprojection(rig, cameras, observed, confidence)
+    fit = np.asarray(fit, dtype=float)
+    if fit.shape != params.shape or not np.isfinite(fit).all():
+        raise ValueError("P2_V3_INVALID_SOLUTION: solver must return one finite parameter vector per oracle frame")
+    violations = list(p1["violations"])
+    records = []
+    with threadpool_limits(limits=1):
+        for (label, target), recovered, truth in zip(probes, fit, points):
+            predicted, _, solved_rotations = rig.fk(recovered)
+            _, jac, _, rotations = rig.fk(target, jac=True)
+            identifiable = _v3_identifiable_rotations(rig, target, jac, rotations)
+            point_mm = float(np.linalg.norm(predicted - truth, axis=-1).max() * 1000)
+            rotation_deg = max((_geodesic_angle_deg(rotations[n], solved_rotations[n]) for n in identifiable), default=0.0)
+            records.append({"pose": label, "max_point_error_mm": point_mm,
+                "max_identifiable_rotation_error_deg": rotation_deg,
+                "identifiable_rotation_bones": identifiable,
+                "unobservable_rotation_bones": [n for n in rig.names if n not in identifiable]})
+            if point_mm > 1.5:
+                violations.append(f"P2_V3_PIXEL_REACHABILITY pose={label}: max={point_mm:.6f}mm > 1.5mm")
+            if rotation_deg > 0.35:
+                violations.append(f"P2_V3_ROTATION_REACHABILITY pose={label}: max={rotation_deg:.6f}deg > 0.35deg")
+    recovered_frames = rig.frames(fit, confidence)
+    recovered_p1 = verify_trajectory_formal_gate(recovered_frames, classified, trajectory_meta={
+        "reader_contract": "monster-reader-v3", "motion_structure": structure}, assert_passed=False)
+    violations.extend(recovered_p1["violations"])
+    hidden, _ = fit_clip_2d_reprojection(rig, cameras, np.zeros_like(observed[:1]), np.zeros_like(confidence[:1]))
+    hidden = np.asarray(hidden, dtype=float)
+    if hidden.shape != params[:1].shape or not np.isfinite(hidden).all():
+        raise ValueError("P3_V3_INVALID_SOLUTION: solver must return one finite parameter vector for the hidden frame")
+    hidden_mm = float(np.linalg.norm(rig.fk(hidden[0])[0] - points[0], axis=-1).max() * 1000)
+    if hidden_mm > 1e-5:
+        violations.append(f"P3_V3_OCCLUSION_INVARIANCE: max={hidden_mm}mm")
+    coverage["poses_checked"] = len(records)
+    coverage["nonneutral_observable_poses"] = sum(
+        bool(np.linalg.norm(truth - points[0], axis=-1).max() > 1e-6 * rig.height)
+        for truth in points[1:])
+    coverage["guard_feasible_boundary_poses"] = sum(label.startswith("boundary_") for label, _ in probes)
+    start_jac = rig.fk(params[0], jac=True)[1]
+    observable_motion = bool(np.max(np.abs(start_jac), initial=0.0) > 1e-8)
+    coverage["observable_motion_at_start"] = observable_motion
+    if observable_motion and not coverage["nonneutral_observable_poses"]:
+        violations.append("P2_V3_INSUFFICIENT_COVERAGE: no guard-feasible nonneutral observable pose was checked")
+    report = {"schema": FORMAL_GATE_SCHEMA, "reader_contract": "monster-reader-v3", "mode": "rig",
+        "passed": not violations, "num_bones": len(rig.names), "motion_structure": structure,
+        "p1_soundness": p1["p1_soundness"], "p1_recovered_soundness": recovered_p1["p1_soundness"], "v3_fk_camera": numerical,
+        "p2_oracle_completeness": {"passed": not any(v.startswith("P2_") for v in violations),
+            "neutral_hierarchy_max_mm": records[0]["max_point_error_mm"],
+            "max_pose_point_error_mm": max(r["max_point_error_mm"] for r in records),
+            "max_identifiable_rotation_error_deg": max(r["max_identifiable_rotation_error_deg"] for r in records),
+            "coverage": coverage, "poses": records},
+        "p3_occlusion_invariance": {"passed": hidden_mm <= 1e-5, "max_error_mm": hidden_mm},
+        "p4_surface_contact": {"checked": False, "reason": "Rig-only input; trajectory surface-contact receipts are checked on delivery."},
+        "violations": violations[:25], "total_violations": len(violations), "verified_at": now_taipei_iso()}
+    if assert_passed and violations:
+        raise RuntimeError(f"V3 Rig Formal Verification Gate failed: {violations[:3]}")
+    return report
+
+
 def verify_rig_formal_gate(
     rig_bones: dict[str, Any] | None = None,
     joint_limits_profile: dict[str, Any] | None = None,
@@ -486,11 +686,14 @@ def verify_rig_formal_gate(
     seed: int = 20261025,
     num_random_poses: int = 16,
     assert_passed: bool = True,
+    rig_skinning=None,
 ) -> dict[str, Any]:
     """Runs formal verification of P1, P2, P3, and P4 on a rig + joint_limits_profile
     (or on the canonical 12-bone all-roles fixture when `rig_bones is None`).
     """
     classified = _prepare_classified_bones(rig_bones, joint_limits_profile)
+    if rig_skinning is not None or _v3_bones(classified):
+        return _verify_v3_rig(classified,rig_skinning,seed,num_random_poses,assert_passed)
     order = _topo_order(classified)
     rest_R = _compute_rest_rot_matrices(classified, order)
     rest_H = {}
@@ -1037,6 +1240,8 @@ def main(argv: list[str] | None = None) -> int:
             num_random_poses=args.num_random_poses,
             assert_passed=True,
         )
+        from v3_verification import verify_v3_numerics
+        report['v3_fk_camera']=verify_v3_numerics(build_canonical_verification_rig(),args.seed)
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return 0
     if args.subcommand == "rig":

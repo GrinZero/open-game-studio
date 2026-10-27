@@ -554,11 +554,11 @@ class MigrationTests(unittest.TestCase):
             self.assertTrue(b_cov["passed"], msg=f"Boundary audit failed under 3-layer coordination: {b_cov}")
             self.assertGreaterEqual(b_cov["dual_boundary_touch_rate"], 0.95)
             # Verify all 50 poses keep ROOT_C_00_00 yaw front-facing (|ry| <= 22 deg << 90 deg)
-            root_yaws_deg = [abs(tax.math.degrees(s["joints"]["ROOT_C_00_00"][1])) for s in coord_samples]
+            root_yaws_deg = [abs(tax.math.degrees(s["joints"][next(n for n,b in canon_classified.items() if b["kind"]=="root")][1])) for s in coord_samples]
             self.assertTrue(all(y <= 22.5 for y in root_yaws_deg), msg=f"Unexpected root yaws: {root_yaws_deg}")
             # Even in non-root regimes, ROOT yaw stays within the studio front window
             non_root_yaws = [
-                abs(tax.math.degrees(s["joints"]["ROOT_C_00_00"][1]))
+                abs(tax.math.degrees(s["joints"][next(n for n,b in canon_classified.items() if b["kind"]=="root")][1]))
                 for s in coord_samples
                 if s["sampling_regime"] != "full_body_dynamic_root_boundary"
             ]
@@ -1778,7 +1778,7 @@ class MonsterSopExecutionSuiteTests(unittest.TestCase):
                     "--project-root", str(proj_root),
                     "--drive-root", str(drive_root),
                     "apply",
-                    "--set-bone", "SPINE_C_00_01=-28:32,-20:20,-35:35",
+                    "--set-bone", "Spine1=-28:32,-20:20,-35:35",
                     "--set-root-pitch", "-24:24",
                     "--set-root-roll", "-18:18",
                     "--set-root-yaw", "-180:180",

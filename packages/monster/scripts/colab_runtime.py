@@ -16,7 +16,8 @@ from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKER_MODULES = (
-    "mocap_priors", "pose_features", "pose_visibility", "dinov2_pose_trainer", "pipeline_runner",
+    "anatomical_names", "studio_camera", "skeleton_postprocess", "reprojection_solver", "reading_pipeline", "reader_v3", "video2rig_pipeline", "video2rig_blender", "v3_verification", "rig_pose", "pose_sampling_v3", "video_timing", "strip_renderer", "blender_runtime", "bone_taxonomy",
+    "pose_finetuning", "mocap_priors", "pose_features", "pose_visibility", "dinov2_pose_trainer", "pipeline_runner",
     "studio_bpy_worker", "runtime_metadata", "task_progress", "colab_g4_worker_server",
 )
 
@@ -34,16 +35,23 @@ def stop_previous_worker():
 
 
 def configure(*, depth_visibility=True, dense_surface=False, mocap_priors=True, enable_2k=False, enable_3view=False, profile="full", cache_models=True,
+              training_mode="partial", unfreeze_last_blocks=8, backbone_lr=1e-4,
               idle_timeout=0,
               drive_root="/content/drive/MyDrive/MonsterStudio",
               work_root="/content/monster-studio"):
     if profile not in {"int8", "full"}:
         raise ValueError("H3 profile must be int8 or full")
+    sys.path.insert(0, str(ROOT / "worker"))
+    from pose_finetuning import TrainingConfig
+    training = TrainingConfig(mode=training_mode, unfreeze_last_blocks=unfreeze_last_blocks, backbone_lr=backbone_lr)
     stop_previous_worker()
     for name in WORKER_MODULES:
         sys.modules.pop(name, None)
     importlib.invalidate_caches()
     for name, value in {
+        "MONSTER_TRAIN_MODE": training.mode,
+        "MONSTER_TRAIN_UNFREEZE_LAST_BLOCKS": str(training.unfreeze_last_blocks),
+        "MONSTER_TRAIN_BACKBONE_LR": str(training.backbone_lr),
         "MONSTER_DRIVE_ROOT": drive_root,
         "MONSTER_WORK_ROOT": work_root,
         "MONSTER_ENABLE_DEPTH_VISIBILITY": "1" if depth_visibility else "0",
@@ -69,12 +77,17 @@ def configure(*, depth_visibility=True, dense_surface=False, mocap_priors=True, 
 
 
 def setup_skintokens():
-    bootstrap = ROOT / "scripts/bootstrap-skintokens.sh"
+    stop_previous_worker()
+    spec = json.loads((ROOT / "contracts/blender-runtime.json").read_text())
     runtime = Path(os.environ["SKINTOKENS_ROOT"])
-    if (runtime / "ready.json").is_file():
-        print("SkinTokens / bpy 已就绪，复用已有环境。")
-        return
-    subprocess.run(["bash", str(bootstrap)], env=os.environ.copy(), check=True)
+    ready = runtime / "ready.json"
+    saved = json.loads(ready.read_text()) if ready.is_file() else {}
+    if saved.get('bpy') != spec['skintokens_bpy_version']:
+        subprocess.run(["bash", str(ROOT / "scripts/bootstrap-skintokens.sh")], env=os.environ.copy(), check=True)
+    else:
+        print("SkinTokens 环境版本匹配，复用已有模型与依赖。")
+    # Rendering uses the current Python 3.13 bpy, independent of SkinTokens.
+    subprocess.run(["bash", str(ROOT / "scripts/bootstrap-blender.sh")], env=os.environ.copy(), check=True)
 
 
 def setup_comfy():

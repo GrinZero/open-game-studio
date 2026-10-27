@@ -3,8 +3,9 @@
 
 Unifies the three runtime environments on a single Google Colab G4 (96GB VRAM) instance:
   - Runtime 1 (`/content/skintokens-service/venv/bin/python`): VAST-AI SkinTokens (`demo.run_rig` +
-    `demo.start_bpy_server()`) + Headless Blender 4.2 (`bpy==4.2.0`)
-  - Runtime 2 (Colab system Python / PyTorch): Frozen Meta DINOv2 Probe Trainer & 3D Triangulator
+    `demo.start_bpy_server()`, internal bpy 4.5.15 / Python 3.11)
+  - Renderer (`/content/monster-bpy/venv/bin/python`): Blender 5.2.3 / Python 3.13
+  - Runtime 2 (Colab system Python / PyTorch): Partially fine-tuned Meta DINOv2 Probe Trainer & 3D Triangulator
   - Runtime 3 (`/content/h3-lab/ComfyUI` @ `http://127.0.0.1:8193`): MiniMax H3 FL2VA 8-Step Turbo
     15-Node ComfyUI Workflow Engine (`MiniMaxH3ImageToVideo` + `VHS_VideoCombine`)
 
@@ -29,6 +30,7 @@ from pose_features import (
     idle_split_filename,
 )
 import os
+import math
 import shutil
 import struct
 import subprocess
@@ -45,6 +47,7 @@ DRIVE_ROOT = Path(os.environ.get("MONSTER_DRIVE_ROOT", "/content/drive/MyDrive/M
 WORK_ROOT = Path(os.environ.get("MONSTER_WORK_ROOT", "/content/monster-studio"))
 SKINTOKENS_ROOT = Path(os.environ.get("SKINTOKENS_ROOT", "/content/skintokens-service"))
 SKINTOKENS_PY = SKINTOKENS_ROOT / "venv" / "bin" / "python"
+from blender_runtime import resolve_bpy_python
 H3_BASE = Path(os.environ.get("H3_LAB_DIR", "/content/h3-lab"))
 COMFY_DIR = H3_BASE / "ComfyUI"
 COMFY_PORT = int(os.environ.get("H3_COMFY_PORT", "8193"))
@@ -189,7 +192,7 @@ def run_stage1_skintokens_candidates(input_glb: Path, cand_dir: Path, num_candid
     """
     cand_dir.mkdir(parents=True, exist_ok=True)
     bpy_worker = Path(__file__).resolve().parent / "studio_bpy_worker.py"
-    py_bpy = str(SKINTOKENS_PY) if SKINTOKENS_PY.exists() else sys.executable
+    py_bpy = resolve_bpy_python()
 
     sanitized_glb = cand_dir / "_sanitized_input.glb"
     if not sanitized_glb.exists() and bpy_worker.exists():
@@ -232,7 +235,7 @@ def run_stage1_skintokens_candidates(input_glb: Path, cand_dir: Path, num_candid
         else:
             raise RuntimeError(
                 f"SkinTokens environment not found at {SKINTOKENS_ROOT}. "
-                "Run Cell 2 of MonsterStudio_Colab_G4.ipynb to bootstrap SkinTokens + bpy 4.2."
+                "Run Cell 2 of MonsterStudio_Colab_G4.ipynb to bootstrap SkinTokens and the dedicated Blender renderer."
             )
 
     for c in candidates:
@@ -263,7 +266,7 @@ def register_new_monster(monster_id: str, input_glb: Path, num_synth: int = 5000
 
     bpy_worker = Path(__file__).resolve().parent / "studio_bpy_worker.py"
     dino_worker = Path(__file__).resolve().parent / "dinov2_pose_trainer.py"
-    py_bpy = str(SKINTOKENS_PY) if SKINTOKENS_PY.exists() else sys.executable
+    py_bpy = resolve_bpy_python()
 
     # Stage 1: Sanitize mesh + Generate 4 SkinTokens candidates + Geometric Audit + Chord/Finger Pruning
     cands = run_stage1_skintokens_candidates(archived_input, monster_work / "candidates", num_candidates=4)
@@ -322,7 +325,7 @@ def register_new_monster(monster_id: str, input_glb: Path, num_synth: int = 5000
     idle_name = idle_split_filename()
     shutil.copy2(synth_dir / idle_name, monster_drive / idle_name)
 
-    # Stage 3: Train Frozen DINOv2 + Deconv Heatmap Probe (~12 mins on Colab G4)
+    # Stage 3: Train DINOv2 + Deconv Heatmap Probe using MONSTER_TRAIN_* settings
     run_cmd(
         [
             sys.executable,
@@ -400,7 +403,7 @@ def reexam_existing_monster(monster_id: str, rerender_exam: bool = False) -> dic
 
     bpy_worker = Path(__file__).resolve().parent / "studio_bpy_worker.py"
     dino_worker = Path(__file__).resolve().parent / "dinov2_pose_trainer.py"
-    py_bpy = str(SKINTOKENS_PY) if SKINTOKENS_PY.exists() else sys.executable
+    py_bpy = resolve_bpy_python()
 
     if rerender_exam or not (exam_dir / "exam_gt.json").exists():
         render_exam_cmd = [
@@ -476,7 +479,7 @@ def reexam_existing_monster(monster_id: str, rerender_exam: bool = False) -> dic
 # Phase B: Action Video Generation via MiniMax H3 FL2VA + 3D IK Baking (Stages 5-6)
 # ==============================================================================
 
-def build_split_screen_prompt(action_desc: str, enable_3view: bool | None = None) -> str:
+def _build_split_screen_prompt_base(action_desc: str, enable_3view: bool | None = None) -> str:
     """Constructs the structured split-screen orthographic prompt for MiniMax H3."""
     use_3view = three_view_enabled() if enable_3view is None else bool(enable_3view)
     if use_3view:
@@ -494,6 +497,24 @@ def build_split_screen_prompt(action_desc: str, enable_3view: bool | None = None
         f"Both panels show the exact same creature performing a synchronized {action_desc} motion "
         "in place on a dark studio floor. Static locked camera, no camera pan or zoom."
     )
+
+
+def build_split_screen_prompt(action_desc: str, enable_3view: bool | None = None) -> str:
+    from reading_pipeline import NO_EFFECTS
+    from video_timing import VideoTiming
+    scale=VideoTiming.from_environment().slow_motion_scale
+    if os.environ.get('MONSTER_STUDIO_LAYOUT')=='stacked':
+        use_3view=three_view_enabled() if enable_3view is None else bool(enable_3view)
+        if use_3view:
+            raise ValueError('stacked layout requires two views')
+        prompt=('Vertically stacked two-panel technical character reference sheet. '
+                'Upper panel: side profile view. Lower panel: top view. '
+                f'Both panels show the exact same creature performing a synchronized {action_desc} motion. '
+                'Keep shared horizontal pixel columns, locked calibrated cameras and a static studio floor.')
+    else:prompt=_build_split_screen_prompt_base(action_desc,enable_3view)
+    prompt+=' '+NO_EFFECTS
+    if scale<1: prompt+=f' Perform in slow motion at {scale:g} times normal speed.'
+    return prompt
 
 
 def build_minimax_h3_comfy_graph(
@@ -520,8 +541,13 @@ def build_minimax_h3_comfy_graph(
                 (`LTXVConcatAVLatent`), encode native `2560x1440` keyframe conditioning, and run tiled
                 Hires-Fix refinement (`MMH3SplitUpscale`, `steps=4, denoise=0.30`).
     """
+    from video_timing import VideoTiming
+    timing=VideoTiming.from_environment()
     if width is None or height is None:
-        _, _, def_w, def_h = studio_resolution()
+        panel_w,panel_h,def_w,def_h = studio_resolution()
+        if os.environ.get('MONSTER_STUDIO_LAYOUT')=='stacked':
+            if three_view_enabled():raise ValueError('stacked layout requires two views')
+            def_w,def_h=panel_w,panel_h*2
         width = def_w if width is None else int(width)
         height = def_h if height is None else int(height)
     if int(width) % 32 != 0 or int(height) % 32 != 0:
@@ -529,8 +555,9 @@ def build_minimax_h3_comfy_graph(
     active_profile = profile or os.environ.get("H3_PROFILE", "full")
     files = H3_PROFILES.get(active_profile, H3_PROFILES["full"])
     two_stage_2k = int(width) > 1344 or int(height) > 768
-    base_w = 1344 if two_stage_2k else int(width)
-    base_h = 768 if two_stage_2k else int(height)
+    portrait=int(height)>int(width)
+    base_w = (768 if portrait else 1344) if two_stage_2k else int(width)
+    base_h = (1344 if portrait else 768) if two_stage_2k else int(height)
 
     graph: dict[str, Any] = {
         "1": {"class_type": "UNETLoader", "inputs": {"unet_name": files["model"], "weight_dtype": "default"}},
@@ -572,7 +599,7 @@ def build_minimax_h3_comfy_graph(
             "inputs": {
                 "images": ["13", 0],
                 "audio": ["14", 0],
-                "frame_rate": 24,
+                "frame_rate":timing.fps,
                 "loop_count": 0,
                 "filename_prefix": filename_prefix,
                 "format": "video/h264-mp4",
@@ -770,7 +797,10 @@ def submit_minimax_h3_comfy_job(
     import requests
 
     if width is None or height is None:
-        _, _, def_w, def_h = studio_resolution()
+        panel_w,panel_h,def_w,def_h = studio_resolution()
+        if os.environ.get('MONSTER_STUDIO_LAYOUT')=='stacked':
+            if three_view_enabled():raise ValueError('stacked layout requires two views')
+            def_w,def_h=panel_w,panel_h*2
         width = def_w if width is None else int(width)
         height = def_h if height is None else int(height)
     active_profile = profile or os.environ.get("H3_PROFILE", "full")
@@ -894,7 +924,7 @@ def animate_monster_actions(
 
     bpy_worker = Path(__file__).resolve().parent / "studio_bpy_worker.py"
     dino_worker = Path(__file__).resolve().parent / "dinov2_pose_trainer.py"
-    py_bpy = str(SKINTOKENS_PY) if SKINTOKENS_PY.exists() else sys.executable
+    py_bpy = resolve_bpy_python()
     completed_glbs: list[str] = []
 
     for spec in action_specs:

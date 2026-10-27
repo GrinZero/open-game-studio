@@ -13,3 +13,8 @@ websocket-client
 
 # Optional reviewed action-contact optimization (CPU sparse least squares).
 scipy>=1.11,<2
+
+# V3 shell geometry, calibrated optical flow and deterministic small-matrix fitting.
+scikit-image>=0.24,<1
+threadpoolctl>=3,<4
+opencv-python-headless>=4.10,<5

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""dinov2_pose_trainer.py — Frozen DINOv2 + Deconv Heatmap Probe, Epipolar Gate & 3D Triangulator.
+"""dinov2_pose_trainer.py — Partially fine-tuned DINOv2 + Deconv Heatmap Probe, Epipolar Gate & 3D Triangulator.
 
 Implements:
-  1. [Stage 3] Frozen Meta DINOv2 (`dinov2_vitb14_reg`) + 3-Layer Deconv Keypoint Heatmap Head
+  1. [Stage 3] Partially fine-tuned Meta DINOv2 (`dinov2_vitb14_reg`) + 3-Layer Deconv Keypoint Heatmap Head
                with Differentiable Spatial-to-Numerical Transform (2D DSNT Soft-Argmax) and
                synthetic video degradation (color jitter, compression, Gaussian blur) to bridge
                the Sim-to-Video domain gap on 3,000 synthetic dual-view renders.
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
 import math
 import os
@@ -25,16 +26,22 @@ import shutil
 import subprocess
 import time
 from types import MethodType
+from contextlib import nullcontext
+from pose_finetuning import TrainingConfig, split_pose_indices, configure_backbone, load_probe_weights
 import warnings
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from pose_features import (
     calibrate_view_scale_drift,
+    decode_mode,
     features_enabled,
     dense_surface_enabled,
     dense_grid_shape,
     match_dense_surface_correspondences,
     mocap_priors_enabled,
+    pipeline_feature_flags,
+    rig_contract_v3_enabled,
+    solver_mode,
     DATASET_SCHEMA,
     FEATURE_VERSION,
     validate_enhanced_dataset,
@@ -164,40 +171,94 @@ def dsnt_soft_argmax_numpy(logits: np.ndarray, beta: float = 12.0) -> tuple[np.n
 
 
 # ==============================================================================
-# 1. Model Architecture: Frozen DINOv2 (vitb14_reg) + Deconv Head + 2D DSNT
+# 1. Model Architecture: DINOv2 (vitb14_reg) + Deconv Head + 2D DSNT
 # ==============================================================================
 
 if HAS_TORCH:
 
+    def resolve_checkpoint_backbone_name(
+        checkpoint: dict[str, Any] | None, default: str | None = None
+    ) -> str:
+        from pose_features import backbone_mode
+
+        if isinstance(checkpoint, dict):
+            explicit = checkpoint.get("backbone_name")
+            if isinstance(explicit, str) and explicit.strip():
+                return explicit.strip()
+            head_sd = checkpoint.get("head_state_dict")
+            if isinstance(head_sd, dict) and "0.weight" in head_sd:
+                w0 = head_sd["0.weight"]
+                dim0 = int(w0.shape[0]) if hasattr(w0, "shape") and len(w0.shape) >= 1 else 0
+                if dim0 == 768:
+                    return "dinov2_vitb14_reg"
+                if dim0 == 384:
+                    return "dinov2-small"
+        return default if default is not None else backbone_mode()
+
     class MonsterDINOv2PoseProbe(nn.Module):
-        """Frozen DINOv2 ViT-B/14 (with registers) backbone + ~3.1M parameter Deconvolution Heatmap
-        Readout Head with sub-pixel 2D Soft-Argmax (DSNT) coordinate & confidence extraction.
+        """DINOv2 (`dinov2-small` default in video2rig mode; `dinov2_vitb14_reg` in legacy mode) with deconvolution heatmap readout.
+
+        The backbone starts frozen; configure_backbone selects training layers explicitly.
         """
 
         def __init__(
             self,
             num_keypoints: int,
-            backbone_name: str = "dinov2_vitb14_reg",
+            backbone_name: str | None = None,
             custom_backbone: nn.Module | None = None,
             enable_depth_visibility: bool = False,
             enable_dense_surface: bool = False,
             num_views: int = 2,
+            reader_v3: bool = False,
+            num_bones: int | None = None,
         ):
             super().__init__()
+            from pose_features import backbone_mode
+
+            if backbone_name is None:
+                backbone_name = backbone_mode()
             self.num_keypoints = num_keypoints
             self.enable_depth_visibility = bool(enable_depth_visibility)
             self.enable_dense_surface = bool(enable_dense_surface)
             self.num_views = int(num_views)
+            self.reader_v3 = reader_v3
+            if reader_v3:
+                from reader_v3 import ReaderHeads
+                self.reader_heads = ReaderHeads(int(num_bones), num_keypoints)
             if custom_backbone is not None:
                 self.backbone = custom_backbone
             else:
-                self.backbone = torch.hub.load("facebookresearch/dinov2", backbone_name)
+                hub_alias = {
+                    "dinov2-small": "dinov2_vits14_reg",
+                    "facebook/dinov2-small": "dinov2_vits14",
+                    "vits14": "dinov2_vits14",
+                    "vits14_reg": "dinov2_vits14_reg",
+                    "small": "dinov2_vits14_reg",
+                }.get(str(backbone_name).strip().lower(), backbone_name)
+                try:
+                    self.backbone = torch.hub.load("facebookresearch/dinov2", hub_alias)
+                except Exception:
+                    from reader_v3 import Video2RigReaderNet
+
+                    self.backbone = Video2RigReaderNet._load_dinov2_small(backbone_name)
+            self.backbone_name = str(backbone_name)
             for param in self.backbone.parameters():
                 param.requires_grad = False
             self.backbone.eval()
             enable_backbone_sdpa_attention(self.backbone)
 
-            embed_dim = getattr(self.backbone, "embed_dim", 768)
+            embed_dim = int(
+                getattr(
+                    self.backbone,
+                    "embed_dim",
+                    getattr(
+                        getattr(self.backbone, "config", None),
+                        "hidden_size",
+                        384 if "small" in str(backbone_name).lower() or "vits" in str(backbone_name).lower() else 768,
+                    ),
+                )
+            )
+            self.embed_dim = embed_dim
             self.head = nn.Sequential(
                 nn.ConvTranspose2d(embed_dim, 256, kernel_size=4, stride=2, padding=1, bias=False),
                 nn.BatchNorm2d(256),
@@ -242,14 +303,23 @@ if HAS_TORCH:
                     nn.Conv2d(128, 5, kernel_size=1),
                 )
 
-        @torch.no_grad()
         def extract_patch_grid(self, x: torch.Tensor) -> torch.Tensor:
             B, _, H, W = x.shape
-            feats = self.backbone.forward_features(x)["x_norm_patchtokens"]
             h_p, w_p = H // 14, W // 14
-            return feats.transpose(1, 2).reshape(B, -1, h_p, w_p)
+            n_tokens = h_p * w_p
+            with (nullcontext() if any(p.requires_grad for p in self.backbone.parameters()) else torch.no_grad()):
+                if hasattr(self.backbone, "forward_features"):
+                    feats = self.backbone.forward_features(x)["x_norm_patchtokens"]
+                elif hasattr(self.backbone, "embeddings") and hasattr(self.backbone, "encoder"):
+                    h = self.backbone.embeddings(x)
+                    for blk in self.backbone.encoder.layer:
+                        h = blk(h)[0]
+                    feats = self.backbone.layernorm(h)[:, -n_tokens:, :]
+                else:
+                    out = self.backbone(x)
+                    feats = out.last_hidden_state[:, -n_tokens:, :]
+            return feats[:, -n_tokens:, :].transpose(1, 2).reshape(B, -1, h_p, w_p)
 
-        @torch.no_grad()
         def extract_multi_layer_patch_grid(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
             """Extracts both the 4th-from-last layer (`L-4`) and the last layer (`L-1`) patch tokens
             from DINOv2 as spatial feature grids `(B, C, H//14, W//14)`.
@@ -289,20 +359,39 @@ if HAS_TORCH:
             return last_grid, last_grid
 
         @staticmethod
-        def _decode_logits_dsnt(logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        def _decode_logits_dsnt(
+            logits: torch.Tensor, *, peak_height_confidence: bool = False
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             B, K, H_hm, W_hm = logits.shape
             flat = logits.reshape(B, K, -1)
             probs = F.softmax(flat * 12.0, dim=-1).reshape(B, K, H_hm, W_hm)
 
             sig_conf = torch.amax(torch.sigmoid(logits), dim=(-2, -1))
-            peak_mass = (F.avg_pool2d(probs.float(), kernel_size=5, stride=1, padding=2) * 25.0).amax(dim=(-2, -1))
-            conf = torch.maximum(sig_conf.float(), peak_mass.clamp(0.0, 1.0)).to(logits.dtype)
+            if peak_height_confidence:
+                # V3 trains invisible points toward a zero heatmap. Spatial softmax
+                # concentration cannot supply visibility: even an almost-zero map
+                # has unit probability mass after normalization.
+                conf = sig_conf
+            else:
+                # Preserve the existing v2 checkpoint confidence semantics.
+                peak_mass = (F.avg_pool2d(probs.float(), kernel_size=5, stride=1, padding=2) * 25.0).amax(dim=(-2, -1))
+                conf = torch.maximum(sig_conf.float(), peak_mass.clamp(0.0, 1.0)).to(logits.dtype)
 
             grid_x = torch.linspace(0.0, 1.0, W_hm, device=logits.device).view(1, 1, 1, W_hm)
             grid_y = torch.linspace(0.0, 1.0, H_hm, device=logits.device).view(1, 1, H_hm, 1)
             exp_u = torch.sum(probs * grid_x, dim=(-2, -1))
             exp_v = torch.sum(probs * grid_y, dim=(-2, -1))
             coords_norm = torch.stack([exp_u, exp_v], dim=-1)
+            if (
+                not logits.requires_grad
+                and decode_mode() == "parabola"
+                and bool(torch.isfinite(logits).all())
+            ):
+                from reader_v3 import decode_heatmap_parabola_torch
+
+                p_coords, p_conf = decode_heatmap_parabola_torch(logits)
+                out_conf = p_conf.to(logits.dtype) if peak_height_confidence else conf
+                return p_coords.to(logits.dtype), out_conf
             if mocap_priors_enabled():
                 deadband_norm = 2.5 / max(1.0, float(max(H_hm, W_hm)))
                 coords_norm = windowed_peak_dsnt_torch(
@@ -312,10 +401,12 @@ if HAS_TORCH:
 
         def forward_from_features(self, patch_grid: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             logits = self.head(patch_grid)
-            coords_norm, conf = self._decode_logits_dsnt(logits)
+            coords_norm, conf = self._decode_logits_dsnt(
+                logits, peak_height_confidence=self.reader_v3
+            )
             return coords_norm, conf, logits
 
-        def forward(self, x: torch.Tensor, view_ids=None, return_aux: bool = False):
+        def forward(self, x: torch.Tensor, view_ids=None, return_aux: bool = False, context=None):
             dense_out: dict[str, torch.Tensor] = {}
             if self.enable_dense_surface:
                 feat_4th, feat_last = self.extract_multi_layer_patch_grid(x)
@@ -327,13 +418,30 @@ if HAS_TORCH:
                     rgb_cue = F.interpolate(rgb_cue, size=trunk_128.shape[-2:], mode="bilinear", align_corners=False)
                 fused_192 = torch.cat([trunk_128, rgb_cue], dim=1)
                 logits = base_logits + self.rgb_kp_refine(fused_192)
-                coords, conf = self._decode_logits_dsnt(logits)
+                coords, conf = self._decode_logits_dsnt(
+                    logits, peak_height_confidence=self.reader_v3
+                )
+                if self.reader_v3:
+                    reader_logits, reader_aux = self.reader_heads(
+                        fused_192, context
+                    )
+                    logits = logits + reader_logits
+                    coords, conf = self._decode_logits_dsnt(
+                        logits, peak_height_confidence=True
+                    )
+                    if "relative_depth" in reader_aux:
+                        from reader_v3 import sample_maps
+
+                        reader_aux["point_depth"] = sample_maps(
+                            reader_aux["relative_depth"], coords, normalized=True
+                        )
+                    dense_out.update(reader_aux)
                 dense_raw = self.dense_head(fused_192)
-                dense_out = {
+                dense_out.update({
                     "dense_mask_logits": dense_raw[:, 0:1],
                     "dense_rest_xyz": torch.sigmoid(dense_raw[:, 1:4]),
                     "dense_logvar": dense_raw[:, 4:5].clamp(-6.0, 3.0),
-                }
+                })
             else:
                 patch_grid = self.extract_patch_grid(x)
                 coords, conf, logits = self.forward_from_features(patch_grid)
@@ -611,13 +719,31 @@ def train_monster_dinov2_probe(
     meta_path: str,
     out_ckpt: str,
     epochs: int = 15,
-    batch_size: int = 32,
+    batch_size: int | None = None,
     lr: float = 1e-3,
+    init_checkpoint: str | None = None,
     progress_file: str | None = None,
+    training_config: dict[str, Any] | None = None,
+    *,
+    backbone_name: str | None = None,
+    reader_role: str = "base",
 ) -> None:
     require_torch()
+    from pose_features import backbone_mode
+
+    active_backbone = backbone_name if backbone_name is not None else backbone_mode()
+    if reader_role not in {"base", "crops", "dense"}:
+        raise ValueError(f"Invalid reader_role: {reader_role!r}")
+    config = TrainingConfig.from_environment(training_config)
+    batch_size = config.batch_size if batch_size is None else batch_size
+    if not math.isfinite(lr) or lr <= 0:
+        raise ValueError("lr must be finite and positive")
     if epochs < 1 or batch_size < 1:
         raise ValueError("epochs and batch_size must be positive")
+    if config.mode == "partial" and epochs <= config.warmup_epochs:
+        raise ValueError("Partial fine-tuning needs epochs > warmup_epochs")
+    torch.manual_seed(config.seed)
+    np.random.seed(config.seed)
     configure_torch_gpu_acceleration()
     meta = json.loads(Path(meta_path).read_text())
     joint_limits_profile, _ = resolve_joint_limits_profile_from_paths(
@@ -638,7 +764,17 @@ def train_monster_dinov2_probe(
     enhanced = features_enabled()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     non_blocking = device.type == "cuda"
-    ds = DualPanelMonsterDataset(synth_dir, bone_names, augment=True, enhanced=enhanced)
+    from reader_v3 import ReaderDataset, READER_CONTRACT, resolve_temporal_context_contract
+    reader_v3 = (
+        rig_contract_v3_enabled()
+        and json.loads((Path(synth_dir) / "keypoints_gt.json").read_text()).get("reader_contract") == READER_CONTRACT
+    )
+    DatasetClass = ReaderDataset if reader_v3 else DualPanelMonsterDataset
+    if reader_v3 and not enhanced: raise ValueError('V3 Reader requires depth/visibility enabled')
+    ds = DatasetClass(synth_dir, bone_names, augment=True, enhanced=enhanced)
+    num_keypoints = len(ds.keypoint_names) if reader_v3 else num_keypoints
+    train_indices, val_indices = split_pose_indices(len(ds.samples), ds.num_views, config.validation_fraction, config.seed)
+    validation_ds = DatasetClass(synth_dir, bone_names, augment=False, enhanced=enhanced)
     default_workers = min(8, max(2, (os.cpu_count() or 4) // 2)) if device.type == "cuda" else 0
     num_workers = int(os.environ.get("MONSTER_DATALOADER_WORKERS", str(default_workers)))
     loader_kwargs: dict[str, Any] = {
@@ -650,25 +786,144 @@ def train_monster_dinov2_probe(
     if num_workers > 0 and len(ds) > 0:
         loader_kwargs["persistent_workers"] = True
         loader_kwargs["prefetch_factor"] = 2
-    loader = DataLoader(ds, **loader_kwargs)
+    loader = DataLoader(torch.utils.data.Subset(ds, train_indices), **loader_kwargs)
+    validation_loader = DataLoader(torch.utils.data.Subset(validation_ds, val_indices),
+                                   batch_size=batch_size, num_workers=0)
     dense_enabled = bool(ds.dense_surface)
-    model = MonsterDINOv2PoseProbe(
-        num_keypoints=num_keypoints,
-        enable_depth_visibility=enhanced,
-        num_views=ds.num_views,
-        enable_dense_surface=dense_enabled,
-    ).to(device)
-    parameters = list(model.head.parameters())
-    if enhanced:
-        parameters += list(model.aux_head.parameters())
-    if dense_enabled:
-        parameters += (
-            list(model.dino_multi_fuse.parameters())
-            + list(model.rgb_detail_branch.parameters())
-            + list(model.rgb_kp_refine.parameters())
-            + list(model.dense_head.parameters())
-        )
-    optimizer = torch.optim.AdamW(parameters, lr=lr, weight_decay=1e-4)
+    initial = None
+    initialized_adapted = False
+    initial_sha256 = None
+    if init_checkpoint:
+        digest = hashlib.sha256()
+        with open(init_checkpoint, "rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        initial_sha256 = digest.hexdigest()
+        initial = torch.load(init_checkpoint, map_location="cpu", weights_only=False)
+        if backbone_name is None:
+            active_backbone = resolve_checkpoint_backbone_name(initial, default=active_backbone)
+    probe_kwargs: dict[str, Any] = {
+        "num_keypoints": num_keypoints,
+        "enable_depth_visibility": enhanced,
+        "num_views": ds.num_views,
+        "enable_dense_surface": dense_enabled,
+        "reader_v3": reader_v3,
+        "num_bones": len(bone_names),
+    }
+    if backbone_name is not None:
+        probe_kwargs["backbone_name"] = active_backbone
+    model = MonsterDINOv2PoseProbe(**probe_kwargs).to(device)
+    if initial is not None:
+        if (initial["bone_names"] != bone_names or initial["calibration"] != ds.calib
+                or bool(initial.get("depth_visibility_enabled")) != enhanced
+                or bool(initial.get("dense_surface_enabled")) != dense_enabled):
+            raise ValueError("Initial checkpoint rig, calibration, or heads do not match the dataset")
+        if reader_v3 and resolve_temporal_context_contract(initial) != ds.temporal_context_contract:
+            raise ValueError("Initial checkpoint uses different temporal context channels; retrain from existing labels without old weights")
+        load_probe_weights(model, initial)
+        initialized_adapted = "backbone_state_dict" in initial
+        del initial
+    backbone_params = configure_backbone(model.backbone, config)
+    parameters = [p for name, p in model.named_parameters() if not name.startswith("backbone.")]
+    groups = [{"params": parameters, "lr": lr}]
+    if backbone_params:
+        groups.append({"params": backbone_params, "lr": config.backbone_lr})
+    optimizer = torch.optim.AdamW(groups, weight_decay=1e-4)
+    training_record = {**config.as_dict(), "batch_size": batch_size, "head_lr": lr,
+                       "train_pose_indices": sorted({i // ds.num_views for i in train_indices}),
+                       "validation_pose_indices": sorted({i // ds.num_views for i in val_indices}),
+                       "trainable_backbone_parameters": sum(p.numel() for p in backbone_params),
+                       "initial_checkpoint": init_checkpoint, "initial_checkpoint_sha256": initial_sha256,
+                       "labels_sha256": hashlib.sha256((Path(synth_dir) / "keypoints_gt.json").read_bytes()).hexdigest()}
+    target = Path(out_ckpt)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(".pt.tmp")
+    best_validation = float("inf")
+
+    def checkpoint_payload():
+        payload = {"bone_names": bone_names, "bones_meta": meta["bones"], "num_keypoints": num_keypoints,
+                   "joint_limits_profile": joint_limits_profile, "calibration": ds.calib,
+                   "num_views": ds.num_views, "view_order": list(ds.view_order),
+                   "head_state_dict": model.head.state_dict(), "depth_visibility_enabled": enhanced,
+                   "dense_surface_enabled": dense_enabled, "feature_version": FEATURE_VERSION,
+                   "dataset_schema": DATASET_SCHEMA if enhanced else "legacy", "training_history": list(history),
+                   "training_config": training_record, "backbone_name": active_backbone,
+                   "reader_role": reader_role,
+                   "backbone_finetuned": bool(backbone_params) or initialized_adapted, "best_validation_loss": best_validation,
+                   "selected_epoch": ep}
+        if reader_v3:
+            payload.update(reader_contract=READER_CONTRACT, reader_window=ds.window, temporal_context_contract=ds.temporal_context_contract, start_pose_contract=ds.data["start_pose_contract"], context_geometry_contract=ds.data['context_geometry_contract'], sampling_contract=ds.data['sampling_contract'], keypoint_names=ds.keypoint_names,
+                           extra_points=ds.data["extra_points"], reader_heads_state_dict=model.reader_heads.state_dict())
+            with Image.open(Path(synth_dir)/ds.data['idle_reference']) as idle:
+                W,H=ds.calib['panel_width'],ds.calib['panel_height']
+                stacked=ds.calib.get('layout')=='stacked'
+                payload['frame0_reference']=[np.asarray(idle.crop((0,i*H,W,(i+1)*H) if stacked else (i*W,0,(i+1)*W,H)).convert('RGB')) for i in range(ds.num_views)]
+        if backbone_params or initialized_adapted:
+            payload["backbone_state_dict"] = model.backbone.state_dict()
+        if enhanced:
+            payload["aux_state_dict"] = model.aux_head.state_dict()
+        if dense_enabled:
+            for name in ("dino_multi_fuse", "rgb_detail_branch", "rgb_kp_refine", "dense_head"):
+                payload[name + "_state_dict"] = getattr(model, name).state_dict()
+            if ds.rig_skinning is not None:
+                payload["rig_skinning"] = ds.rig_skinning
+        return payload
+
+    def batch_losses(batch):
+        imgs = batch[0].to(device, non_blocking=non_blocking)
+        gt_uv = batch[1].to(device, non_blocking=non_blocking)
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=non_blocking):
+            if enhanced:
+                labels = {key: value.to(device, non_blocking=non_blocking) for key, value in batch[2].items()}
+                if reader_v3:
+                    from reader_v3 import (
+                        temporal_training_context,
+                        reader_losses,
+                        dense_reader_losses,
+                        smear_limbs_gpu,
+                        smear_limbs_capsules_gpu,
+                        inject_contact_shadow_gpu,
+                    )
+                    context = temporal_training_context(
+                        gt_uv,
+                        labels["visibility_ratio"] * labels["in_frame"],
+                        model.training,
+                        labels["previous_coords"],
+                        labels["previous_valid"],
+                        twins=getattr(ds, "twins", ()),
+                        anti_copy=model.training,
+                    )
+                    if model.training:
+                        limb_ids=[i for i,n in enumerate(bone_names) if meta['bones'][n].get('kind') in ('limb','digit','wing')]
+                        if limb_ids:
+                            masks=torch.stack([(labels['part']==i+1).float() for i in limb_ids],dim=1)
+                            masks=F.interpolate(masks,size=imgs.shape[-2:],mode='nearest')
+                            directions=torch.stack([gt_uv[:,2*i+1]-gt_uv[:,2*i] for i in limb_ids],dim=1)
+                            imgs=smear_limbs_gpu(imgs,masks,directions,body_height=labels['body_height'])
+                        imgs = smear_limbs_capsules_gpu(imgs, gt_uv, labels["visibility_ratio"] * labels["in_frame"])
+                        imgs = inject_contact_shadow_gpu(imgs,labels['feet'],labels['foot_valid'],labels['body_height'])
+                    _, _, logits, aux = model(imgs, labels["view_id"], return_aux=True, context=context)
+                    if reader_role == "dense":
+                        return dense_reader_losses(
+                            aux["part_logits"],
+                            aux["local_fields"],
+                            labels["part"],
+                            labels["local"],
+                        )
+                    losses=reader_losses(logits, aux, gt_uv, labels)
+                    if model.training and bool(torch.rand(())<.25):
+                        small=F.interpolate(imgs,size=(224,224),mode='bilinear',align_corners=False)
+                        _,_,crop_logits,crop_aux=model(small,labels['view_id'],return_aux=True,context=context)
+                        crop_loss=reader_losses(crop_logits,crop_aux,gt_uv,labels)['total']
+                        losses['crop_reader']=crop_loss; losses['total']=losses['total']+.5*crop_loss
+                    return losses
+                pred_uv, _, logits, aux = model(imgs, labels["view_id"], return_aux=True)
+                return enhanced_pose_losses(pred_uv, logits, aux, gt_uv, labels)
+            pred_uv, _, logits = model(imgs)
+            gt_hm = build_gaussian_target_heatmaps(gt_uv, logits.shape[2], logits.shape[3])
+            hm_w = 1.0 + 19.0 * gt_hm
+            return {"total": 10.0 * F.smooth_l1_loss(pred_uv, gt_uv, beta=0.01)
+                    + ((torch.sigmoid(logits) - gt_hm).square() * hm_w).mean()}
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     history = []
     targets: list[Path] = []
@@ -691,34 +946,29 @@ def train_monster_dinov2_probe(
     total_start_time = time.time()
     for ep in range(1, epochs+1):
         epoch_start_time = time.time()
+        model.train()
         model.backbone.eval()
-        model.head.train()
-        if enhanced:
-            model.aux_head.train()
-        if dense_enabled:
-            model.dino_multi_fuse.train()
-            model.rgb_detail_branch.train()
-            model.rgb_kp_refine.train()
-            model.dense_head.train()
+        adapting = bool(backbone_params) and ep > config.warmup_epochs
+        for param in backbone_params:
+            param.requires_grad_(adapting)
+        if adapting:
+            for block in list(model.backbone.blocks)[-config.unfreeze_last_blocks:]:
+                block.train()
+        optimizer.zero_grad(set_to_none=True)
         totals_gpu: dict[str, torch.Tensor] = {}
         total_batches = len(loader)
         for step, batch in enumerate(loader, 1):
-            imgs = batch[0].to(device, non_blocking=non_blocking)
-            gt_uv = batch[1].to(device, non_blocking=non_blocking)
-            optimizer.zero_grad(set_to_none=True)
-            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=non_blocking):
-                if enhanced:
-                    labels = {key: value.to(device, non_blocking=non_blocking) for key, value in batch[2].items()}
-                    pred_uv, _, logits, aux = model(imgs, labels["view_id"], return_aux=True)
-                    losses = enhanced_pose_losses(pred_uv, logits, aux, gt_uv, labels)
-                else:
-                    pred_uv, _, logits = model(imgs)
-                    gt_hm = build_gaussian_target_heatmaps(gt_uv, logits.shape[2], logits.shape[3])
-                    hm_w = 1.0 + 19.0 * gt_hm
-                    losses = {"total": 10.0*F.smooth_l1_loss(pred_uv, gt_uv, beta=0.01)
-                              + ((torch.sigmoid(logits) - gt_hm).square() * hm_w).mean()}
-            losses["total"].backward()
-            optimizer.step()
+            losses = batch_losses(batch)
+            if not all(bool(torch.isfinite(v).all()) for v in losses.values()):
+                raise RuntimeError("Non-finite pose loss; checkpoint was not replaced")
+            window_start = ((step - 1) // config.accumulation_steps) * config.accumulation_steps
+            window_end = min(total_batches, window_start + config.accumulation_steps)
+            window_samples = min(len(train_indices), window_end * batch_size) - window_start * batch_size
+            (losses["total"] * (len(batch[0]) / window_samples)).backward()
+            if step == window_end:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm, error_if_nonfinite=True)
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
             for key, value in losses.items():
                 val_det = value.detach().float()
                 totals_gpu[key] = totals_gpu[key] + val_det if key in totals_gpu else val_det
@@ -737,7 +987,9 @@ def train_monster_dinov2_probe(
                 telemetry = _query_telemetry()
                 progress_payload = {
                     "stage": "training",
-                    "stage_display": "训练 DINOv2 姿态头",
+                    "stage_display": "微调 DINOv2 主干与姿态头" if adapting else "训练 DINOv2 姿态头",
+                    "training_config": training_record,
+                    "backbone_adapting": adapting,
                     "status": "running",
                     "epoch": ep,
                     "epochs": epochs,
@@ -762,7 +1014,21 @@ def train_monster_dinov2_probe(
         totals = {key: float(value.item()) for key, value in totals_gpu.items()}
         scheduler.step()
         epoch_summary = {"epoch": ep, **{key: value/max(1, len(loader)) for key, value in totals.items()}}
+        model.eval()
+        val_total, val_count = 0.0, 0
+        with torch.inference_mode():
+            for batch in validation_loader:
+                value = float(batch_losses(batch)["total"].item())
+                if not math.isfinite(value):
+                    raise RuntimeError("Non-finite validation loss; checkpoint was not replaced")
+                val_total += value * len(batch[0])
+                val_count += len(batch[0])
+        epoch_summary["validation_loss"] = val_total / val_count
         history.append(epoch_summary)
+        # Warm-up weights must not win over a model that actually adapted the backbone.
+        if (not backbone_params or adapting) and epoch_summary["validation_loss"] < best_validation:
+            best_validation = epoch_summary["validation_loss"]
+            torch.save(checkpoint_payload(), temporary)
         print(f"[Stage 3 {FEATURE_VERSION} enhanced={enhanced}] {history[-1]}")
         now = time.time()
         rem_batches = max(0, epochs - ep) * total_batches
@@ -771,8 +1037,11 @@ def train_monster_dinov2_probe(
         pct = min(100.0, max(0.0, 100.0 * ep / max(1, epochs)))
         progress_payload = {
             "stage": "training",
-            "stage_display": "训练 DINOv2 姿态头",
-            "status": "completed" if ep == epochs else "running",
+            "stage_display": "微调 DINOv2 主干与姿态头" if adapting else "训练 DINOv2 姿态头",
+            "training_config": training_record,
+            "backbone_adapting": adapting,
+            "best_validation_loss": best_validation if math.isfinite(best_validation) else None,
+            "status": "running",
             "epoch": ep,
             "epochs": epochs,
             "completed_batches": total_batches,
@@ -787,33 +1056,20 @@ def train_monster_dinov2_probe(
             "gpu": _query_telemetry(),
             "updated_unix": now,
             "updated_at": datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S"),
-            "training_completed": ep == epochs,
+            "training_completed": False,
         }
         _write_progress_files(targets, progress_payload)
-    target = Path(out_ckpt)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    checkpoint = {"bone_names": bone_names, "bones_meta": meta["bones"], "num_keypoints": num_keypoints,
-                  "joint_limits_profile": joint_limits_profile,
-                  "calibration": ds.calib, "num_views": ds.num_views, "view_order": list(ds.view_order),
-                  "head_state_dict": model.head.state_dict(),
-                  "depth_visibility_enabled": enhanced, "dense_surface_enabled": dense_enabled,
-                  "feature_version": FEATURE_VERSION,
-                  "dataset_schema": DATASET_SCHEMA if enhanced else "legacy", "training_history": history}
-    if enhanced:
-        checkpoint["aux_state_dict"] = model.aux_head.state_dict()
-    if dense_enabled:
-        checkpoint["dino_multi_fuse_state_dict"] = model.dino_multi_fuse.state_dict()
-        checkpoint["rgb_detail_branch_state_dict"] = model.rgb_detail_branch.state_dict()
-        checkpoint["rgb_kp_refine_state_dict"] = model.rgb_kp_refine.state_dict()
-        checkpoint["dense_head_state_dict"] = model.dense_head.state_dict()
-        if ds.rig_skinning is not None:
-            checkpoint["rig_skinning"] = ds.rig_skinning
-    temporary = target.with_suffix(".pt.tmp")
-    torch.save(checkpoint, temporary)
+    if not temporary.is_file() or not math.isfinite(best_validation):
+        raise RuntimeError("No valid trained checkpoint; original checkpoint was not replaced")
     if target.exists():
         stamp = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y%m%d%H%M%S%f")
         shutil.copy2(target, target.with_name(f"{target.stem}.before_{stamp}.pt"))
     temporary.replace(target)
+    report = {"training_config": training_record, "history": history,
+              "best_validation_loss": best_validation, "checkpoint": str(target)}
+    target.with_suffix(".training.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    progress_payload.update(status="completed", training_completed=True, eta_str="训练完成")
+    _write_progress_files(targets, progress_payload)
     print(f"[Stage 3 Saved] {target} | depth_visibility={enhanced} | dense_surface={dense_enabled}")
 
 
@@ -1233,6 +1489,15 @@ def infer_dual_view_frames(
     )
     if isinstance(bones_meta, dict) and joint_limits_profile is not None:
         bones_meta = apply_joint_limits_profile(bones_meta, joint_limits_profile)
+    if ckpt.get("reader_contract") == "monster-reader-v3" and solver_mode() == "reprojection_v3":
+        from video2rig_pipeline import infer_v3_frames
+
+        v3_ckpt = {
+            **ckpt,
+            "bones_meta": bones_meta if isinstance(bones_meta, dict) else ckpt.get("bones_meta"),
+            "joint_limits_profile": joint_limits_profile,
+        }
+        return infer_v3_frames(v3_ckpt, frame_paths, custom_backbone)
     calib: dict[str, Any] = ckpt["calibration"]
     num_views = int(ckpt.get("num_views", calib.get("num_views", 3 if len(calib.get("view_order", ())) == 3 else 2)))
     default_order = ("left", "front", "right") if num_views == 3 else ("front", "side")
@@ -1258,19 +1523,15 @@ def infer_dual_view_frames(
         and "dense_head_state_dict" in ckpt
     )
     rig_skinning = ckpt.get("rig_skinning") if dense_enabled else None
+    is_v3_ckpt = ckpt.get("reader_contract") == "monster-reader-v3"
     model = MonsterDINOv2PoseProbe(
         num_keypoints=ckpt["num_keypoints"], custom_backbone=custom_backbone,
+        backbone_name=ckpt.get("backbone_name", "dinov2_vitb14_reg"),
         enable_depth_visibility=enhanced, num_views=num_views,
-        enable_dense_surface=dense_enabled,
+        enable_dense_surface=dense_enabled or is_v3_ckpt,
+        reader_v3=is_v3_ckpt, num_bones=len(bone_names),
     ).to(device)
-    model.head.load_state_dict(ckpt["head_state_dict"])
-    if enhanced:
-        model.aux_head.load_state_dict(ckpt["aux_state_dict"])
-    if dense_enabled:
-        model.dino_multi_fuse.load_state_dict(ckpt["dino_multi_fuse_state_dict"])
-        model.rgb_detail_branch.load_state_dict(ckpt["rgb_detail_branch_state_dict"])
-        model.rgb_kp_refine.load_state_dict(ckpt["rgb_kp_refine_state_dict"])
-        model.dense_head.load_state_dict(ckpt["dense_head_state_dict"])
+    load_probe_weights(model, ckpt)
     model.eval()
 
     T = len(frame_paths)
@@ -1372,7 +1633,19 @@ def infer_dual_view_frames(
                     uv_right_all[start_t:end_t, :, 1] = v_px
                     conf_right_all[start_t:end_t] = conf_np[:, p_idx, :]
 
-    return evaluate_epipolar_consistency_and_triangulate(
+    K_base = 2 * len(bone_names)
+    if K > K_base:
+        uv_front_all = uv_front_all[:, :K_base, :]
+        uv_side_all = uv_side_all[:, :K_base, :]
+        conf_front_all = conf_front_all[:, :K_base]
+        conf_side_all = conf_side_all[:, :K_base]
+        if uv_right_all is not None:
+            uv_right_all = uv_right_all[:, :K_base, :]
+        if conf_right_all is not None:
+            conf_right_all = conf_right_all[:, :K_base]
+        for k_aux in list(aux_arrays.keys()):
+            aux_arrays[k_aux] = aux_arrays[k_aux][:, :K_base]
+    res_legacy = evaluate_epipolar_consistency_and_triangulate(
         uv_front_all=uv_front_all,
         uv_side_all=uv_side_all,
         conf_front_all=conf_front_all,
@@ -1387,6 +1660,8 @@ def infer_dual_view_frames(
         joint_limits_profile=joint_limits_profile,
         **aux_arrays,
     )
+    res_legacy["pipeline_feature_flags"] = pipeline_feature_flags()
+    return res_legacy
 
 
 def reconstruct_frame_so3_rotations_from_keypoints(
@@ -1583,12 +1858,19 @@ def evaluate_stage4_studio_exam(ckpt_path: str, exam_dir: str, out_report: str) 
     exam_passed = (dir_mpjre < 3.5) and (dir_max < 8.0) and (non_leaf_mpjre < 3.5)
 
     auxiliary_depth_errors = []
-    if pred_res.get("depth_visibility_enabled"):
-        cx, cy, _ = pred_res["calibration"]["center"]
-        depth_scale = pred_res["calibration"]["depth_scale"]
+    calib_pred = pred_res.get("calibration") or {}
+    if (
+        pred_res.get("depth_visibility_enabled")
+        and "center" in calib_pred
+        and "depth_scale" in calib_pred
+    ):
+        cx, cy, _ = calib_pred["center"]
+        depth_scale = float(calib_pred["depth_scale"])
         for f_gt, f_pred in zip(gt_data["frames"], pred_res["frames"]):
             for name, gt_bone in f_gt["bones"].items():
-                predicted = f_pred["bones"][name]
+                predicted = f_pred["bones"].get(name, {})
+                if "depth_front_relative" not in predicted or "depth_side_relative" not in predicted:
+                    continue
                 for endpoint_index, endpoint in enumerate(("head", "tail")):
                     x, y, _ = gt_bone[f"{endpoint}_3d"]
                     auxiliary_depth_errors.extend((
@@ -1644,11 +1926,16 @@ def main() -> None:
     parser.add_argument("--out_json", help="Output JSON report or 3D trajectory file")
     parser.add_argument("--contact_events", help="Reviewed action-scoped contact event JSON; bound to the exact input trajectory")
     parser.add_argument("--epochs", type=int, default=15)
+    parser.add_argument("--training_config", help="JSON object overriding MONSTER_* training settings")
+    parser.add_argument("--init_checkpoint", help="Optional compatible head or fine-tuned checkpoint to initialize from")
+    parser.add_argument("--batch_size", type=int, help="Micro-batch size; default 2")
     parser.add_argument("--progress_file", help="Path to write training progress JSON")
     args = parser.parse_args()
 
     if args.mode == "train":
-        train_monster_dinov2_probe(args.synth_dir, args.meta_path, args.ckpt_path, epochs=args.epochs, progress_file=args.progress_file)
+        train_monster_dinov2_probe(args.synth_dir, args.meta_path, args.ckpt_path, epochs=args.epochs, progress_file=args.progress_file,
+                                    batch_size=args.batch_size, init_checkpoint=args.init_checkpoint,
+                                    training_config=json.loads(args.training_config) if args.training_config else None)
     elif args.mode == "exam":
         evaluate_stage4_studio_exam(args.ckpt_path, args.exam_dir, args.out_json)
     elif args.mode == "triangulate_video":
@@ -1663,7 +1950,7 @@ def main() -> None:
             json.dump(res, f, indent=2, ensure_ascii=False)
         print(
             f"[Stage 5/6 Triangulation] GatePassed={res['gate_passed']} "
-            f"(mean_v_diff={res['mean_epipolar_diff_px']}px, corr={res['vertical_trajectory_corr']})"
+            f"(mean_v_diff={res.get('mean_epipolar_diff_px')}px, corr={res.get('vertical_trajectory_corr')})"
         )
 
 

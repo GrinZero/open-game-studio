@@ -13,9 +13,23 @@ import numpy as np
 
 
 def assert_surface_contact_quality(trajectory: dict[str, Any], action: str = '') -> None:
-    if trajectory.get('taxonomy_diagnostics', {}).get('contact_quality_passed') is False:
+    from pose_features import surface_contact_enabled
+
+    diag = trajectory.get('taxonomy_diagnostics', {}) or {}
+    if diag.get('contact_quality_passed') is False:
         raise RuntimeError(f"Action '{action}' passed view sync but measured surface contact is unresolved; "
                            "hard-stopping before IK bake.")
+    if surface_contact_enabled():
+        bones_meta = trajectory.get('bones_meta') or {}
+        has_configured_surface = any(
+            isinstance(b, dict) and isinstance(b.get('surface_contact'), dict) and b['surface_contact'].get('enabled')
+            for b in bones_meta.values()
+        )
+        if has_configured_surface and diag.get('contact_quality_passed') is not True:
+            raise RuntimeError(
+                f"Action '{action}' has measured surface contact enabled on bones_meta, "
+                "but contact_quality_passed was not verified before IK bake."
+            )
 
 
 def _rotation(a):
@@ -45,6 +59,7 @@ def apply_surface_floor_constraints(frames_out, order, root, classified_bones,
     root_budget = max(0., min(.03, float(config.get('root_correction_fraction', .02))))
     tolerance = max(1e-6, float(config.get('penetration_tolerance_fraction', .002)) * height)
     groups = [(copy.deepcopy(g), str(g['bone']), np.asarray(g.get('samples_local', []), dtype=float)) for g in groups]
+    fitted = set(config['fitted_bones']) if 'fitted_bones' in config else None
     controls = set()
     for g, bone, points in groups:
         influences = g.get('influences')
@@ -62,7 +77,8 @@ def apply_surface_floor_constraints(frames_out, order, root, classified_bones,
                 cur = start
                 while cur and cur != root:
                     info = classified_bones[cur]
-                    if info.get('kind') != 'rigid' and not info.get('fixed_local', False):
+                    if (info.get('kind') != 'rigid' and not info.get('fixed_local', False)
+                            and (fitted is None or cur in fitted)):
                         controls.add(cur)
                     cur = info.get('parent')
     variables = [(b, axis) for b in order if b in controls for axis in range(3)
@@ -70,15 +86,21 @@ def apply_surface_floor_constraints(frames_out, order, root, classified_bones,
     base_lower = np.array([effective_base_limits[b][i][0] for b, i in variables] + [-root_budget])
     base_upper = np.array([effective_base_limits[b][i][1] for b, i in variables] + [root_budget])
     sorted_controls = sorted(controls)
-    parents = {b: classified_bones[b].get('parent') for b in order}
+    root_ancestors = set()
+    cur_anc = classified_bones.get(root, {}).get('parent')
+    while cur_anc and cur_anc in classified_bones and cur_anc not in root_ancestors:
+        root_ancestors.add(cur_anc)
+        cur_anc = classified_bones.get(cur_anc, {}).get('parent')
+    parents = {
+        b: (None if (b == root or b in root_ancestors) else classified_bones[b].get('parent'))
+        for b in order
+    }
     rr_rel = {}
-    off_rel = {}
     vec_loc = {}
     for b in order:
         p = parents[b]
         if p and p in rest_R:
             rr_rel[b] = rest_R[p].T @ rest_R[b]
-            off_rel[b] = rest_R[p].T @ (rest_H[b] - rest_H[p])
         vec_loc[b] = rest_R[b].T @ (rest_T[b] - rest_H[b])
     descendants = {}
     for b in order:
@@ -111,19 +133,23 @@ def apply_surface_floor_constraints(frames_out, order, root, classified_bones,
             if lower[-1] > upper[-1]:
                 raise ValueError('Observed root lies outside the configured envelope and contact correction budget')
         local_angles = {}
+        base_local_rots = {}
+        posed_offsets = {}
         original_heads = {}
         original_tails = {}
         for b in order:
-            info = classified_bones[b]
             parent = parents[b]
             initial = (np.asarray(bones[parent]['rot_mat_world']) @ rr_rel[b]
                        if parent and parent in bones else rest_R[b])
-            local_angles[b] = _euler(initial.T @ np.asarray(bones[b]['rot_mat_world']))
+            # Fixed means keeping the observed local basis, not resetting to the
+            # bind pose. Its rotation and translation may both be nonzero in p0.
+            base_local_rots[b] = initial.T @ np.asarray(bones[b]['rot_mat_world'])
+            local_angles[b] = _euler(base_local_rots[b])
             original_heads[b] = np.asarray(bones[b]['head_3d'], dtype=float)
             original_tails[b] = np.asarray(bones[b]['tail_3d'], dtype=float)
-            if info.get('fixed_local', False) or info.get('kind') == 'rigid':
-                local_angles[b] = np.zeros(3)
-        base_local_rots = {b: _rotation(local_angles[b]) for b in order}
+            if parent and parent in bones:
+                posed_offsets[b] = np.asarray(bones[parent]['rot_mat_world']).T @ (
+                    original_heads[b] - np.asarray(bones[parent]['head_3d']))
         initial_x = np.array([local_angles[b][i] for b, i in variables] + [0.])
         initial_x = np.clip(initial_x, lower, upper)
 
@@ -144,14 +170,22 @@ def apply_surface_floor_constraints(frames_out, order, root, classified_bones,
                 heads, rotations, tails = {}, {}, {}
                 iter_order = order
             for b in iter_order:
+                if b in root_ancestors:
+                    rotations[b] = np.asarray(bones[b]['rot_mat_world'], dtype=float).copy()
+                    heads[b] = original_heads[b].copy()
+                    tails[b] = original_tails[b].copy()
+                    continue
                 parent = parents[b]
                 if parent and parent in rotations:
                     rp = rotations[parent]
                     initial = rp @ rr_rel[b]
-                    head = heads[parent] + rp @ off_rel[b]
-                else:
+                    head = heads[parent] + rp @ posed_offsets[b]
+                elif b == root:
                     initial = rest_R[b]
                     head = np.array([root_head[0], root_head[1], root_head[2] + x[-1]*height])
+                else:
+                    initial = rest_R[b]
+                    head = original_heads[b].copy()
                 r_loc = _rotation(angles[b]) if b in changed_bones else base_local_rots[b]
                 rot = initial @ r_loc
                 rotations[b] = rot
@@ -290,7 +324,14 @@ def apply_surface_floor_constraints(frames_out, order, root, classified_bones,
         # Always optimize from the observed kinematic pose `initial_x` first so
         # valid crouching/kneeling postures are not discarded at iteration 0 just
         # because a distal toe/claw has minor initial penetration.
-        x, best_cost, active_pen = optimize_from(initial_x.copy())
+        if initial_penetration == 0. and not locks:
+            # A clear surface with no active contact is already a fixed point;
+            # the previous-frame prior must not smooth valid airborne motion.
+            x = initial_x.copy()
+            r = residual(x)
+            best_cost, active_pen = float(r @ r), 0.
+        else:
+            x, best_cost, active_pen = optimize_from(initial_x.copy())
         needed_from_init = active_pen + min(1e-5 * height, tolerance * .01)
         if active_pen > tolerance and (x[-1] + needed_from_init / height > upper[-1] + 1e-10):
             # Endpoint penetration stalled beyond a hinge's local minimum and

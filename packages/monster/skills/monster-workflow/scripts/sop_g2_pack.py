@@ -51,6 +51,7 @@ from bone_taxonomy import (  # noqa: E402
     classify_rig_bones,
     euler_xyz_to_matrix_numpy,
     probe_rig_joint_limits,
+    inspect_pose_boundary_utilization,
     sample_boundary_exploration_pose_euler_dict,
     sample_root_translation_offset,
     sample_stratified_pose_euler_dict,
@@ -146,9 +147,37 @@ def render_pose_raw_and_overlay(
     calib: dict[str, Any],
     raw_png_path: Path,
     overlay_png_path: Path,
+    reader_points: dict[str, Any] | None = None,
+    keypoint_names: list[str] | None = None,
 ) -> dict[str, Any]:
     """Renders the multi-view composite raw image and 2D bone label overlay image at target studio resolution."""
     from PIL import Image, ImageDraw
+
+    if reader_points is not None:
+        if not raw_png_path.is_file():
+            raise FileNotFoundError(f"V3 G2 requires its actual rendered image: {raw_png_path}")
+        with Image.open(raw_png_path) as source:
+            image = source.convert("RGB")
+        if image.size != (calib["composite_width"], calib["composite_height"]):
+            raise ValueError("V3 G2 image dimensions differ from actual camera calibration")
+        draw = ImageDraw.Draw(image)
+        slots = {name: k for k, name in enumerate(keypoint_names or [])}
+        labels = {}
+        for i, view in enumerate(calib["view_order"]):
+            uv = np.asarray(reader_points[view]["uv"], dtype=float)
+            if uv.shape != (len(slots), 2) or not np.isfinite(uv).all():
+                raise ValueError(f"V3 G2 invalid Reader point slots for {view}")
+            offset = np.array([0, i * calib["panel_height"]] if calib.get("layout") == "stacked" else [i * calib["panel_width"], 0])
+            for bone in classified_bones:
+                a, b = (uv[slots[f"{bone}.{end}"]] for end in ("head", "tail"))
+                labels.setdefault(bone, {}).update({f"{view}_uv_head": a.tolist(), f"{view}_uv_tail": b.tolist()})
+                draw.line([tuple(a + offset), tuple(b + offset)], fill=(56, 189, 248), width=3)
+            for point in uv:
+                x, y = point + offset
+                draw.ellipse((x-2, y-2, x+2, y+2), fill=(250,204,21))
+            draw.text(tuple(offset + [14,12]), f"{pose_id} | {view.upper()} | {regime}", fill=(240,246,255))
+        image.save(overlay_png_path)
+        return labels
 
     panel_w = int(calib["panel_width"])
     panel_h = int(calib["panel_height"])
@@ -258,11 +287,10 @@ def _ensure_pose_view_crops_and_bounds(
             raw_im = Image.open(raw_path)
             b_map["all"] = _compute_image_foreground_bounds(raw_im)
             for idx, v in enumerate(views):
-                box = (idx * pw, 0, (idx + 1) * pw, ph)
+                box = (0, idx * ph, pw, (idx + 1) * ph) if calib.get('layout') == 'stacked' else (idx * pw, 0, (idx + 1) * pw, ph)
                 crop_im = raw_im.crop(box)
                 crop_path = out_dir / f"{pid}_{v}.png"
-                if not crop_path.is_file():
-                    crop_im.save(crop_path)
+                crop_im.save(crop_path)
                 b_map[v] = _compute_image_foreground_bounds(crop_im)
         else:
             b_map.setdefault("all", [int(comp_w * 0.08), int(comp_h * 0.18), int(comp_w * 0.92), int(comp_h * 0.82)])
@@ -273,8 +301,8 @@ def _ensure_pose_view_crops_and_bounds(
             ov_im = Image.open(ov_path)
             for idx, v in enumerate(views):
                 ov_crop_path = out_dir / f"{pid}_overlay_{v}.png"
-                if not ov_crop_path.is_file():
-                    ov_im.crop((idx * pw, 0, (idx + 1) * pw, ph)).save(ov_crop_path)
+                box = (0, idx * ph, pw, (idx + 1) * ph) if calib.get('layout') == 'stacked' else (idx * pw, 0, (idx + 1) * pw, ph)
+                ov_im.crop(box).save(ov_crop_path)
 
         rec["bounds"] = b_map
 
@@ -352,6 +380,7 @@ def build_g2_review_html(
             "boundary_joints": b_joints,
             "max_utilization": max_util,
             "metrics": metrics,
+            "metrics_available": bool(r.get('metrics')) if r.get('reader_points') is not None else True,
             "bounds": r.get("bounds", {}),
             "uv_labels": r.get("uv_labels", {}),
         })
@@ -520,8 +549,32 @@ def build_g2_review_pack(
             str(seed),
         ]
     )
+    reader_v3 = rig_meta.get("reader_contract") == "monster-reader-v3"
+    if reader_v3 and not worker_cmd:
+        raise RuntimeError("V3 G2 requires actual Blender boundary poses; schematic fallback is unavailable")
     if worker_cmd and blend_path.is_file():
-        subprocess.run(worker_cmd, check=False)
+        subprocess.run(worker_cmd, check=reader_v3)
+    actual_data = None
+    if reader_v3:
+        from pose_features import dataset_signature
+        from pose_sampling_v3 import SAMPLING_CONTRACT
+        from rig_pose import START_POSE_CONTRACT
+        actual_data = json.loads((g2_dir / "keypoints_gt.json").read_text())
+        if (actual_data.get("reader_contract") != "monster-reader-v3"
+            or actual_data.get("sampling_contract") != SAMPLING_CONTRACT
+            or actual_data.get("start_pose_contract") != START_POSE_CONTRACT
+            or set(actual_data.get("bone_names", ())) != set(classified)
+            or len(actual_data.get("samples", ())) != num_poses
+            or actual_data.get("signature") != dataset_signature(blend_path, meta_path, num_poses, seed)):
+            raise ValueError("V3 G2 labels do not match the selected rig, sampling contract, seed or pose count")
+        calib = actual_data["training_calibration"]
+        if not calib.get("cameras") or not actual_data.get("coverage_audit", {}).get("boundary_exploration_audit", {}).get("passed"):
+            raise ValueError("V3 G2 requires actual cameras and a passed boundary audit")
+        with np.load(g2_dir/'rig_skinning.npz') as archive:
+            actual_skin = {name: archive[name] for name in archive.files}
+        actual_skin['bone_names'] = actual_data['bone_names']
+        formal_gate = verify_rig_formal_gate(actual_data['bones'],joint_limits_profile,rig_skinning=actual_skin,assert_passed=True)
+        (dirs['checks_dir']/'formal_gate_rig.json').write_text(json.dumps(formal_gate,indent=2)+'\n')
 
     rng = random.Random(int(seed))
     pose_records: list[dict[str, Any]] = []
@@ -531,24 +584,39 @@ def build_g2_review_pack(
 
     for idx in range(int(num_poses)):
         pose_id = f"pose_{idx + 1:03d}"
-        eulers, regime, boundary_info = sample_boundary_exploration_pose_euler_dict(
-            classified,
-            rng=rng,
-            sample_idx=idx,
-            total_samples=int(num_poses),
-            joint_limits_profile=joint_limits_profile,
-        )
-        root_off = sample_root_translation_offset(
-            classified,
-            rng,
-            sample_idx=idx,
-            joint_limits_profile=joint_limits_profile,
-            boundary_exploration=True,
-        )
-        endpoints = compute_posed_bone_endpoints_fk(classified, eulers, root_offset=root_off)
+        native_record = actual_data['samples'][idx] if actual_data else None
+        if native_record is not None:
+            from pose_sampling_v3 import sampling_audit_inputs
+            eulers = {n: b['euler_xyz'] for n, b in native_record['joints'].items()}
+            regime = native_record['sampling_regime']
+            audit_pose, fitted_meta = sampling_audit_inputs([native_record], classified)
+            boundary_info = inspect_pose_boundary_utilization(
+                {n: b['euler_xyz'] for n, b in audit_pose[0]['joints'].items()}, fitted_meta)
+            root_off = native_record['v3_sampling']['translation']
+            endpoints = native_record['joints']
+        else:
+            eulers, regime, boundary_info = sample_boundary_exploration_pose_euler_dict(
+                classified,
+                rng=rng,
+                sample_idx=idx,
+                total_samples=int(num_poses),
+                joint_limits_profile=joint_limits_profile,
+            )
+            root_off = sample_root_translation_offset(
+                classified,
+                rng,
+                sample_idx=idx,
+                joint_limits_profile=joint_limits_profile,
+                boundary_exploration=True,
+            )
+            endpoints = compute_posed_bone_endpoints_fk(classified, eulers, root_offset=root_off)
 
         raw_png = g2_dir / f"{pose_id}.png"
         ov_png = g2_dir / f"{pose_id}_overlay.png"
+        if native_record is not None:
+            from PIL import Image
+            with Image.open(g2_dir / 'images' / native_record['image']) as native_image:
+                native_image.convert('RGB').save(raw_png)
         uv_labels = render_pose_raw_and_overlay(
             pose_id=pose_id,
             regime=regime,
@@ -557,9 +625,11 @@ def build_g2_review_pack(
             calib=calib,
             raw_png_path=raw_png,
             overlay_png_path=ov_png,
+            reader_points=native_record['reader_points'] if native_record else None,
+            keypoint_names=actual_data['keypoint_names'] if actual_data else None,
         )
         overlay_paths.append(ov_png)
-        audit_samples.append({"sampling_regime": regime, "joints": eulers})
+        audit_samples.append(native_record if native_record else {"sampling_regime": regime, "joints": eulers})
         pose_records.append({
             "pose_id": pose_id,
             "sampling_regime": regime,
@@ -570,13 +640,18 @@ def build_g2_review_pack(
             "max_utilization": boundary_info.get("max_utilization", 0.0),
             "joints_rad": {k: [round(float(x), 5) for x in v] for k, v in eulers.items()},
             "uv_labels": uv_labels,
+            **({"reader_points": native_record['reader_points'], "v3_sampling": native_record['v3_sampling']} if native_record else {}),
         })
 
     overview_jpg = g2_dir / "g2_50_overview.jpg"
     build_g2_overview_grid(overlay_paths, overview_jpg)
 
-    coverage_audit = audit_pose_dataset_coverage(audit_samples, classified, enforce_anatomical_floor=True)
-    boundary_audit = audit_boundary_exploration_coverage(audit_samples, classified)
+    from pose_sampling_v3 import sampling_audit_inputs
+    audit_samples, audit_meta = sampling_audit_inputs(audit_samples, classified)
+    coverage_audit = audit_pose_dataset_coverage(audit_samples, audit_meta, enforce_anatomical_floor=not reader_v3)
+    boundary_audit = audit_boundary_exploration_coverage(audit_samples, audit_meta)
+    if reader_v3 and (not coverage_audit['passed'] or not boundary_audit['passed']):
+        raise RuntimeError(f"V3 G2 actual pose coverage failed: {coverage_audit.get('failures')} {boundary_audit.get('failures')}")
     coverage_audit["boundary_exploration_audit"] = boundary_audit
     redraw_log_path = g2_dir / "rejection_redraw_log.json"
     redraw_log_path.write_text(json.dumps(rejection_redraw_log, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -588,9 +663,12 @@ def build_g2_review_pack(
         "selected_candidate_id": selected_cid,
         "joint_limits_sha256": jl_sha,
         "limits": {b: classified[b].get("limits_rad") for b in sorted(classified)},
+        **({"reader_contract": actual_data['reader_contract'], "sampling_contract": actual_data['sampling_contract'], "actual_labels_sha256": sha256_file(g2_dir/'keypoints_gt.json'), "calibration": calib} if actual_data else {}),
     })[:16]
 
     summary = {
+        **({"reader_contract":actual_data['reader_contract'], "sampling_contract":actual_data['sampling_contract'],
+            "actual_labels_sha256":sha256_file(g2_dir/'keypoints_gt.json')} if actual_data else {}),
         "monster_id": monster_id,
         "selected_candidate_id": selected_cid,
         "seed": int(seed),
@@ -621,10 +699,10 @@ def build_g2_review_pack(
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     calib_path = g2_dir / "calibration.json"
-    if not calib_path.is_file():
+    if reader_v3 or not calib_path.is_file():
         calib_path.write_text(json.dumps(calib, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     g2_limits_copy = g2_dir / "joint_limits.json"
-    if limits_path.is_file() and not g2_limits_copy.is_file():
+    if limits_path.is_file() and (reader_v3 or not g2_limits_copy.is_file()):
         g2_limits_copy.write_text(limits_path.read_text(encoding="utf-8"), encoding="utf-8")
 
     html_path = g2_dir / "g2_review.html"
@@ -638,6 +716,10 @@ def build_g2_review_pack(
         "G2",
         review_pack_path=str(html_path),
         materials={
+            **({"reader_contract": actual_data['reader_contract'], "native_labels_json": str(g2_dir/'keypoints_gt.json'),
+                "pose_records_json":str(records_path), "calibration_json":str(calib_path),
+                "pose_images":[str(g2_dir/r[k]) for r in pose_records for k in ('raw_rel','overlay_rel')]
+                    + [str(g2_dir/f"{r['pose_id']}{prefix}_{view}.png") for r in pose_records for prefix in ('','_overlay') for view in calib['view_order']]} if actual_data else {}),
             "selected_candidate_id": selected_cid,
             "seed": int(seed),
             "num_poses": int(num_poses),

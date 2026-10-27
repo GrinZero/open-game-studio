@@ -47,7 +47,7 @@ from sop_preflight import (  # noqa: E402
     _worker_command,
     resolve_scratch_dirs,
 )
-from sop_formal_gate import verify_trajectory_formal_gate  # noqa: E402
+from sop_formal_gate import verify_trajectory_formal_gate, _v3_bones  # noqa: E402
 from surface_contact import assert_surface_contact_quality  # noqa: E402
 
 
@@ -148,12 +148,19 @@ def verify_animated_glb_and_loop_seam(
     vert_corr = 1.0
     frames: list[dict[str, Any]] = []
     formal_gate_passed = True
+    v3 = _v3_bones(rig_bones or {})
+    if v3 and (not traj_json_path or not traj_json_path.is_file()):
+        raise ValueError('V3 delivery requires its actual reconstructed trajectory')
 
     if traj_json_path and traj_json_path.is_file():
         traj_data = json.loads(traj_json_path.read_text(encoding="utf-8"))
+        v3 = v3 or traj_data.get('reader_contract') == 'monster-reader-v3'
+        if v3 and (traj_data.get('reader_contract') != 'monster-reader-v3' or not traj_data.get('frames') or traj_data.get('gate_passed') is not True):
+            raise ValueError('V3 delivery requires nonempty v3 poses and a passed calibrated reading gate')
         gate_passed = bool(traj_data.get("gate_passed", True))
         epipolar_px = float(traj_data.get("mean_epipolar_diff_px", 0.0))
-        vert_corr = float(traj_data.get("vertical_trajectory_corr", 1.0))
+        corr_value = traj_data.get("vertical_trajectory_corr", 1.0)
+        vert_corr = None if v3 and corr_value is None else float(corr_value)
         frames = traj_data.get("frames", [])
         if not gate_passed:
             raise RuntimeError(
@@ -180,6 +187,7 @@ def verify_animated_glb_and_loop_seam(
     }
 
     bpy_verified = False
+    bpy_report = None
     if has_json_chunk:
         report_tmp = glb_path.parent / f"{glb_path.stem}_delivery_check.json"
         worker_cmd = _worker_command(
@@ -192,11 +200,16 @@ def verify_animated_glb_and_loop_seam(
                 "1" if is_loop else "0",
                 "--out_report",
                 str(report_tmp),
+                *(['--joints_json',str(traj_json_path)] if v3 else []),
             ]
         )
         if worker_cmd:
             res = subprocess.run(worker_cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            bpy_verified = res.returncode == 0 and report_tmp.is_file()
+            if res.returncode == 0 and report_tmp.is_file():
+                bpy_report = json.loads(report_tmp.read_text())
+                bpy_verified = bpy_report.get('valid') is True and (not is_loop or bpy_report.get('seam_passed') is True)
+    if v3 and not bpy_verified:
+        raise RuntimeError('V3 delivery requires successful actual Blender GLB verification')
 
     return {
         "glb_file": str(glb_path.resolve()),
@@ -206,10 +219,11 @@ def verify_animated_glb_and_loop_seam(
         "animations_count": animations_count,
         "sync_gate_passed": gate_passed,
         "mean_epipolar_diff_px": round(epipolar_px, 3),
-        "vertical_trajectory_corr": round(vert_corr, 4),
+        "vertical_trajectory_corr": round(vert_corr, 4) if vert_corr is not None else None,
         "is_loop": is_loop,
         "loop_seam": seam_metrics,
         "blender_roundtrip_verified": bpy_verified,
+        "blender_readback": bpy_report,
         "formal_gate_passed": formal_gate_passed,
         "valid": gate_passed and formal_gate_passed and bool(seam_metrics["seam_ok"]),
     }

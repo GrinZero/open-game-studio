@@ -43,8 +43,24 @@ FEATURE_ENV = "MONSTER_ENABLE_DEPTH_VISIBILITY"
 RESOLUTION_2K_ENV = "MONSTER_ENABLE_2K"
 THREE_VIEW_ENV = "MONSTER_ENABLE_3VIEW"
 DENSE_SURFACE_ENV = "MONSTER_ENABLE_DENSE_SURFACE"
+PIPELINE_MODE_ENV = "MONSTER_PIPELINE_MODE"
+RIG_CONTRACT_ENV = "MONSTER_RIG_CONTRACT"
+FOLD_DIGITS_ENV = "MONSTER_FOLD_DIGITS"
+KEYPOINT_MODE_ENV = "MONSTER_KEYPOINT_MODE"
+VISIBILITY_MODE_ENV = "MONSTER_VISIBILITY_MODE"
+DECODE_MODE_ENV = "MONSTER_DECODE_MODE"
+SOLVER_MODE_ENV = "MONSTER_SOLVER_MODE"
+CLEAN_MOTION_ENV = "MONSTER_CLEAN_MOTION"
+SURFACE_CONTACT_ENV = "MONSTER_SURFACE_CONTACT"
+EXPORT_NPZ_LABELS_ENV = "MONSTER_EXPORT_NPZ_LABELS"
+NO_CUT_TRACKS_ENV = "MONSTER_NO_CUT_TRACKS"
+TWOWAY_JUMP_ENV = "MONSTER_TWOWAY_JUMP"
+PANEL_DRIFT_ENV = "MONSTER_PANEL_DRIFT"
+BACKBONE_ENV = "MONSTER_BACKBONE"
+READER_CROPS_ENV = "MONSTER_READER_CROPS"
+READER_DENSE_ENV = "MONSTER_READER_DENSE"
 DATASET_SCHEMA = "monster-pose-depth-visibility-v1"
-FEATURE_VERSION = "v2.3-depth-visibility-1"
+FEATURE_VERSION = "v3-anatomical-reader-4"
 DEFAULT_SYNTH_SAMPLES = 5000
 DEFAULT_STUDIO_RESOLUTION = (672, 768, 1344, 768)
 STUDIO_2K_RESOLUTION = (1280, 1440, 2560, 1440)
@@ -54,32 +70,212 @@ DUAL_VIEW_ORDER = ("front", "side")
 THREE_VIEW_ORDER = ("left", "front", "right")
 
 
-def features_enabled() -> bool:
-    value = os.environ.get(FEATURE_ENV, "1").strip().lower()
+def _parse_bool_env(env_key: str, default: str = "0") -> bool:
+    value = os.environ.get(env_key, default).strip().lower()
     if value not in {"0", "1", "true", "false", "on", "off"}:
-        raise ValueError(f"Invalid {FEATURE_ENV}: {value!r}")
+        raise ValueError(f"Invalid {env_key}: {value!r}")
     return value in {"1", "true", "on"}
+
+
+def pipeline_mode() -> str:
+    """Master switch between the two supported end-to-end pipelines:
+    - `'video2rig'` (Path 1, default): Full video2rig pipeline + MonsterStudio enhancements.
+    - `'legacy'`    (Path 2, feature-flagged): Legacy MonsterStudio v2.3 pipeline.
+    """
+    raw = os.environ.get(PIPELINE_MODE_ENV, "video2rig").strip().lower()
+    if raw in {"video2rig", "v3", "1", "true", "on", "default"}:
+        return "video2rig"
+    if raw in {"legacy", "v2", "v2.3", "0", "false", "off"}:
+        return "legacy"
+    raise ValueError(
+        f"Invalid {PIPELINE_MODE_ENV}: {raw!r} (expected 'video2rig' or 'legacy')"
+    )
+
+
+def video2rig_mode_enabled() -> bool:
+    return pipeline_mode() == "video2rig"
+
+
+def rig_contract_v3_enabled() -> bool:
+    raw = os.environ.get(RIG_CONTRACT_ENV, "").strip().lower()
+    if not raw:
+        return video2rig_mode_enabled()
+    if raw in {"v3", "video2rig", "1", "true", "on"}:
+        return True
+    if raw in {"legacy", "v2", "0", "false", "off"}:
+        return False
+    raise ValueError(f"Invalid {RIG_CONTRACT_ENV}: {raw!r}")
+
+
+def fold_digits_enabled() -> bool:
+    """Our default preserves full finger/toe digit chains (`fold_digits=False`) unless explicitly enabled."""
+    if FOLD_DIGITS_ENV in os.environ:
+        return _parse_bool_env(FOLD_DIGITS_ENV, "0")
+    if "MONSTER_PRUNE_DIGITS" in os.environ:
+        return _parse_bool_env("MONSTER_PRUNE_DIGITS", "0")
+    return False
+
+
+def keypoint_mode() -> str:
+    raw = os.environ.get(KEYPOINT_MODE_ENV, "").strip().lower()
+    if not raw:
+        return "video2rig" if video2rig_mode_enabled() else "legacy"
+    if raw in {"video2rig", "v3", "surface"}:
+        return "video2rig"
+    if raw in {"legacy", "v2", "head_tail"}:
+        return "legacy"
+    raise ValueError(f"Invalid {KEYPOINT_MODE_ENV}: {raw!r}")
+
+
+def visibility_mode() -> str:
+    raw = os.environ.get(VISIBILITY_MODE_ENV, "").strip().lower()
+    if not raw:
+        return "hybrid" if video2rig_mode_enabled() else "bvh"
+    if raw in {"zbuffer", "visible_npz", "video2rig"}:
+        return "zbuffer"
+    if raw in {"bvh", "raycast", "legacy"}:
+        return "bvh"
+    if raw in {"hybrid", "both"}:
+        return "hybrid"
+    raise ValueError(f"Invalid {VISIBILITY_MODE_ENV}: {raw!r}")
+
+
+def decode_mode() -> str:
+    raw = os.environ.get(DECODE_MODE_ENV, "").strip().lower()
+    if not raw:
+        return "parabola" if video2rig_mode_enabled() else "dsnt"
+    if raw in {"parabola", "video2rig", "peak_parabola"}:
+        return "parabola"
+    if raw in {"dsnt", "soft_argmax", "windowed_dsnt"}:
+        return "dsnt"
+    raise ValueError(f"Invalid {DECODE_MODE_ENV}: {raw!r}")
+
+
+def solver_mode() -> str:
+    raw = os.environ.get(SOLVER_MODE_ENV, "").strip().lower()
+    if not raw:
+        return "reprojection_v3" if video2rig_mode_enabled() else "legacy_3d_kind"
+    if raw in {"reprojection_v3", "video2rig", "v3", "2d_reprojection"}:
+        return "reprojection_v3"
+    if raw in {"legacy_3d_kind", "legacy", "v2", "3d_triangulate"}:
+        return "legacy_3d_kind"
+    raise ValueError(f"Invalid {SOLVER_MODE_ENV}: {raw!r}")
+
+
+def clean_motion_enabled() -> bool:
+    if CLEAN_MOTION_ENV in os.environ:
+        return _parse_bool_env(CLEAN_MOTION_ENV, "1")
+    return video2rig_mode_enabled()
+
+
+def surface_contact_enabled() -> bool:
+    if SURFACE_CONTACT_ENV in os.environ:
+        return _parse_bool_env(SURFACE_CONTACT_ENV, "1")
+    return video2rig_mode_enabled()
+
+
+def export_npz_labels_enabled() -> bool:
+    if EXPORT_NPZ_LABELS_ENV in os.environ:
+        return _parse_bool_env(EXPORT_NPZ_LABELS_ENV, "1")
+    return video2rig_mode_enabled()
+
+
+def no_cut_tracks_enabled() -> bool:
+    if NO_CUT_TRACKS_ENV in os.environ:
+        return _parse_bool_env(NO_CUT_TRACKS_ENV, "1")
+    return video2rig_mode_enabled()
+
+
+def twoway_jump_enabled() -> bool:
+    if TWOWAY_JUMP_ENV in os.environ:
+        return _parse_bool_env(TWOWAY_JUMP_ENV, "1")
+    return video2rig_mode_enabled()
+
+
+def panel_drift_enabled() -> bool:
+    if PANEL_DRIFT_ENV in os.environ:
+        return _parse_bool_env(PANEL_DRIFT_ENV, "1")
+    return video2rig_mode_enabled()
+
+
+def backbone_mode() -> str:
+    """Resolve the active DINOv2 backbone variant:
+    - `'dinov2-small'`      (default in video2rig mode: ViT-S/14 mode, d=384, 12 blocks, FROZEN=4)
+    - `'dinov2_vitb14_reg'` (default in legacy mode: ViT-B/14 with registers, d=768, 12 blocks)
+    """
+    raw = os.environ.get(BACKBONE_ENV, "").strip().lower()
+    if not raw:
+        return "dinov2-small" if video2rig_mode_enabled() else "dinov2_vitb14_reg"
+    if raw in {"dinov2_vitb14_reg", "vitb14_reg", "vitb14", "base", "facebook/dinov2-base"}:
+        return "dinov2_vitb14_reg"
+    if raw in {
+        "dinov2-small",
+        "facebook/dinov2-small",
+        "dinov2_vits14",
+        "dinov2_vits14_reg",
+        "vits14",
+        "vits14_reg",
+        "small",
+    }:
+        return "dinov2-small"
+    raise ValueError(
+        f"Invalid {BACKBONE_ENV}: {raw!r} (expected 'dinov2_vitb14_reg' or 'dinov2-small')"
+    )
+
+
+def reader_crops_enabled() -> bool:
+    """Whether the independent hand/claw crop amplifier (`reader-crops.pt`) is enabled (default off)."""
+    return _parse_bool_env(READER_CROPS_ENV, "0")
+
+
+def reader_dense_enabled() -> bool:
+    """Whether the independent dense surface reader (`reader-dense.pt`) is enabled (default off)."""
+    return _parse_bool_env(READER_DENSE_ENV, "0")
+
+
+def pipeline_feature_flags() -> dict[str, object]:
+    """Returns a complete snapshot of the active two-path feature flag configuration."""
+    mode = pipeline_mode()
+    return {
+        "pipeline_mode": mode,
+        "video2rig_mode": mode == "video2rig",
+        "backbone_mode": backbone_mode(),
+        "reader_crops": reader_crops_enabled(),
+        "reader_dense": reader_dense_enabled(),
+        "rig_contract_v3": rig_contract_v3_enabled(),
+        "fold_digits": fold_digits_enabled(),
+        "keypoint_mode": keypoint_mode(),
+        "visibility_mode": visibility_mode(),
+        "decode_mode": decode_mode(),
+        "solver_mode": solver_mode(),
+        "clean_motion": clean_motion_enabled(),
+        "surface_contact": surface_contact_enabled(),
+        "export_npz_labels": export_npz_labels_enabled(),
+        "no_cut_tracks": no_cut_tracks_enabled(),
+        "twoway_jump": twoway_jump_enabled(),
+        "panel_drift": panel_drift_enabled(),
+        "depth_visibility": features_enabled(),
+        "dense_surface": dense_surface_enabled(),
+        "mocap_priors": mocap_priors_enabled(),
+        "enable_2k": resolution_2k_enabled(),
+        "enable_3view": three_view_enabled(),
+    }
+
+
+def features_enabled() -> bool:
+    return _parse_bool_env(FEATURE_ENV, "1")
 
 
 def dense_surface_enabled() -> bool:
-    value = os.environ.get(DENSE_SURFACE_ENV, "0").strip().lower()
-    if value not in {"0", "1", "true", "false", "on", "off"}:
-        raise ValueError(f"Invalid {DENSE_SURFACE_ENV}: {value!r}")
-    return value in {"1", "true", "on"}
+    return _parse_bool_env(DENSE_SURFACE_ENV, "0")
 
 
 def resolution_2k_enabled() -> bool:
-    value = os.environ.get(RESOLUTION_2K_ENV, "0").strip().lower()
-    if value not in {"0", "1", "true", "false", "on", "off"}:
-        raise ValueError(f"Invalid {RESOLUTION_2K_ENV}: {value!r}")
-    return value in {"1", "true", "on"}
+    return _parse_bool_env(RESOLUTION_2K_ENV, "0")
 
 
 def three_view_enabled() -> bool:
-    value = os.environ.get(THREE_VIEW_ENV, "0").strip().lower()
-    if value not in {"0", "1", "true", "false", "on", "off"}:
-        raise ValueError(f"Invalid {THREE_VIEW_ENV}: {value!r}")
-    return value in {"1", "true", "on"}
+    return _parse_bool_env(THREE_VIEW_ENV, "0")
 
 
 def studio_view_order(enable_3view: bool | None = None) -> tuple[str, ...]:
@@ -145,6 +341,23 @@ def dataset_signature(blend_path, meta_path, num_samples, seed=42):
         res_tag = ":2560x1440" if use_2k else ""
     if use_dense:
         res_tag += ":dense"
+    if pipeline_mode() != "video2rig":
+        res_tag += f":mode={pipeline_mode()}"
+    if keypoint_mode() not in ("video2rig", "legacy" if pipeline_mode() == "legacy" else "video2rig"):
+        res_tag += f":kp={keypoint_mode()}"
+    if visibility_mode() not in ("hybrid" if pipeline_mode() == "video2rig" else "bvh",):
+        res_tag += f":vis={visibility_mode()}"
+    digest.update(json.dumps({key: os.environ.get(key) for key in ("MONSTER_CAMERA_LENS", "MONSTER_STUDIO_LAYOUT", "MONSTER_FOLD_DIGITS")},sort_keys=True).encode())
+    from strip_renderer import strip_settings
+    from blender_runtime import BPY_VERSION
+    digest.update(json.dumps({
+        "render_contract": "monster-eevee-crop-v1",
+        "bpy_version": BPY_VERSION,
+        "engine": os.environ.get("MONSTER_RENDER_ENGINE", "EEVEE").upper(),
+        "eevee_samples": int(os.environ.get("MONSTER_EEVEE_SAMPLES", "8")),
+        "cycles_samples": int(os.environ.get("MONSTER_CYCLES_SAMPLES", "16")),
+        "strip": strip_settings(),
+    }, sort_keys=True).encode())
     digest.update(f"{FEATURE_VERSION}:{features_enabled()}:{int(num_samples)}:{int(seed)}{res_tag}".encode())
     return digest.hexdigest()
 
@@ -157,10 +370,22 @@ def dataset_cache_matches(synth_dir, blend_path, meta_path, num_samples):
             return False
         if data.get("depth_visibility_enabled", False) != features_enabled():
             return False
-        if bool(data.get("dense_surface_enabled", False)) != dense_surface_enabled():
+        v3 = data.get("reader_contract") == "monster-reader-v3"
+        if v3 and data.get("start_pose_contract") != "monster-start-pose-v1":
+            return False
+        if v3 and data.get("context_geometry_contract") != "monster-context-pose-v1":
+            return False
+        if v3 and data.get('sampling_contract') != 'monster-calibrated-sampling-v1':
+            return False
+        if bool(data.get("dense_surface_enabled", False)) != (v3 or dense_surface_enabled()):
             return False
         panel_w, panel_h, comp_w, comp_h = studio_resolution()
         calib = data.get("calibration", {})
+        layout=os.environ.get('MONSTER_STUDIO_LAYOUT','horizontal')
+        if v3 and calib.get('layout','horizontal') != layout:
+            return False
+        if v3 and layout=='stacked':
+            comp_w,comp_h=panel_w,panel_h*2
         if calib.get("panel_width") != panel_w or calib.get("panel_height") != panel_h:
             return False
         if calib.get("composite_width") != comp_w or calib.get("composite_height") != comp_h:
@@ -169,7 +394,7 @@ def dataset_cache_matches(synth_dir, blend_path, meta_path, num_samples):
         if int(calib.get("num_views", 2)) != expected_views:
             return False
         samples = data["samples"]
-        if dense_surface_enabled():
+        if v3 or dense_surface_enabled():
             if not (path / "rig_skinning.npz").is_file():
                 return False
             if not all(

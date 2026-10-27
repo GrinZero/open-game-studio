@@ -81,17 +81,17 @@ def run_dinov2_2k_inference(
     ]
     local_repo = next((p for p in repo_candidates if p is not None and p.is_dir()), None)
     if local_repo is not None:
-        backbone = torch.hub.load(str(local_repo), "dinov2_vitb14_reg", source="local", pretrained=True)
+        backbone = torch.hub.load(str(local_repo), ck.get("backbone_name", "dinov2_vitb14_reg"), source="local", pretrained=True)
     else:
-        backbone = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14_reg", pretrained=True)
+        backbone = torch.hub.load("facebookresearch/dinov2", ck.get("backbone_name", "dinov2_vitb14_reg"), pretrained=True)
 
     model = trainer.MonsterDINOv2PoseProbe(
         num_kp,
         custom_backbone=backbone,
         enable_depth_visibility=True,
+        enable_dense_surface=bool(ck.get("dense_surface_enabled", False)),
     )
-    model.head.load_state_dict(ck["head_state_dict"])
-    model.aux_head.load_state_dict(ck["aux_state_dict"])
+    trainer.load_probe_weights(model, ck)
     model = model.to(device).eval()
 
     # Probe frame count or default to 288

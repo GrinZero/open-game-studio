@@ -59,13 +59,26 @@ if str(WORKER_DIR) not in sys.path:
 
 from bone_taxonomy import validate_canonical_rig_bone_names  # noqa: E402
 from pose_features import (  # noqa: E402
+    clean_motion_enabled,
+    decode_mode,
     dense_surface_enabled,
+    export_npz_labels_enabled,
     features_enabled,
+    fold_digits_enabled,
+    keypoint_mode,
     mocap_priors_enabled,
+    no_cut_tracks_enabled,
+    panel_drift_enabled,
+    pipeline_mode,
     resolution_2k_enabled,
+    rig_contract_v3_enabled,
+    solver_mode,
     studio_resolution,
     studio_view_order,
+    surface_contact_enabled,
     three_view_enabled,
+    twoway_jump_enabled,
+    visibility_mode,
 )
 
 VALID_GATES = ("G1", "G2", "G3", "final_batch")
@@ -109,6 +122,8 @@ def current_studio_config_snapshot(env: dict[str, str] | None = None) -> dict[st
         panel_w, panel_h, comp_w, comp_h = studio_resolution()
         views = list(studio_view_order())
         return {
+            "camera_lens": os.environ.get("MONSTER_CAMERA_LENS", "0"),
+            "camera_layout": os.environ.get("MONSTER_STUDIO_LAYOUT", "horizontal"),
             "panel_width": panel_w,
             "panel_height": panel_h,
             "composite_width": comp_w,
@@ -120,6 +135,19 @@ def current_studio_config_snapshot(env: dict[str, str] | None = None) -> dict[st
             "depth_visibility": features_enabled(),
             "dense_surface": dense_surface_enabled(),
             "mocap_priors": mocap_priors_enabled(),
+            "pipeline_mode": pipeline_mode(),
+            "rig_contract_v3": rig_contract_v3_enabled(),
+            "fold_digits": fold_digits_enabled(),
+            "keypoint_mode": keypoint_mode(),
+            "visibility_mode": visibility_mode(),
+            "decode_mode": decode_mode(),
+            "solver_mode": solver_mode(),
+            "clean_motion": clean_motion_enabled(),
+            "surface_contact": surface_contact_enabled(),
+            "export_npz_labels": export_npz_labels_enabled(),
+            "no_cut_tracks": no_cut_tracks_enabled(),
+            "twoway_jump": twoway_jump_enabled(),
+            "panel_drift": panel_drift_enabled(),
             "h3_profile": os.environ.get("H3_PROFILE", "full"),
         }
     finally:
@@ -133,6 +161,8 @@ def dataset_config_signature(cfg: dict[str, Any]) -> str:
     Note: `mocap_priors` is an inference/kinematic solver prior and does NOT alter dataset_signature!
     """
     core = {
+        "camera_lens": cfg.get("camera_lens", "0"),
+        "camera_layout": cfg.get("camera_layout", "horizontal"),
         "panel_width": cfg.get("panel_width"),
         "panel_height": cfg.get("panel_height"),
         "composite_width": cfg.get("composite_width"),
@@ -141,6 +171,12 @@ def dataset_config_signature(cfg: dict[str, Any]) -> str:
         "view_order": cfg.get("view_order"),
         "depth_visibility": bool(cfg.get("depth_visibility", True)),
         "dense_surface": bool(cfg.get("dense_surface", False)),
+        "pipeline_mode": cfg.get("pipeline_mode", "video2rig"),
+        "rig_contract_v3": bool(cfg.get("rig_contract_v3", True)),
+        "fold_digits": bool(cfg.get("fold_digits", False)),
+        "keypoint_mode": cfg.get("keypoint_mode", "video2rig"),
+        "visibility_mode": cfg.get("visibility_mode", "hybrid"),
+        "export_npz_labels": bool(cfg.get("export_npz_labels", True)),
     }
     return sha256_json(core)[:16]
 
@@ -298,7 +334,7 @@ def derive_invalidations(
         mark(["G1", "G2", "G3", "final_batch"], "输入模型基础缺陷（姿态/拓扑粘连/遮挡）变更，原 U1 与全部下游关卡失效")
     elif change_type == "skeleton_topology_defect":
         mark(["G1", "G2", "G3", "final_batch"], "自动骨架结构或层级缺陷，选定候选与全部依赖关卡失效")
-    elif change_type == "local_model_or_bone_naming_change":
+    elif change_type in ("local_model_or_bone_naming_change", "anatomical_reader_v3_migration"):
         mark(["G1", "G2", "G3", "final_batch"], "网格、骨骼规范命名/KIND分类、骨骼轴、蒙皮权重或装饰绑定发生实质改动")
     elif change_type == "sampler_script_or_seed_change":
         mark(["G2", "G3", "final_batch"], "随机采样脚本、关节角度范围或 seed 变更（保留 G1，失效 G2 及下游）")
@@ -306,7 +342,7 @@ def derive_invalidations(
         mark(["G2", "G3", "final_batch"], "姿态泛化不足，退回 G2 重新采样、训练与考试（保留 G1）")
     elif change_type == "resolution_or_view_mode_change":
         mark(["G3", "final_batch"], "目标最高分辨率档位（MONSTER_ENABLE_2K）或视角模式（MONSTER_ENABLE_3VIEW）变更，旧训练集/checkpoint/G3 失效（保留 G1/G2）")
-    elif change_type == "dense_surface_enabled_0_to_1":
+    elif change_type in ("dense_surface_enabled_0_to_1", "reader_label_contract_change"):
         mark(["G3", "final_batch"], "稠密表面坐标与可微 LBS 开关从 0 开启为 1，dataset_signature 变更，需重合成标签、训练 dense_head 并重考 G3（保留 G1/G2）")
     elif change_type in ("dense_surface_disabled_1_to_0", "mocap_priors_change", "exam_video_or_ik_fix"):
         mark(["G3", "final_batch"], f"仅运动学求解器/考试链路变更 ({change_type})，兼容现有数据集与 dinov2_head.pt，仅需重考 G3（保留 G1/G2/checkpoint）")
@@ -314,6 +350,14 @@ def derive_invalidations(
         mark(["final_batch"], "仅修改生产动作规格、提示词或动作 seed（保留 G1/G2/G3，仅重审对应动作批次）")
 
     # 2. Automatic fingerprint & studio_config diffing
+    if old_fp.get('g2_review_sha256') and cur_fp.get('g2_review_sha256') and old_fp['g2_review_sha256'] != cur_fp['g2_review_sha256']:
+        mark(['G2','G3','final_batch'], 'G2 实际姿态、标签、相机或审查图像已变更，需重新审查当前采样结果')
+    if (
+        old_fp.get("g3_review_sha256")
+        and cur_fp.get("g3_review_sha256")
+        and old_fp["g3_review_sha256"] != cur_fp["g3_review_sha256"]
+    ):
+        mark(["G3", "final_batch"], "G3 轨迹、诊断报告或审查材料已变更，需重新审查当前考试结果")
     if old_fp.get("u1_glb_sha256") and cur_fp.get("u1_glb_sha256") and old_fp["u1_glb_sha256"] != cur_fp["u1_glb_sha256"]:
         mark(["G1", "G2", "G3", "final_batch"], "U1 输入模型 SHA-256 变更，下游全部关卡自动失效")
 
@@ -346,6 +390,8 @@ def derive_invalidations(
         mark(["G2", "G3", "final_batch"], "joint_limits.json 关节角度限制变更（保留 G1，自动失效 G2/G3 及下游）")
 
     if old_cfg and new_studio_config:
+        if old_cfg.get('camera_lens','0') != cur_cfg.get('camera_lens','0') or old_cfg.get('camera_layout','horizontal') != cur_cfg.get('camera_layout','horizontal'):
+            mark(['G2','G3','final_batch'],'相机投影/排布变更，必须重新检查采样、生成标签并训练 Reader')
         old_res_view = (old_cfg.get("composite_width"), old_cfg.get("composite_height"), old_cfg.get("num_views"))
         cur_res_view = (cur_cfg.get("composite_width"), cur_cfg.get("composite_height"), cur_cfg.get("num_views"))
         if old_res_view[0] is not None and cur_res_view[0] is not None and old_res_view != cur_res_view:
@@ -371,6 +417,46 @@ def derive_invalidations(
                     ["G3", "final_batch"],
                     "MONSTER_ENABLE_MOCAP_PRIORS 开关变更，不改变数据集签名且兼容已有 dinov2_head.pt，仅失效 G3 需重考",
                 )
+        if old_cfg.get("pipeline_mode") is not None and cur_cfg.get("pipeline_mode") is not None:
+            if old_cfg.get("pipeline_mode") != cur_cfg.get("pipeline_mode"):
+                mark(
+                    ["G1", "G2", "G3", "final_batch"],
+                    f"主链路模式 MONSTER_PIPELINE_MODE 从 {old_cfg.get('pipeline_mode')} 切换为 {cur_cfg.get('pipeline_mode')}，骨骼/标签/求解器契约变更，全部关卡需重新验收",
+                )
+        if old_cfg.get("solver_mode") is not None and cur_cfg.get("solver_mode") is not None:
+            if old_cfg.get("solver_mode") != cur_cfg.get("solver_mode"):
+                mark(
+                    ["G3", "final_batch"],
+                    f"求解器模式 MONSTER_SOLVER_MODE 从 {old_cfg.get('solver_mode')} 切换为 {cur_cfg.get('solver_mode')}，需重考 G3",
+                )
+        for g1_flag in ("rig_contract_v3", "fold_digits"):
+            if old_cfg.get(g1_flag) is not None and cur_cfg.get(g1_flag) is not None:
+                if old_cfg.get(g1_flag) != cur_cfg.get(g1_flag):
+                    mark(
+                        ["G1", "G2", "G3", "final_batch"],
+                        f"骨架契约开关 {g1_flag} 从 {old_cfg.get(g1_flag)} 切换为 {cur_cfg.get(g1_flag)}，需重新执行 G1–G3",
+                    )
+        for g2_flag in ("keypoint_mode", "visibility_mode", "export_npz_labels"):
+            if old_cfg.get(g2_flag) is not None and cur_cfg.get(g2_flag) is not None:
+                if old_cfg.get(g2_flag) != cur_cfg.get(g2_flag):
+                    mark(
+                        ["G2", "G3", "final_batch"],
+                        f"标签/可见性契约开关 {g2_flag} 从 {old_cfg.get(g2_flag)} 切换为 {cur_cfg.get(g2_flag)}，需重新生成标签并验收 G2/G3",
+                    )
+        for g3_flag in (
+            "decode_mode",
+            "clean_motion",
+            "surface_contact",
+            "no_cut_tracks",
+            "twoway_jump",
+            "panel_drift",
+        ):
+            if old_cfg.get(g3_flag) is not None and cur_cfg.get(g3_flag) is not None:
+                if old_cfg.get(g3_flag) != cur_cfg.get(g3_flag):
+                    mark(
+                        ["G3", "final_batch"],
+                        f"推理/后处理开关 {g3_flag} 从 {old_cfg.get(g3_flag)} 切换为 {cur_cfg.get(g3_flag)}，需重考 G3",
+                    )
 
     ledger["fingerprints"] = cur_fp
     ledger["studio_config"] = cur_cfg
@@ -414,6 +500,65 @@ def resolve_g1_candidate_files(work_dir: Path, g1_info: dict[str, Any]) -> tuple
     return cid, meta, blend
 
 
+def snapshot_g3_materials(materials: dict[str, Any], review_pack_path: str) -> dict[str, Any]:
+    """Bind the report and the actual files the user will review, not their filenames."""
+    paths = {"review_html": review_pack_path}
+    for field in (
+        "exam_report_json", "prediction_trajectory_json", "source_exam_video",
+        "comparison_video_mp4", "baked_glb", "three_quarter_video", "silhouette_video",
+    ):
+        if materials.get(field):
+            paths[field] = materials[field]
+    if materials.get("reader_contract") == "monster-reader-v3":
+        missing = {"exam_report_json", "prediction_trajectory_json", "source_exam_video"} - paths.keys()
+        if missing:
+            raise ValueError(f"V3 G3 review lacks required materials: {sorted(missing)}")
+    artifacts = {}
+    for field, path in paths.items():
+        digest = sha256_file(path)
+        if digest is None:
+            raise ValueError(f"G3 review material missing: {field}={path}")
+        artifacts[field] = {"path": str(Path(path).resolve()), "sha256": digest}
+    return artifacts
+
+
+def snapshot_g2_materials(materials: dict[str, Any], review_pack_path: str) -> dict[str, Any]:
+    paths = {'review_html': review_pack_path}
+    for field in ('native_labels_json', 'pose_records_json', 'calibration_json', 'summary_json', 'joint_limits_path', 'overview_jpg'):
+        if not materials.get(field):
+            raise ValueError(f'V3 G2 review lacks {field}')
+        paths[field] = materials[field]
+    for i, image in enumerate(materials.get('pose_images') or []):
+        paths[f'pose_image_{i}'] = image
+    if not materials.get('pose_images'):
+        raise ValueError('V3 G2 review lacks actual pose images')
+    artifacts = {}
+    for field, path in paths.items():
+        digest = sha256_file(path)
+        if digest is None:
+            raise ValueError(f'V3 G2 material missing: {field}={path}')
+        artifacts[field] = {'path': str(Path(path).resolve()), 'sha256': digest}
+    return artifacts
+
+
+def verify_review_materials(ledger: dict[str, Any], ginfo: dict[str, Any], gate: str) -> None:
+    """Reject edits/deletions after submission or approval, keeping upstream decisions."""
+    materials = ginfo.get("materials") or {}
+    artifacts = materials.get(f"{gate.lower()}_review_artifacts")
+    if not artifacts:
+        if materials.get("reader_contract") == "monster-reader-v3":
+            raise RuntimeError(f"{gate} v3 review has no bound artifact fingerprints; rebuild the review pack")
+        return  # Historical ledgers remain readable; new submissions always bind files.
+    changed = [field for field, item in artifacts.items() if sha256_file(item["path"]) != item["sha256"]]
+    expected = sha256_json(artifacts)
+    if changed or (ginfo.get("bound_fingerprints") or {}).get(f"{gate.lower()}_review_sha256") != expected:
+        reason = f"{gate} 审查材料已变更或缺失，请重建并审查当前结果: " + ", ".join(changed or ["fingerprint"])
+        stamp = now_taipei_iso()
+        for downstream in (("G2", "G3", "final_batch") if gate == "G2" else ("G3", "final_batch")):
+            _invalidate_gate(ledger, downstream, reason, stamp)
+        raise RuntimeError(reason)
+
+
 def mark_awaiting_review(
     ledger: dict[str, Any],
     gate: str,
@@ -427,6 +572,16 @@ def mark_awaiting_review(
     if not review_pack_path or not Path(review_pack_path).exists():
         raise ValueError(f"Review pack material must exist before entering {WAIT_STAGE_BY_GATE[gate]}: {review_pack_path}")
 
+    materials = dict(materials or {})
+    fingerprints = dict(fingerprints or {})
+    if gate == "G3":
+        artifacts = snapshot_g3_materials(materials, review_pack_path)
+        materials["g3_review_artifacts"] = artifacts
+        fingerprints["g3_review_sha256"] = sha256_json(artifacts)
+    if gate == "G2" and materials.get('reader_contract') == 'monster-reader-v3':
+        artifacts = snapshot_g2_materials(materials, review_pack_path)
+        materials['g2_review_artifacts'] = artifacts
+        fingerprints['g2_review_sha256'] = sha256_json(artifacts)
     if fingerprints:
         derive_invalidations(ledger, new_fingerprints=fingerprints)
 
@@ -528,6 +683,7 @@ def record_user_decision(
 
         elif gate == "G2":
             assert_gate(ledger, "G1")
+            verify_review_materials(ledger, ginfo, "G2")
             eff_seed = seed if seed is not None else ginfo.get("seed")
             if eff_seed is None:
                 raise ValueError("G2 通过时必须锁定固定采样 seed")
@@ -536,6 +692,7 @@ def record_user_decision(
         elif gate == "G3":
             assert_gate(ledger, "G1")
             assert_gate(ledger, "G2")
+            verify_review_materials(ledger, ginfo, "G3")
             ckpt = checkpoint_path or (ginfo.get("materials") or {}).get("checkpoint_path")
             if ckpt and Path(ckpt).is_file():
                 ginfo["checkpoint_path"] = str(Path(ckpt).resolve())
@@ -586,6 +743,8 @@ def assert_gate(ledger: dict[str, Any], required_gate: str) -> dict[str, Any]:
             bval = ginfo.get("bone_naming_validation", {})
             if not bval.get("valid"):
                 raise RuntimeError("[SOP 门禁拦截] G1 缺少有效的骨骼规范命名校验记录 (bone_naming_validation.valid != True)")
+        if g in ("G2", "G3"):
+            verify_review_materials(ledger, ginfo, g)
     return ledger["gates"][required_gate]
 
 
@@ -621,10 +780,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "u1_input_defect",
             "skeleton_topology_defect",
             "local_model_or_bone_naming_change",
+            "anatomical_reader_v3_migration",
             "sampler_script_or_seed_change",
             "pose_generalization_insufficient",
             "resolution_or_view_mode_change",
             "dense_surface_enabled_0_to_1",
+            "reader_label_contract_change",
             "dense_surface_disabled_1_to_0",
             "mocap_priors_change",
             "exam_video_or_ik_fix",
