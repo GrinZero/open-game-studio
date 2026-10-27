@@ -233,11 +233,17 @@ class FineTuningGradientTests(unittest.TestCase):
                     enable_dense_surface=dense,
                 )
                 load_probe_weights(restored, checkpoint)
+                for name, value in model.state_dict().items():
+                    torch.testing.assert_close(
+                        value, restored.state_dict()[name], rtol=0, atol=0
+                    )
                 model.eval()
                 restored.eval()
                 with torch.inference_mode():
+                    # CPU float32 kernels can round differently for the adapted
+                    # and frozen backbones; checkpoint tensors must match exactly.
                     torch.testing.assert_close(
-                        model(image)[0], restored(image)[0], rtol=1e-6, atol=1e-7
+                        model(image)[0], restored(image)[0], rtol=1e-5, atol=1e-6
                     )
                 del checkpoint["backbone_state_dict"]
                 with self.assertRaisesRegex(ValueError, "missing backbone"):
