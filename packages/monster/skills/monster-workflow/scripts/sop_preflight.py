@@ -293,11 +293,101 @@ def _write_report(path: Path, report: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def _write_preflight_review_html(path: Path, report: dict[str, Any]) -> None:
+    """Generates `preflight_review.html` showing the prepared model alongside the 3D watertight shell."""
+    import html as _html
+
+    monster_id = _html.escape(str(report.get("monster_id", "")))
+    status = str(report.get("status", "pending"))
+    passed = bool(report.get("passed"))
+    shell_info = report.get("watertight_shell") or {}
+    bpy_rep = report.get("bpy_preflight") or {}
+    sanitization = bpy_rep.get("mesh_sanitization") or []
+    vis = report.get("visual_review") or {}
+    checks = report.get("checks") or {}
+    bone_valid = bool((checks.get("bone_naming_validation") or {}).get("valid", True))
+    fallback_active = bool(checks.get("watertight_shell_fallback_active"))
+    badge_bg = "#10b981" if passed else "#f59e0b"
+    badge_text = "已获用户确认通过 (Approved)" if passed else "等待用户确认预检与水密壳 (Human-in-the-Loop)"
+    rem_deg = sum(int(s.get("removed_degenerate_faces", 0)) for s in sanitization if isinstance(s, dict))
+    rem_dup = sum(int(s.get("removed_duplicate_faces", 0)) for s in sanitization if isinstance(s, dict))
+    rem_wire = sum(int(s.get("removed_wire_edges", 0)) for s in sanitization if isinstance(s, dict))
+    rem_loose = sum(int(s.get("removed_loose_vertices", 0)) for s in sanitization if isinstance(s, dict))
+    quote_html = (
+        f"<p><strong>用户确认原话：</strong><code>{_html.escape(str(vis.get('user_quote', '')))}</code></p>"
+        if vis.get("user_quote")
+        else "<p><strong>下一步操作：</strong>请查看下方原模型正侧视图与自动水密壳预览图，确认姿态、朝向与水密壳包裹效果无误后进入 U1 上传与四候选骨架生成。</p>"
+    )
+    html_doc = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>阶段一预检与水密壳审阅 — {monster_id}</title>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0b0f17; color: #e5e7eb; margin: 0; padding: 24px; }}
+  .header {{ display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #1f2937; padding-bottom: 16px; margin-bottom: 20px; }}
+  .badge {{ background: {badge_bg}; color: #0b0f17; font-weight: 700; padding: 6px 14px; border-radius: 999px; font-size: 13px; }}
+  .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px; }}
+  .card {{ background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 16px; }}
+  .card h3 {{ margin-top: 0; color: #93c5fd; font-size: 16px; }}
+  .card img {{ width: 100%; height: auto; border-radius: 8px; border: 1px solid #374151; background: #090d16; }}
+  .metrics {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }}
+  .metric-box {{ background: #1f2937; padding: 12px; border-radius: 8px; font-size: 13px; }}
+  code {{ color: #67e8f9; }}
+</style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1 style="margin:0 0 6px 0;font-size:22px;">阶段一：模型预检与自动水密壳验证 ({monster_id})</h1>
+      <div style="font-size:13px;color:#9ca3af;">状态：<code>{_html.escape(status)}</code> · 自动几何与水密壳就绪：<code>{bool(report.get("automatic_ready"))}</code></div>
+    </div>
+    <span class="badge">{badge_text}</span>
+  </div>
+  <div class="card" style="margin-bottom:20px;">
+    {quote_html}
+  </div>
+  <div class="grid">
+    <div class="card">
+      <h3>1. 准备副本原模型正 / 侧视图 (preflight_front_side.png)</h3>
+      <img src="preflight_front_side.png" alt="Preflight Front Side" />
+    </div>
+    <div class="card">
+      <h3>2. 自动生成 Blender Voxel Remesh 3D 水密壳四视图 [水密壳正视 | 水密壳侧视 / 原模型 3/4 | 水密壳 3/4 对照] (preflight_watertight_shell.png)</h3>
+      <img src="preflight_watertight_shell.png" alt="Watertight Shell 4-Panel Review" />
+    </div>
+  </div>
+  <div class="card">
+    <h3>3. 自动网格无损净化与水密壳指标摘要</h3>
+    <div class="metrics">
+      <div class="metric-box"><strong>无损清理统计</strong><br/>退化面: {rem_deg} · 重复面: {rem_dup}<br/>悬空边: {rem_wire} · 孤立点: {rem_loose}</div>
+      <div class="metric-box"><strong>水密壳体素 (1.2% H)</strong><br/>网格尺寸: {_html.escape(str(shell_info.get("grid_shape")))}<br/>表皮体素: {shell_info.get("surface_voxels", 0)} · 实心体素: {shell_info.get("solid_voxels", 0)}</div>
+      <div class="metric-box"><strong>3D 水密外壳网格 (watertight_shell.glb)</strong><br/>顶点数: {shell_info.get("shell_mesh_vertices", 0)} · 三角面数: {shell_info.get("shell_mesh_faces", 0)}<br/>水密就绪: <code>{bool(shell_info.get("watertight_ready"))}</code></div>
+      <div class="metric-box"><strong>水密壳兜底状态</strong><br/>激活开放/非流形兜底: <code>{fallback_active}</code><br/>骨骼规范命名有效: <code>{bone_valid}</code></div>
+    </div>
+  </div>
+</body>
+</html>
+"""
+    temporary = path.with_suffix(".html.tmp")
+    temporary.write_text(html_doc, encoding="utf-8")
+    temporary.replace(path)
+
+
 def _validate_preflight_evidence(report: dict[str, Any]) -> None:
     if report.get("schema_version") != 2 or report.get("backend") != "blender":
         raise RuntimeError("预检报告缺少真实 Blender 证据；必须重新运行 preflight")
     evidence = report.get("evidence", {})
-    required = {"source", "rig_input", "front_side", "decorations", "backup"}
+    required = {
+        "source",
+        "rig_input",
+        "shell",
+        "shell_glb",
+        "front_side",
+        "shell_preview",
+        "decorations",
+        "backup",
+    }
     if not required.issubset(evidence):
         raise RuntimeError("预检产物不完整；必须重新运行 preflight")
     for name, item in evidence.items():
@@ -319,6 +409,7 @@ def run_preflight(
     work_dir, checks_dir = dirs["work_dir"], dirs["checks_dir"]
     src_path = Path(input_glb).expanduser().resolve()
     report_path = checks_dir / "preflight_report.json"
+    review_html_path = checks_dir / "preflight_review.html"
     report: dict[str, Any] = {
         "schema_version": 2, "monster_id": monster_id, "checked_at": now_taipei_iso(),
         "source_model": str(src_path), "source_sha256": sha256_file(src_path),
@@ -348,13 +439,23 @@ def run_preflight(
             subprocess.run(command, check=True)
             bpy_report = json.loads((stage / "bpy_preflight.json").read_text(encoding="utf-8"))
             report["prepared_glb_inspection"] = inspect_glb_binary_preflight(stage / "rig_input_variant.glb")
-            image_header = (stage / "preflight_front_side.png").read_bytes()[:24]
-            if (len(image_header) != 24 or image_header[:8] != b"\x89PNG\r\n\x1a\n"
-                    or struct.unpack(">II", image_header[16:24]) != (1344, 768)):
-                raise RuntimeError("Blender 预检未输出有效的 1344×768 正侧视 PNG")
+            for png_name, label, allowed_sizes in (
+                ("preflight_front_side.png", "正侧视", ((1344, 768),)),
+                ("preflight_watertight_shell.png", "水密壳四视图", ((1344, 1536), (1344, 768))),
+            ):
+                png_file = stage / png_name
+                if not png_file.is_file():
+                    raise RuntimeError(f"Blender 预检未输出有效的 {label} PNG: {png_name}")
+                image_header = png_file.read_bytes()[:24]
+                if (len(image_header) != 24 or image_header[:8] != b"\x89PNG\r\n\x1a\n"
+                        or struct.unpack(">II", image_header[16:24]) not in allowed_sizes):
+                    raise RuntimeError(f"Blender 预检未输出有效的 {label} PNG: {png_name}")
             artifacts = {
                 "rig_input": ("rig_input_variant.glb", work_dir),
+                "shell": ("shell.npz", work_dir),
+                "shell_glb": ("watertight_shell.glb", work_dir),
                 "front_side": ("preflight_front_side.png", checks_dir),
+                "shell_preview": ("preflight_watertight_shell.png", checks_dir),
                 "decorations": ("decoration_manifest.json", work_dir),
                 "backup": ("decorations_backup.blend", work_dir),
             }
@@ -370,17 +471,44 @@ def run_preflight(
                 (work_dir / "studio_rig_meta.json").unlink(missing_ok=True)
             report["evidence"]["source"] = {"path": str(src_path), "sha256": report["source_sha256"]}
             shutil.copy2(stage / "bpy_preflight.json", work_dir / "bpy_preflight.json")
+        if isinstance(bpy_report.get("watertight_shell"), dict):
+            bpy_report["watertight_shell"]["path"] = str(work_dir / "shell.npz")
+            bpy_report["watertight_shell"]["mesh_glb_path"] = str(work_dir / "watertight_shell.glb")
+            bpy_report["watertight_shell"]["preview_image_path"] = str(checks_dir / "preflight_watertight_shell.png")
         report.update({
             "backend": "blender", "bpy_preflight": bpy_report, "checks": bpy_report["checks"],
             "rig_input_variant_glb": str(work_dir / "rig_input_variant.glb"),
             "rig_input_sha256": sha256_file(work_dir / "rig_input_variant.glb"),
+            "watertight_shell_npz": str(work_dir / "shell.npz"),
+            "watertight_shell_sha256": sha256_file(work_dir / "shell.npz"),
+            "watertight_shell_glb": str(work_dir / "watertight_shell.glb"),
+            "watertight_shell_glb_sha256": sha256_file(work_dir / "watertight_shell.glb"),
+            "watertight_shell": bpy_report.get("watertight_shell"),
             "decoration_manifest": str(work_dir / "decoration_manifest.json"),
             "front_side_check_image": str(checks_dir / "preflight_front_side.png"),
+            "watertight_shell_check_image": str(checks_dir / "preflight_watertight_shell.png"),
+            "preflight_review_html": str(review_html_path),
             "automatic_ready": bpy_report["automatic_ready"] is True,
-            "visual_review": {"status": "pending", "required_checks": ["pose_and_orientation", "limb_occlusion", "decorations_and_topology", "intentional_open_surfaces"]},
+            "human_in_the_loop_required": True,
+            "next_action": (
+                "请向用户展示 preflight_front_side.png（原模型正侧视图）与 preflight_watertight_shell.png（水密壳正侧视图），"
+                "明确告知当前预检步骤与水密壳状态 OK，等待用户明确确认后，再使用 --review-visual --user-quote '<用户原话>' --sync-u1 进入下一步。"
+            ),
+            "visual_review": {
+                "status": "pending",
+                "user_decision": "pending",
+                "required_checks": [
+                    "pose_and_orientation",
+                    "limb_occlusion",
+                    "decorations_and_topology",
+                    "intentional_open_surfaces",
+                    "watertight_shell_integrity",
+                ],
+            },
             "status": "awaiting_preflight_review" if bpy_report["automatic_ready"] else "needs_repair",
         })
         _validate_preflight_evidence(report)
+        _write_preflight_review_html(review_html_path, report)
     except Exception as exc:
         report.update({"passed": False, "status": "failed", "error": str(exc)})
         _write_report(report_path, report)
@@ -389,21 +517,41 @@ def run_preflight(
     return report
 
 
-def review_preflight(monster_id: str, *, project_root: Path | str, note: str) -> dict[str, Any]:
-    """Record an operator's actual visual inspection of the fingerprinted evidence."""
+def review_preflight(
+    monster_id: str,
+    *,
+    project_root: Path | str,
+    note: str,
+    user_quote: str | None = None,
+) -> dict[str, Any]:
+    """Record Human-in-the-Loop visual inspection and user confirmation of the fingerprinted preflight & watertight shell evidence."""
     if not note.strip():
-        raise ValueError("必须记录姿态、遮挡、装饰和拓扑的实际检查结论")
+        raise ValueError("必须记录姿态、遮挡、装饰、拓扑与水密壳的实际检查结论")
+    quote_text = (user_quote if user_quote is not None else note).strip()
+    if not quote_text:
+        raise ValueError("Human-in-the-Loop 预检确认必须提供用户明确确认原话 (--user-quote)")
     dirs = resolve_scratch_dirs(project_root, monster_id)
     report_path = dirs["checks_dir"] / "preflight_report.json"
+    review_html_path = dirs["checks_dir"] / "preflight_review.html"
     report = json.loads(report_path.read_text(encoding="utf-8"))
     _validate_preflight_evidence(report)
     if report.get("monster_id") != monster_id or report.get("automatic_ready") is not True:
         raise RuntimeError("自动预检尚未通过，不能用视觉审阅绕过几何错误")
-    report["visual_review"] = {"status": "approved", "reviewed_at": now_taipei_iso(), "note": note.strip(),
-                               "front_side_sha256": report["evidence"]["front_side"]["sha256"]}
+    report["visual_review"] = {
+        "status": "approved",
+        "user_decision": "approved",
+        "reviewed_at": now_taipei_iso(),
+        "note": note.strip(),
+        "user_quote": quote_text,
+        "front_side_sha256": report["evidence"]["front_side"]["sha256"],
+        "shell_preview_sha256": report["evidence"]["shell_preview"]["sha256"],
+        "shell_glb_sha256": report["evidence"]["shell_glb"]["sha256"],
+    }
     report["checks"]["front_side_occlusion_checked"] = True
     report["checks"]["pose_orientation_checked"] = True
+    report["checks"]["watertight_shell_checked"] = True
     report.update({"passed": True, "status": "passed"})
+    _write_preflight_review_html(review_html_path, report)
     _write_report(report_path, report)
     return report
 
@@ -414,7 +562,7 @@ def sync_u1_to_drive(
     project_root: Path | str | None = None,
     drive_root: Path | str | None = None,
 ) -> dict[str, Any]:
-    """Uploads preflight-verified `rig_input_variant.glb` and manifest to Google Drive (U1 node)."""
+    """Uploads preflight-verified `rig_input_variant.glb`, `shell.npz`, `watertight_shell.glb` and manifest to Google Drive (U1 node)."""
     proj = Path(project_root or os.environ.get("MONSTER_PROJECT_ROOT") or Path.cwd()).resolve()
     drv = Path(
         drive_root
@@ -424,6 +572,9 @@ def sync_u1_to_drive(
 
     dirs = resolve_scratch_dirs(proj, monster_id)
     rig_input_glb = dirs["work_dir"] / "rig_input_variant.glb"
+    shell_npz = dirs["work_dir"] / "shell.npz"
+    shell_glb = dirs["work_dir"] / "watertight_shell.glb"
+    shell_preview_png = dirs["checks_dir"] / "preflight_watertight_shell.png"
     report_path = dirs["checks_dir"] / "preflight_report.json"
     if not rig_input_glb.is_file() or not report_path.is_file():
         raise RuntimeError("执行 U1 上传前必须先运行 preflight 生成 rig_input_variant.glb 与 preflight_report.json")
@@ -432,23 +583,44 @@ def sync_u1_to_drive(
     _validate_preflight_evidence(report)
     if (report.get("monster_id") != monster_id
             or report["evidence"]["rig_input"]["path"] != str(rig_input_glb)
+            or report["evidence"]["shell"]["path"] != str(shell_npz)
+            or report["evidence"]["shell_glb"]["path"] != str(shell_glb)
+            or not shell_npz.is_file()
+            or not shell_glb.is_file()
             or not check_workspace_redlines(proj, monster_id)["passed"]):
         raise RuntimeError("U1 输入或工作区与预检报告不匹配")
     if not (report.get("passed") is True and report.get("automatic_ready") is True
             and report.get("visual_review", {}).get("status") == "approved"
-            and report["visual_review"].get("front_side_sha256") == report["evidence"]["front_side"]["sha256"]):
-        raise RuntimeError("预检未通过，严禁执行 U1 上传")
+            and report["visual_review"].get("front_side_sha256") == report["evidence"]["front_side"]["sha256"]
+            and report["visual_review"].get("shell_preview_sha256") == report["evidence"]["shell_preview"]["sha256"]):
+        raise RuntimeError("预检未通过或尚未完成水密壳用户确认，严禁执行 U1 上传")
 
     u1_dir = drv / "monsters" / monster_id / "u1"
     u1_dir.mkdir(parents=True, exist_ok=True)
     target_glb = u1_dir / "rig_input_variant.glb"
+    target_shell = u1_dir / "shell.npz"
+    target_shell_glb = u1_dir / "watertight_shell.glb"
+    target_shell_png = u1_dir / "preflight_watertight_shell.png"
     legacy_input_glb = drv / "monsters" / monster_id / "input_mesh.glb"
 
     glb_hash = sha256_file(rig_input_glb)
-    already_synced = target_glb.is_file() and sha256_file(target_glb) == glb_hash
+    shell_hash = sha256_file(shell_npz)
+    shell_glb_hash = sha256_file(shell_glb)
+    already_synced = (
+        target_glb.is_file()
+        and sha256_file(target_glb) == glb_hash
+        and target_shell.is_file()
+        and sha256_file(target_shell) == shell_hash
+        and target_shell_glb.is_file()
+        and sha256_file(target_shell_glb) == shell_glb_hash
+    )
     if not already_synced:
         shutil.copy2(rig_input_glb, target_glb)
         shutil.copy2(rig_input_glb, legacy_input_glb)
+        shutil.copy2(shell_npz, target_shell)
+        shutil.copy2(shell_glb, target_shell_glb)
+        if shell_preview_png.is_file():
+            shutil.copy2(shell_preview_png, target_shell_png)
     shutil.copy2(report_path, u1_dir / "preflight_report.json")
 
     u1_manifest = {
@@ -457,8 +629,13 @@ def sync_u1_to_drive(
         "synced_at": now_taipei_iso(),
         "skipped_unchanged_upload": already_synced,
         "drive_u1_glb": str(target_glb),
+        "drive_u1_shell_npz": str(target_shell),
+        "drive_u1_shell_glb": str(target_shell_glb),
+        "drive_u1_shell_preview_png": str(target_shell_png),
         "drive_input_mesh_glb": str(legacy_input_glb),
         "sha256": glb_hash,
+        "shell_sha256": shell_hash,
+        "shell_glb_sha256": shell_glb_hash,
         "bytes": target_glb.stat().st_size,
     }
     (u1_dir / "u1_manifest.json").write_text(
@@ -479,9 +656,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--project-root", default=None)
     parser.add_argument("--drive-root", default=None)
     parser.add_argument("--yaw-deg", type=float, default=0.0)
-    parser.add_argument("--review-visual", action="store_true", help="Record actual visual inspection of the current preflight evidence; do not rerun Blender")
-    parser.add_argument("--review-note", default="", help="Observed pose, occlusion, decoration and topology findings")
-    parser.add_argument("--sync-u1", action="store_true", help="Immediately sync U1 package to Google Drive after preflight")
+    parser.add_argument("--review-visual", action="store_true", help="Record Human-in-the-Loop user approval of the current preflight & watertight shell evidence; do not rerun Blender")
+    parser.add_argument("--review-note", default="", help="Observed pose, occlusion, decoration, topology and watertight shell findings")
+    parser.add_argument("--user-quote", "--quote", dest="user_quote", default="", help="Required Human-in-the-Loop user confirmation quote after presenting preflight_front_side.png and preflight_watertight_shell.png to the user")
+    parser.add_argument("--sync-u1", action="store_true", help="Sync U1 package to Google Drive after user-confirmed preflight")
     parser.add_argument("--check-redlines-only", action="store_true", help="Only run workspace & VCS redline checks")
     return parser
 
@@ -497,7 +675,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if res["passed"] else 2
 
     if args.review_visual:
-        report = review_preflight(args.monster_id, project_root=proj, note=args.review_note)
+        if not args.user_quote.strip():
+            raise SystemExit(
+                "错误：预检与水密壳验证为 Human-in-the-Loop 用户确认环节！\n"
+                "必须先向用户展示 preflight_front_side.png（原模型正侧视图）与 preflight_watertight_shell.png（水密壳正侧视图），"
+                "明确告知当前预检步骤与水密壳结果 OK，待用户明确确认可以继续后，传入 --user-quote '<用户确认原话>' 方可登记通过并执行 U1 上传。"
+            )
+        report = review_preflight(
+            args.monster_id,
+            project_root=proj,
+            note=args.review_note or args.user_quote,
+            user_quote=args.user_quote,
+        )
         out = {"preflight": report}
         if args.sync_u1:
             out["u1_sync"] = sync_u1_to_drive(args.monster_id, project_root=proj, drive_root=args.drive_root)

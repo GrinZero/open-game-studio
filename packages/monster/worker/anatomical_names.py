@@ -87,6 +87,9 @@ def anatomical_names(meta, height):
     chains = []
     for n in order:
         b = meta[n]
+        # Paired anatomical roles require a side; midline appendages keep Limb names.
+        if b.get("side", "C") not in ("L", "R"):
+            continue
         p = b.get("parent")
         if b["kind"] not in ("limb", "wing") or (
             p in meta

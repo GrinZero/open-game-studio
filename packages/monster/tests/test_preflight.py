@@ -36,12 +36,32 @@ class PreflightTests(unittest.TestCase):
     def fake_worker(self, command, **kwargs):
         args = command
         stage = Path(args[args.index('--out_dir') + 1])
-        for name in ['rig_input_variant.glb', 'preflight_front_side.png', 'decoration_manifest.json', 'decorations_backup.blend']:
+        for name in [
+            'rig_input_variant.glb',
+            'shell.npz',
+            'watertight_shell.glb',
+            'preflight_front_side.png',
+            'preflight_watertight_shell.png',
+            'decoration_manifest.json',
+            'decorations_backup.blend',
+        ]:
             (stage / name).write_bytes(b'test-only artifact, not Blender acceptance')
         source_glb(stage / 'rig_input_variant.glb')
-        (stage / 'preflight_front_side.png').write_bytes(b'\x89PNG\r\n\x1a\n' + struct.pack('>I4sII', 13, b'IHDR', 1344, 768) + b'test-only PNG fixture')
+        source_glb(stage / 'watertight_shell.glb')
+        png_bytes = b'\x89PNG\r\n\x1a\n' + struct.pack('>I4sII', 13, b'IHDR', 1344, 768) + b'test-only PNG fixture'
+        (stage / 'preflight_front_side.png').write_bytes(png_bytes)
+        (stage / 'preflight_watertight_shell.png').write_bytes(png_bytes)
         (stage / 'bpy_preflight.json').write_text(json.dumps({
-            'automatic_ready': True, 'checks': {'side_limb_occlusion_ratio': None},
+            'automatic_ready': True, 'checks': {'side_limb_occlusion_ratio': None, 'watertight_shell_ready': True, 'watertight_shell_rendered': True},
+            'watertight_shell': {
+                'path': str(stage / 'shell.npz'),
+                'mesh_glb_path': str(stage / 'watertight_shell.glb'),
+                'preview_image_path': str(stage / 'preflight_watertight_shell.png'),
+                'watertight_ready': True,
+                'solid_voxels': 128,
+                'shell_mesh_vertices': 64,
+                'shell_mesh_faces': 120,
+            },
             'bone_naming_validation': {'valid': True, 'total_bones': 0},
         }))
 
@@ -79,17 +99,40 @@ class PreflightTests(unittest.TestCase):
     def test_visual_review_required_before_sync(self):
         result = self.run_fake_preflight()
         self.assertFalse(result['passed'])
+        self.assertTrue(result['human_in_the_loop_required'])
+        self.assertTrue(Path(result['watertight_shell_glb']).is_file())
+        self.assertTrue(Path(result['watertight_shell_check_image']).is_file())
+        self.assertTrue(Path(result['preflight_review_html']).is_file())
         self.assertIsNone(result['checks']['side_limb_occlusion_ratio'])
         with self.assertRaises(RuntimeError):
             preflight.sync_u1_to_drive('test', project_root=self.project, drive_root=self.drive)
         with self.assertRaises(ValueError):
             preflight.review_preflight('test', project_root=self.project, note=' ')
-        preflight.review_preflight('test', project_root=self.project, note='Test operator evidence only')
+        # CLI --review-visual must block if --user-quote (Human-in-the-Loop user confirmation) is omitted
+        with self.assertRaisesRegex(SystemExit, 'Human-in-the-Loop'):
+            preflight.main([
+                '--monster-id', 'test',
+                '--project-root', str(self.project),
+                '--review-visual',
+                '--review-note', 'Agent tried to approve without user confirmation',
+            ])
+        rc = preflight.main([
+            '--monster-id', 'test',
+            '--project-root', str(self.project),
+            '--drive-root', str(self.drive),
+            '--review-visual',
+            '--review-note', 'Test operator evidence only',
+            '--user-quote', '预检和水密壳结果确认 OK，继续下一步',
+            '--sync-u1',
+        ])
+        self.assertEqual(rc, 0)
         result = preflight.sync_u1_to_drive('test', project_root=self.project, drive_root=self.drive)
         self.assertTrue(Path(result['drive_u1_glb']).is_file())
+        self.assertTrue(Path(result['drive_u1_shell_npz']).is_file())
+        self.assertTrue(Path(result['drive_u1_shell_glb']).is_file())
 
     def test_changed_source_or_input_or_image_blocks_review_and_u1(self):
-        for key in ['source', 'rig_input', 'front_side', 'decorations', 'backup']:
+        for key in ['source', 'rig_input', 'shell', 'shell_glb', 'front_side', 'shell_preview', 'decorations', 'backup']:
             with self.subTest(key=key):
                 self.source = source_glb(self.source)
                 result = self.run_fake_preflight()
@@ -149,9 +192,74 @@ bpy.ops.export_scene.gltf(filepath={str(self.source)!r},export_format='GLB')
         self.assertTrue(all(m['boundary_edges'] == 0 for m in actual['mesh_metrics']))
         png = Path(report['front_side_check_image']).read_bytes()
         self.assertEqual(struct.unpack('>II', png[16:24]), (1344, 768))
+        shell_png = Path(report['watertight_shell_check_image']).read_bytes()
+        self.assertEqual(struct.unpack('>II', shell_png[16:24]), (1344, 1536))
         manifest = json.loads(Path(report['decoration_manifest']).read_text())
         self.assertIn('ornament', manifest['review_candidates'])
         self.assertEqual(manifest['detached_decorations'], [])
+        self.assertTrue(Path(report['watertight_shell_npz']).is_file())
+        self.assertTrue(Path(report['watertight_shell_glb']).is_file())
+        self.assertTrue(Path(report['preflight_review_html']).is_file())
+        self.assertTrue(report['watertight_shell']['watertight_ready'])
+        self.assertGreater(report['watertight_shell']['solid_voxels'], 0)
+        self.assertGreater(report['watertight_shell']['shell_mesh_faces'], 0)
+
+    @unittest.skipUnless(os.environ.get('MONSTER_TEST_BLENDER'), 'Set MONSTER_TEST_BLENDER for the real watertight shell & sanitization regression')
+    def test_real_blender_auto_sanitizes_defects_and_watertight_shell_backs_open_non_manifold_sheets(self):
+        blender = os.environ['MONSTER_TEST_BLENDER']
+        expression = f'''import bpy, bmesh
+bpy.ops.wm.read_factory_settings(use_empty=True)
+bpy.ops.mesh.primitive_cube_add(size=1.0, location=(0, 0, 0.5))
+body = bpy.context.object
+body.name = 'ThornHunter_Body'
+bm = bmesh.new()
+bm.from_mesh(body.data)
+bm.verts.ensure_lookup_table()
+bm.faces.ensure_lookup_table()
+f0_coords = [v.co.copy() for v in bm.faces[0].verts]
+v_top0 = bm.verts[0]
+v_top1 = bm.verts[1]
+# 1) Add an open single-sided leaf sheet attached to two top-edge vertices -> creates a 3-face non-manifold T-junction + open boundary edges
+v_leaf0 = bm.verts.new((v_top0.co.x + 0.35, v_top0.co.y, v_top0.co.z + 0.25))
+v_leaf1 = bm.verts.new((v_top1.co.x + 0.35, v_top1.co.y, v_top1.co.z + 0.25))
+bm.faces.new((v_top0, v_top1, v_leaf1, v_leaf0))
+# 2) Add an exact duplicate face over the first cube face
+dup_verts = [bm.verts.new(co) for co in f0_coords]
+bm.faces.new(dup_verts)
+# 3) Add a zero-area degenerate collinear triangle and a collapsed 1e-8 triangle (which would become a wire edge/loose vert on weld)
+dv0 = bm.verts.new((0.1, 0.1, 0.2))
+dv1 = bm.verts.new((0.2, 0.1, 0.2))
+dv2 = bm.verts.new((0.3, 0.1, 0.2))
+bm.faces.new((dv0, dv1, dv2))
+cv0 = bm.verts.new((0.4, 0.4, 0.4))
+cv1 = bm.verts.new((0.4 + 1e-8, 0.4, 0.4))
+cv2 = bm.verts.new((0.4, 0.4 + 1e-8, 0.4))
+bm.faces.new((cv0, cv1, cv2))
+bm.to_mesh(body.data)
+body.data.update()
+bm.free()
+bpy.ops.export_scene.gltf(filepath={str(self.source)!r}, export_format='GLB')
+'''
+        subprocess.run([blender, '--background', '--factory-startup', '--python-exit-code', '1', '--python-expr', expression], check=True, stdout=subprocess.DEVNULL)
+        with patch.dict(os.environ, {'MONSTER_BLENDER': blender}), patch.object(preflight, '_find_bpy_python', return_value=None):
+            report = preflight.run_preflight('test', self.source, project_root=self.project)
+        actual = report['bpy_preflight']
+        self.assertTrue(report['automatic_ready'], json.dumps(actual, indent=2))
+        self.assertTrue(actual['checks']['watertight_shell_ready'])
+        self.assertTrue(actual['checks']['watertight_shell_fallback_active'])
+        self.assertFalse(actual['checks']['strict_surface_manifold'])
+        m0 = actual['mesh_metrics'][0]
+        self.assertEqual(m0['loose_vertices'], 0)
+        self.assertEqual(m0['wire_edges'], 0)
+        self.assertEqual(m0['degenerate_faces'], 0)
+        self.assertEqual(m0['duplicate_faces'], 0)
+        self.assertGreater(m0['boundary_edges'], 0)
+        self.assertGreater(m0['non_manifold_junctions'], 0)
+        self.assertGreater(actual['watertight_shell']['solid_voxels'], 0)
+        preflight.review_preflight('test', project_root=self.project, note='Open foliage sheet backed by watertight shell')
+        u1 = preflight.sync_u1_to_drive('test', project_root=self.project, drive_root=self.drive)
+        self.assertTrue(Path(u1['drive_u1_glb']).is_file())
+        self.assertTrue(Path(u1['drive_u1_shell_npz']).is_file())
     @unittest.skipUnless(os.environ.get('MONSTER_TEST_BLENDER'), 'Set MONSTER_TEST_BLENDER for real rig and delivery verification')
     def test_real_blender_renames_actual_bones_and_delivery_uses_clear_scene(self):
         blender = os.environ['MONSTER_TEST_BLENDER']

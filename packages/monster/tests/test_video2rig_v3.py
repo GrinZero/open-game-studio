@@ -185,6 +185,49 @@ class CameraAndFKTests(unittest.TestCase):
 
 
 class GeometryContractTests(unittest.TestCase):
+    def test_uv_seams_do_not_split_surface_into_loose_fragments(self):
+        from video2rig_blender import _surface_component_sizes
+
+        # Two triangles share geometric positions, but keep separate UV vertices.
+        vertices = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0],
+                             [1, 0, 0], [1, 1, 0], [0, 1, 0],
+                             [3, 0, 0], [4, 0, 0], [3, 1, 0]], float)
+        edges = np.array([[0, 1], [1, 2], [2, 0], [3, 4], [4, 5], [5, 3],
+                          [6, 7], [7, 8], [8, 6]])
+        before = vertices.copy()
+        sizes = _surface_component_sizes(vertices, edges, 1e-6)
+        np.testing.assert_array_equal(sizes, [6] * 6 + [3] * 3)
+        np.testing.assert_array_equal(vertices, before)
+
+    def test_separate_toes_do_not_count_as_extra_grounded_limbs(self):
+        from scipy import ndimage
+        from skeleton_postprocess import Shell, _footprints
+
+        grid = np.zeros((65, 65, 65), bool)
+        grid[25:40, 25:40, 40:55] = True
+        for x, y in ((12, 12), (12, 52), (52, 12), (52, 52)):
+            grid[x - 3:x - 1, y - 1:y + 1, 1:6] = True
+            grid[x + 1:x + 3, y - 1:y + 1, 1:6] = True
+            grid[x - 3:x + 3, y - 1:y + 1, 4:8] = True
+            grid[x - 1:x + 1, y - 1:y + 1, 6:35] = True
+        shell = Shell(grid, grid, np.zeros(3), 1.0, ndimage.distance_transform_edt(grid))
+        self.assertEqual(len(_footprints(shell, thin_legs=True)), 4)
+
+    def test_midline_limb_names_remain_valid_without_inventing_a_side(self):
+        from anatomical_names import anatomical_names
+
+        meta = {
+            "root": {"kind": "root", "side": "C", "parent": None},
+            "midline": {"kind": "limb", "side": "C", "parent": "root"},
+            "left": {"kind": "limb", "side": "L", "parent": "root"},
+            "right": {"kind": "limb", "side": "R", "parent": "root"},
+        }
+        names = anatomical_names(meta, 2.0)
+        self.assertTrue(names["midline"].startswith("Limb"))
+        self.assertEqual(names["left"], "Hand.L")
+        self.assertEqual(names["right"], "Hand.R")
+        self.assertTrue(all(parse_anatomical_name(name) for name in names.values()))
+
     def test_v3_names_include_digits_and_legacy_is_readable(self):
         rig, _ = fixture()
         names = classify_rig_bones(rig.meta)

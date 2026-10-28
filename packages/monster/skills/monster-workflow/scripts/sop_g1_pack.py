@@ -530,9 +530,20 @@ def build_g1_review_pack(
                 dest_sub_dir = g1_cand_dir / cand_key
                 dest_sub_dir.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(staged_blend, dest_blend)
-                for auxiliary in ('shell.npz','skeleton_postprocess.json'):
-                    source_aux=stage_dir/cand_key/auxiliary
-                    if source_aux.is_file(): shutil.copy2(source_aux,dest_sub_dir/auxiliary)
+                for auxiliary in ("shell.npz", "skeleton_postprocess.json"):
+                    source_aux = stage_dir / cand_key / auxiliary
+                    if source_aux.is_file():
+                        shutil.copy2(source_aux, dest_sub_dir / auxiliary)
+                if (dest_sub_dir / "shell.npz").is_file():
+                    rig_meta["shell_npz"] = str(dest_sub_dir / "shell.npz")
+                    sp = rig_meta.get("skeleton_postprocess")
+                    if isinstance(sp, dict) and isinstance(sp.get("watertight_shell"), dict):
+                        sp["watertight_shell"]["path"] = str(dest_sub_dir / "shell.npz")
+                        if (dest_sub_dir / "skeleton_postprocess.json").is_file():
+                            (dest_sub_dir / "skeleton_postprocess.json").write_text(
+                                json.dumps(sp, indent=2, ensure_ascii=False) + "\n",
+                                encoding="utf-8",
+                            )
 
                 staged_full_glb = stage_dir / f"candidate_{cid}_full.glb"
                 if staged_full_glb.is_file():

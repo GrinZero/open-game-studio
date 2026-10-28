@@ -2532,6 +2532,123 @@ def verify_exam_glb_roundtrip(
     return report
 
 
+def _sanitize_preflight_meshes(meshes: list[Any]) -> list[dict[str, Any]]:
+    """Automatically cleans loose vertices, wire edges, zero-area degenerate faces, and exact duplicate
+    faces on the prepared copy without welding independent sheets or altering UVs/sharp normals.
+    """
+    import bmesh
+
+    summaries: list[dict[str, Any]] = []
+    for obj in meshes:
+        bm = bmesh.new()
+        try:
+            bm.from_mesh(obj.data)
+            initial_verts = len(bm.verts)
+            initial_faces = len(bm.faces)
+            removed_degenerate_faces = 0
+            removed_duplicate_faces = 0
+            removed_wire_edges = 0
+            removed_loose_vertices = 0
+
+            for _ in range(3):
+                bm.verts.ensure_lookup_table()
+                bm.edges.ensure_lookup_table()
+                bm.faces.ensure_lookup_table()
+
+                # Probe with the exact 1e-7 position weld used by _preflight_mesh_metrics
+                bm_probe = bm.copy()
+                try:
+                    orig_layer = bm_probe.faces.layers.int.new("orig_idx")
+                    bm_probe.faces.ensure_lookup_table()
+                    for idx, f_p in enumerate(bm_probe.faces):
+                        f_p[orig_layer] = idx
+                    bmesh.ops.remove_doubles(bm_probe, verts=list(bm_probe.verts), dist=1e-7)
+                    bm_probe.verts.ensure_lookup_table()
+                    bm_probe.faces.ensure_lookup_table()
+                    for index, vertex in enumerate(bm_probe.verts):
+                        vertex.index = index
+                    surviving_indices: set[int] = set()
+                    probe_degen: set[int] = set()
+                    probe_dup: set[int] = set()
+                    seen_keys: set[tuple[int, ...]] = set()
+                    for f_p in bm_probe.faces:
+                        orig_idx = int(f_p[orig_layer])
+                        surviving_indices.add(orig_idx)
+                        key = tuple(sorted(v.index for v in f_p.verts))
+                        if len(set(key)) < 3 or f_p.calc_area() <= 1e-12:
+                            probe_degen.add(orig_idx)
+                        elif key in seen_keys:
+                            probe_dup.add(orig_idx)
+                        else:
+                            seen_keys.add(key)
+                    collapsed_indices = set(range(len(bm.faces))) - surviving_indices
+                    probe_degen |= collapsed_indices
+                finally:
+                    bm_probe.free()
+
+                degen_faces = [
+                    bm.faces[idx]
+                    for idx in sorted(probe_degen)
+                    if idx < len(bm.faces)
+                ]
+                dup_faces = [
+                    bm.faces[idx]
+                    for idx in sorted(probe_dup - probe_degen)
+                    if idx < len(bm.faces)
+                ]
+                for face in bm.faces:
+                    if face.calc_area() <= 1e-12 and face not in degen_faces and face not in dup_faces:
+                        degen_faces.append(face)
+
+                if degen_faces or dup_faces:
+                    removed_degenerate_faces += len(degen_faces)
+                    removed_duplicate_faces += len(dup_faces)
+                    bmesh.ops.delete(bm, geom=degen_faces + dup_faces, context="FACES_ONLY")
+
+                bm.edges.ensure_lookup_table()
+                wire_edges = [e for e in bm.edges if e.is_wire]
+                if wire_edges:
+                    removed_wire_edges += len(wire_edges)
+                    bmesh.ops.delete(bm, geom=wire_edges, context="EDGES")
+
+                bm.verts.ensure_lookup_table()
+                loose_verts = [v for v in bm.verts if not v.link_edges]
+                if loose_verts:
+                    removed_loose_vertices += len(loose_verts)
+                    bmesh.ops.delete(bm, geom=loose_verts, context="VERTS")
+
+                if not (degen_faces or dup_faces or wire_edges or loose_verts):
+                    break
+
+            modified = bool(
+                removed_degenerate_faces
+                or removed_duplicate_faces
+                or removed_wire_edges
+                or removed_loose_vertices
+                or len(bm.verts) != initial_verts
+                or len(bm.faces) != initial_faces
+            )
+            if modified:
+                bm.to_mesh(obj.data)
+                obj.data.update()
+            summaries.append({
+                "name": obj.name,
+                "modified": modified,
+                "initial_vertices": initial_verts,
+                "initial_faces": initial_faces,
+                "final_vertices": len(bm.verts),
+                "final_faces": len(bm.faces),
+                "removed_degenerate_faces": removed_degenerate_faces,
+                "removed_duplicate_faces": removed_duplicate_faces,
+                "removed_wire_edges": removed_wire_edges,
+                "removed_loose_vertices": removed_loose_vertices,
+            })
+        finally:
+            bm.free()
+    bpy.context.view_layer.update()
+    return summaries
+
+
 def _preflight_mesh_metrics(meshes: list[Any]) -> list[dict[str, Any]]:
     """Measure topology without deleting intentional openings or altering the source."""
     import bmesh
@@ -2543,6 +2660,8 @@ def _preflight_mesh_metrics(meshes: list[Any]) -> list[dict[str, Any]]:
             bm.from_mesh(obj.data)
             # glTF splits vertices at UV/normal seams; audit coincident positions on a copy.
             raw_vertices = len(bm.verts)
+            raw_non_manifold_edges = sum(len(e.link_faces) > 2 for e in bm.edges)
+            raw_inconsistent_edges = sum(e.is_manifold and not e.is_contiguous for e in bm.edges)
             bmesh.ops.remove_doubles(bm, verts=list(bm.verts), dist=1e-7)
             bm.verts.ensure_lookup_table()
             for index, vertex in enumerate(bm.verts):
@@ -2566,13 +2685,21 @@ def _preflight_mesh_metrics(meshes: list[Any]) -> list[dict[str, Any]]:
                         if other.index not in visited:
                             visited.add(other.index)
                             stack.append(other)
+            boundary_edges = sum(e.is_boundary for e in bm.edges)
+            non_manifold_junctions = sum(len(e.link_faces) > 2 for e in bm.edges)
+            inconsistent_winding_edges = sum(e.is_manifold and not e.is_contiguous for e in bm.edges)
             results.append({
                 "name": obj.name, "vertices": len(bm.verts), "raw_gltf_vertices": raw_vertices,
                 "topology_position_weld_tolerance": 1e-7, "faces": len(bm.faces),
                 "connected_components": components,
-                "boundary_edges": sum(e.is_boundary for e in bm.edges),
-                "non_manifold_junctions": sum(len(e.link_faces) > 2 for e in bm.edges),
-                "inconsistent_winding_edges": sum(e.is_manifold and not e.is_contiguous for e in bm.edges),
+                "boundary_edges": boundary_edges,
+                "non_manifold_junctions": non_manifold_junctions,
+                "inconsistent_winding_edges": inconsistent_winding_edges,
+                "raw_non_manifold_junctions": raw_non_manifold_edges,
+                "raw_inconsistent_winding_edges": raw_inconsistent_edges,
+                "requires_watertight_shell_fallback": bool(
+                    boundary_edges > 0 or non_manifold_junctions > 0 or inconsistent_winding_edges > 0
+                ),
                 "loose_vertices": sum(not v.link_edges for v in bm.verts),
                 "wire_edges": sum(e.is_wire for e in bm.edges),
                 "degenerate_faces": sum(f.calc_area() <= 1e-12 for f in bm.faces),
@@ -2590,17 +2717,24 @@ def _preflight_bounds(meshes: list[Any]) -> tuple[np.ndarray, np.ndarray]:
     return points.min(axis=0), points.max(axis=0)
 
 
-def _render_preflight_views(bmin: np.ndarray, bmax: np.ndarray, output: Path) -> None:
+def _render_preflight_views(
+    bmin: np.ndarray,
+    bmax: np.ndarray,
+    output: Path,
+    *,
+    color_type: str = "TEXTURE",
+    prefix: str = "preflight",
+) -> None:
     """Render real geometry with Blender only; no Pillow dependency or placeholder images."""
     scene = bpy.context.scene
     # Workbench is available in background Blender on CPU-only desktops as well as Colab.
     scene.render.engine = "BLENDER_WORKBENCH"
     scene.display.shading.light = "STUDIO"
-    scene.display.shading.color_type = "TEXTURE"
+    scene.display.shading.color_type = color_type
     scene.display.shading.show_shadows = True
     scene.display.shading.show_cavity = True
     scene.display.shading.background_type = "WORLD"
-    world = bpy.data.worlds.new("PreflightWorld")
+    world = bpy.data.worlds.new(f"{prefix}_World")
     world.color = (0.035, 0.04, 0.055)
     scene.world = world
     width, height = 672, 768
@@ -2611,27 +2745,189 @@ def _render_preflight_views(bmin: np.ndarray, bmax: np.ndarray, output: Path) ->
     scale = max(float(bmax[2] - bmin[2]), float(max(bmax[:2] - bmin[:2])) * height / width) * 1.2
     distance = max(scale * 3.0, 1.0)
     panels = []
-    for name, offset in [("front", (0.0, -distance, 0.0)), ("side", (distance, 0.0, 0.0))]:
-        data = bpy.data.cameras.new("Preflight_" + name)
-        data.type, data.ortho_scale = "ORTHO", scale
-        data.sensor_fit, data.clip_start, data.clip_end = "VERTICAL", 0.001, distance * 4
-        camera = bpy.data.objects.new(data.name, data)
-        bpy.context.collection.objects.link(camera)
-        camera.location = Vector(center) + Vector(offset)
-        camera.rotation_euler = (Vector(center) - camera.location).to_track_quat("-Z", "Y").to_euler()
-        scene.camera = camera
-        scene.render.filepath = str(output.parent / ("preflight_" + name + ".png"))
-        bpy.ops.render.render(write_still=True)
-        loaded = bpy.data.images.load(scene.render.filepath, check_existing=False)
-        pixels = np.empty(width * height * 4, dtype=np.float32)
-        loaded.pixels.foreach_get(pixels)
-        panels.append(pixels.reshape(height, width, 4))
-        bpy.data.images.remove(loaded)
-    image = bpy.data.images.new("Preflight_Front_Side", width=width * 2, height=height, alpha=True)
-    image.pixels.foreach_set(np.concatenate(panels, axis=1).ravel())
-    image.filepath_raw, image.file_format = str(output), "PNG"
-    image.save()
-    bpy.data.images.remove(image)
+    temp_cameras: list[tuple[Any, Any]] = []
+    try:
+        for name, offset in [("front", (0.0, -distance, 0.0)), ("side", (distance, 0.0, 0.0))]:
+            data = bpy.data.cameras.new(f"{prefix}_" + name)
+            data.type, data.ortho_scale = "ORTHO", scale
+            data.sensor_fit, data.clip_start, data.clip_end = "VERTICAL", 0.001, distance * 4
+            camera = bpy.data.objects.new(data.name, data)
+            bpy.context.collection.objects.link(camera)
+            temp_cameras.append((camera, data))
+            camera.location = Vector(center) + Vector(offset)
+            camera.rotation_euler = (Vector(center) - camera.location).to_track_quat("-Z", "Y").to_euler()
+            scene.camera = camera
+            scene.render.filepath = str(output.parent / (f"{prefix}_" + name + ".png"))
+            bpy.ops.render.render(write_still=True)
+            loaded = bpy.data.images.load(scene.render.filepath, check_existing=False)
+            pixels = np.empty(width * height * 4, dtype=np.float32)
+            loaded.pixels.foreach_get(pixels)
+            panels.append(pixels.reshape(height, width, 4))
+            bpy.data.images.remove(loaded)
+        image = bpy.data.images.new(f"{prefix}_Front_Side", width=width * 2, height=height, alpha=True)
+        image.pixels.foreach_set(np.concatenate(panels, axis=1).ravel())
+        image.filepath_raw, image.file_format = str(output), "PNG"
+        image.save()
+        bpy.data.images.remove(image)
+    finally:
+        for cam_obj, cam_data in temp_cameras:
+            bpy.data.objects.remove(cam_obj, do_unlink=True)
+            bpy.data.cameras.remove(cam_data)
+
+
+def _export_and_render_watertight_shell(
+    shell: Any,
+    meshes: list[Any],
+    bmin: np.ndarray,
+    bmax: np.ndarray,
+    out_glb: Path,
+    out_png: Path,
+) -> dict[str, Any]:
+    """Exports video2rig's smooth Blender OpenVDB Voxel Remesh watertight shell (`watertight_shell.glb`)
+    and renders a 4-panel `preflight_watertight_shell.png` (1344x1536:
+    Top-Left: Shell Front | Top-Right: Shell Side | Bottom-Left: Original Model 3/4 | Bottom-Right: Shell 3/4)
+    using video2rig's NeutralClay (0.35, 0.55, 0.65, 1.0) material for Human-in-the-Loop review.
+    """
+    from skimage.measure import marching_cubes
+
+    if (
+        getattr(shell, "remesh_verts", None) is not None
+        and getattr(shell, "remesh_faces", None) is not None
+        and len(shell.remesh_verts) >= 3
+        and len(shell.remesh_faces) >= 1
+    ):
+        verts = np.asarray(shell.remesh_verts, dtype=float)
+        faces = np.asarray(shell.remesh_faces, dtype=int)
+        method = "blender_voxel_remesh"
+    else:
+        verts, faces, _, _ = marching_cubes(shell.solid.astype(float), level=0.5)
+        verts = shell.origin + verts * shell.step
+        faces = faces.astype(int)
+        method = "marching_cubes_fallback"
+
+    shell_data = bpy.data.meshes.new("WatertightShellMesh")
+    shell_data.from_pydata(verts.tolist(), [], faces.tolist())
+    shell_data.update()
+    clay_mat = bpy.data.materials.new(name="NeutralClay")
+    if getattr(clay_mat, "node_tree", None) is None:
+        clay_mat.use_nodes = True
+    bsdf = clay_mat.node_tree.nodes.get("Principled BSDF") if clay_mat.node_tree else None
+    if bsdf:
+        bsdf.inputs["Base Color"].default_value = (0.35, 0.55, 0.65, 1.0)
+        bsdf.inputs["Roughness"].default_value = 0.6
+    clay_mat.diffuse_color = (0.35, 0.55, 0.65, 1.0)
+    shell_data.materials.append(clay_mat)
+    shell_obj = bpy.data.objects.new("WatertightShell", shell_data)
+    shell_obj.color = (0.35, 0.55, 0.65, 1.0)
+    bpy.context.collection.objects.link(shell_obj)
+
+    orig_hide = [(obj, obj.hide_render) for obj in meshes]
+    has_textures = any(
+        obj.data.materials
+        and any(
+            mat and getattr(mat, "node_tree", None) and any(n.type == "TEX_IMAGE" for n in mat.node_tree.nodes)
+            for mat in obj.data.materials
+        )
+        for obj in meshes
+    )
+    temp_cameras: list[tuple[Any, Any]] = []
+    try:
+        bpy.ops.object.select_all(action="DESELECT")
+        shell_obj.select_set(True)
+        bpy.context.view_layer.objects.active = shell_obj
+        out_glb.parent.mkdir(parents=True, exist_ok=True)
+        bpy.ops.export_scene.gltf(
+            filepath=str(out_glb),
+            export_format="GLB",
+            export_animations=False,
+            use_selection=True,
+        )
+
+        scene = bpy.context.scene
+        scene.render.engine = "BLENDER_WORKBENCH"
+        scene.display.shading.light = "STUDIO"
+        scene.display.shading.show_shadows = True
+        scene.display.shading.show_cavity = True
+        scene.display.shading.show_backface_culling = False
+        scene.display.shading.background_type = "WORLD"
+        world = bpy.data.worlds.new("PreflightShellWorld")
+        world.color = (0.05, 0.05, 0.06)
+        scene.world = world
+        width, height = 672, 768
+        scene.render.resolution_x, scene.render.resolution_y = width, height
+        scene.render.resolution_percentage = 100
+        scene.render.image_settings.file_format = "PNG"
+        center = (bmin + bmax) * 0.5
+        scale = max(float(bmax[2] - bmin[2]), float(max(bmax[:2] - bmin[:2])) * height / width) * 1.2
+        distance = max(scale * 3.0, 1.0)
+        panels: dict[str, np.ndarray] = {}
+        cam_specs = [
+            ("front", (0.0, -distance, 0.0), True),
+            ("side", (distance, 0.0, 0.0), True),
+            ("source_three_quarter", (distance * 0.7, -distance * 0.9, distance * 0.4), False),
+            ("three_quarter", (distance * 0.7, -distance * 0.9, distance * 0.4), True),
+        ]
+        for name, offset, show_shell in cam_specs:
+            for obj, _ in orig_hide:
+                obj.hide_render = bool(show_shell)
+            shell_obj.hide_render = not bool(show_shell)
+            scene.display.shading.color_type = (
+                "OBJECT"
+                if show_shell
+                else ("TEXTURE" if has_textures else "MATERIAL")
+            )
+            bpy.context.view_layer.update()
+            data = bpy.data.cameras.new("PreflightShell_" + name)
+            data.type, data.ortho_scale = "ORTHO", scale
+            data.sensor_fit, data.clip_start, data.clip_end = "VERTICAL", 0.001, distance * 4
+            camera = bpy.data.objects.new(data.name, data)
+            bpy.context.collection.objects.link(camera)
+            temp_cameras.append((camera, data))
+            camera.location = Vector(center) + Vector(offset)
+            camera.rotation_euler = (Vector(center) - camera.location).to_track_quat("-Z", "Y").to_euler()
+            scene.camera = camera
+            scene.render.filepath = str(out_png.parent / ("preflight_shell_" + name + ".png"))
+            bpy.ops.render.render(write_still=True)
+            loaded = bpy.data.images.load(scene.render.filepath, check_existing=False)
+            pixels = np.empty(width * height * 4, dtype=np.float32)
+            loaded.pixels.foreach_get(pixels)
+            panels[name] = pixels.reshape(height, width, 4)
+            bpy.data.images.remove(loaded)
+
+        # Blender image pixel origin is bottom-left:
+        # bottom row = [source_three_quarter | three_quarter], top row = [front | side]
+        top_row = np.concatenate([panels["front"], panels["side"]], axis=1)
+        bottom_row = np.concatenate([panels["source_three_quarter"], panels["three_quarter"]], axis=1)
+        grid = np.concatenate([bottom_row, top_row], axis=0)
+        image = bpy.data.images.new("Preflight_Watertight_Shell", width=width * 2, height=height * 2, alpha=True)
+        image.pixels.foreach_set(grid.ravel())
+        image.filepath_raw, image.file_format = str(out_png), "PNG"
+        image.save()
+        bpy.data.images.remove(image)
+    finally:
+        for cam_obj, cam_data in temp_cameras:
+            bpy.data.objects.remove(cam_obj, do_unlink=True)
+            bpy.data.cameras.remove(cam_data)
+        for obj, hidden in orig_hide:
+            obj.hide_render = hidden
+        bpy.data.objects.remove(shell_obj, do_unlink=True)
+        bpy.data.meshes.remove(shell_data)
+        if clay_mat.name in bpy.data.materials and clay_mat.users == 0:
+            bpy.data.materials.remove(clay_mat)
+        bpy.context.view_layer.update()
+    return {
+        "method": method,
+        "mesh_glb_path": str(out_glb),
+        "preview_image_path": str(out_png),
+        "preview_panels": [
+            "top_left: shell_front",
+            "top_right: shell_side",
+            "bottom_left: source_three_quarter",
+            "bottom_right: shell_three_quarter",
+        ],
+        "shell_mesh_vertices": int(len(verts)),
+        "shell_mesh_faces": int(len(faces)),
+    }
 
 
 def _preflight_scene_meshes() -> list[Any]:
@@ -2689,8 +2985,7 @@ def sop_preflight_check(
             obj.matrix_world = Matrix.Identity(4)
             obj.data.update()
         bpy.context.view_layer.update()
-    from video2rig_blender import export_shell
-    export_shell(meshes, out_p / 'shell.npz')
+    sanitization = _sanitize_preflight_meshes(meshes)
     rig_meta = {}
     for arm in arms:
         _, meta = classify_anonymous_bones_and_assign_limits(meshes[0], arm, prune_digits=False, canonicalize_names=False)
@@ -2719,27 +3014,131 @@ def sop_preflight_check(
     bpy.context.view_layer.update()
     meshes = _preflight_scene_meshes()
     arms = [o for o in bpy.context.scene.objects if o.type == "ARMATURE"]
+    post_roundtrip_sanitization = _sanitize_preflight_meshes(meshes)
+    if any(item["modified"] for item in post_roundtrip_sanitization):
+        for s_item, p_item in zip(sanitization, post_roundtrip_sanitization):
+            s_item["modified"] = bool(s_item["modified"] or p_item["modified"])
+            s_item["final_vertices"] = p_item["final_vertices"]
+            s_item["final_faces"] = p_item["final_faces"]
+            for k in (
+                "removed_degenerate_faces",
+                "removed_duplicate_faces",
+                "removed_wire_edges",
+                "removed_loose_vertices",
+            ):
+                s_item[k] += p_item[k]
+        bpy.ops.object.select_all(action="DESELECT")
+        for obj in [*meshes, *arms]:
+            obj.select_set(True)
+            parent = obj.parent
+            while parent is not None:
+                parent.select_set(True)
+                parent = parent.parent
+        bpy.ops.export_scene.gltf(filepath=str(export_path), export_format="GLB", export_animations=True, use_selection=True)
+        clear_scene()
+        bpy.ops.import_scene.gltf(filepath=str(export_path))
+        bpy.context.view_layer.update()
+        meshes = _preflight_scene_meshes()
+        arms = [o for o in bpy.context.scene.objects if o.type == "ARMATURE"]
+    from video2rig_blender import export_shell
     bmin, bmax = _preflight_bounds(meshes)
+    shell_path = out_p / "shell.npz"
+    shell_glb_path = out_p / "watertight_shell.glb"
+    shell_png_path = out_p / "preflight_watertight_shell.png"
+    if any(len(o.data.polygons) > 0 for o in meshes):
+        shell, _, _ = export_shell(meshes, shell_path)
+        surface_voxels = int(np.count_nonzero(shell.surface))
+        solid_voxels = int(np.count_nonzero(shell.solid))
+        shell_render_info = _export_and_render_watertight_shell(
+            shell,
+            meshes,
+            bmin,
+            bmax,
+            shell_glb_path,
+            shell_png_path,
+        )
+        watertight_shell_info = {
+            "path": str(shell_path),
+            **shell_render_info,
+            "voxel_size": float(shell.step),
+            "grid_shape": [int(x) for x in shell.solid.shape],
+            "surface_voxels": surface_voxels,
+            "solid_voxels": solid_voxels,
+            "watertight_ready": bool(
+                surface_voxels > 0
+                and solid_voxels > 0
+                and shell_render_info["shell_mesh_faces"] > 0
+            ),
+        }
+    else:
+        np.savez_compressed(shell_path, thin=np.zeros((1, 1, 1), dtype=np.uint8), solid=np.zeros((1, 1, 1), dtype=np.uint8))
+        watertight_shell_info = {
+            "path": str(shell_path),
+            "mesh_glb_path": None,
+            "preview_image_path": None,
+            "shell_mesh_vertices": 0,
+            "shell_mesh_faces": 0,
+            "voxel_size": 0.0,
+            "grid_shape": [1, 1, 1],
+            "surface_voxels": 0,
+            "solid_voxels": 0,
+            "watertight_ready": False,
+        }
     metrics = _preflight_mesh_metrics(meshes)
     bone_names = [b.name for arm in arms for b in arm.data.bones]
     validation = validate_canonical_rig_bone_names(bone_names) if arms else {"valid": True, "total_bones": 0, "non_canonical_bones": [], "status": "not_applicable"}
-    geometry_ok = all(m["faces"] > 0 and not any(m[k] for k in ("non_manifold_junctions", "inconsistent_winding_edges", "loose_vertices", "wire_edges", "degenerate_faces", "duplicate_faces")) for m in metrics)
+    clean_geometry_ok = all(
+        m["faces"] > 0
+        and not any(
+            m[k]
+            for k in (
+                "loose_vertices",
+                "wire_edges",
+                "degenerate_faces",
+                "duplicate_faces",
+            )
+        )
+        for m in metrics
+    )
+    strict_surface_manifold = all(
+        not any(m[k] for k in ("non_manifold_junctions", "inconsistent_winding_edges"))
+        for m in metrics
+    )
+    watertight_shell_fallback_active = bool(
+        any(
+            m["boundary_edges"]
+            or m["non_manifold_junctions"]
+            or m["inconsistent_winding_edges"]
+            for m in metrics
+        )
+    )
+    geometry_ok = bool(
+        clean_geometry_ok
+        and (strict_surface_manifold or watertight_shell_info["watertight_ready"])
+    )
     tolerance = max(float(max(bmax - bmin)) * 1e-5, 1e-5)
     roundtrip_ok = bool(np.allclose(bmin, bmin_before, atol=tolerance, rtol=0) and np.allclose(bmax, bmax_before, atol=tolerance, rtol=0))
     origin_ok = bool(abs(bmin[2]) <= tolerance and np.all(np.abs((bmin[:2] + bmax[:2]) * 0.5) <= tolerance))
     _render_preflight_views(bmin, bmax, out_p / "preflight_front_side.png")
     checks = {"origin_and_transforms_ok": origin_ok, "glb_roundtrip_verified": roundtrip_ok,
               "topology_independence_checked": True, "mesh_quality_checked": True, "mesh_quality_ok": geometry_ok,
+              "strict_surface_manifold": strict_surface_manifold,
+              "watertight_shell_ready": watertight_shell_info["watertight_ready"],
+              "watertight_shell_rendered": bool(watertight_shell_info.get("preview_image_path")),
+              "watertight_shell_checked": False,
+              "watertight_shell_fallback_active": watertight_shell_fallback_active,
               "front_side_rendered": True, "front_side_occlusion_checked": False,
               "pose_orientation_checked": False, "side_limb_occlusion_ratio": None,
               "bone_naming_validation": validation}
     report = {"schema_version": 2, "monster_id": monster_id, "mesh_count": len(meshes), "armature_count": len(arms),
               "bone_names": bone_names, "bbox_min": bmin.tolist(), "bbox_max": bmax.tolist(),
+              "mesh_sanitization": sanitization, "watertight_shell": watertight_shell_info,
               "mesh_metrics": metrics, "checks": checks, "bone_naming_validation": validation,
               "automatic_ready": geometry_ok and roundtrip_ok and origin_ok and validation["valid"],
-              "visual_review_required": True, "render_engine": "BLENDER_WORKBENCH",
-              "limitations": ["Boundary edges may be intentional; inspect the rendered mesh and source backup.",
-                              "Pose, anatomical occlusion, welded decorations and internal faces require visual inspection; no limb occlusion ratio was inferred."]}
+              "visual_review_required": True, "human_in_the_loop_required": True,
+              "render_engine": "BLENDER_WORKBENCH",
+              "limitations": ["Boundary edges and multi-sheet junctions are backed by the automatic watertight voxel shell (shell.npz / watertight_shell.glb) and 100^3 outer-shell Bone Heat fallback; show preflight_front_side.png and preflight_watertight_shell.png to the user for Human-in-the-Loop confirmation before U1 upload.",
+                              "Pose, anatomical occlusion, welded decorations, watertight shell integrity and internal faces require visual inspection and user confirmation; no limb occlusion ratio was inferred."]}
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     return report

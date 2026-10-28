@@ -20,7 +20,7 @@ G3 必须提供真实预测 JSON 和独立视频，SOP 调用真实 Blender 烘�
 
 0.3.1 的数据缓存/训练契约新增 `monster-start-pose-v1` 与 `monster-context-pose-v1`，特征版本为 `v3-anatomical-reader-3`。标签必须保存完整 bones、matrix_local、pose_basis、rest/start 网格；前序上下文由同一骨架微扰姿态投影生成。旧的早期 v3 标签须重新生成；缺少起始姿态契约的 checkpoint 必须重训。v2 只读路径保持原分流。
 
-几何精修用 1% H 体素，1.2% H 双壳独立导出。重绑时保留非零起始姿态及所有网格的实际表面，首帧校准使用 start 网格。flatness 使用四个局部体积截面；Jaw 使用实体上下唇之间前方开放的空腔。
+几何精修用 1% H 体素，1.2% H 双壳独立导出（阶段一预检 `sop_preflight.py` 与阶段二 `prepare_candidate` 均自动持久化 `shell.npz` 并验证 `watertight_ready`；预检自动无损清理孤立点、悬空边、零面积退化面与重复面，对带开放边界或非流形多层薄片的网格自动启用水密壳兜底，并且在 `heat_bind_updated_skeleton` 中当整体或任意 `>=2%` 角色顶点的主分件覆盖率 `<50%` 时自动回退到 $100^3$ Marching Cubes 水密外壳 `solid_copy` Bone Heat + `cKDTree` 权重回传）。重绑时保留非零起始姿态及所有网格的实际表面，首帧校准使用 start 网格。flatness 使用四个局部体积截面；Jaw 使用实体上下唇之间前方开放的空腔。
 
 这些接口的集成不表示原七阶段 Plan 全部验收，剩余项目见仓库 `docs/specs/monster_video2rig_completion_audit.md`。
 

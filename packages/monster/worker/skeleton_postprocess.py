@@ -18,6 +18,8 @@ class Shell:
     origin: np.ndarray
     step: float
     distance: np.ndarray
+    remesh_verts: np.ndarray | None = None
+    remesh_faces: np.ndarray | None = None
 
     def indices(self, points):
         return np.rint((np.asarray(points) - self.origin) / self.step).astype(int)
@@ -56,16 +58,29 @@ class Shell:
         count = np.count_nonzero(self.solid)
         return float(intersection / max(1, 2 * count - intersection))
 
-    def save(self, path, vertices, triangles):
-        np.savez_compressed(
-            path,
+    def save(self, path, vertices, triangles, **extra):
+        payload = dict(
             vertices=vertices,
             triangles=triangles,
+            verts= (
+                self.remesh_verts
+                if self.remesh_verts is not None
+                else np.asarray(vertices, dtype=np.float32)
+            ),
+            faces=(
+                self.remesh_faces
+                if self.remesh_faces is not None
+                else np.asarray(triangles, dtype=np.int32)
+            ),
+            skin_verts=np.asarray(vertices, dtype=np.float32),
+            skin_faces=np.asarray(triangles, dtype=np.int32),
             thin=self.surface,
             solid=self.solid,
             origin=self.origin,
             voxel=self.step,
         )
+        payload.update(extra)
+        np.savez_compressed(path, **payload)
 
 
 def voxelize(vertices, triangles, voxel=None):
@@ -162,12 +177,21 @@ def _footprints(shell, *, thin_legs=False):
         return []
     floor = occupied[:, 2].min()
     slab = shell.solid[:, :, floor : floor + 3].any(2)
-    if not thin_legs:
+    band_depth = 8
+    if thin_legs:
+        # Toes can touch the floor separately while joining the same distal limb above it.
+        band_depth = max(3, int(np.ceil(0.08 * (np.ptp(occupied[:, 2]) + 1))))
+        labels, count = ndimage.label(
+            shell.solid[:, :, floor : floor + band_depth],
+            ndimage.generate_binary_structure(3, 3),
+        )
+        labels = labels[:, :, :3].max(2)
+    else:
         # Split floor contacts using actual volumetric columns before labeling.
         # Labeling the thin skin first merges feet joined by a skirt hem, then
         # rejects the whole merged region because its median lies in the cloth.
         slab &= (shell.distance[:, :, floor : floor + 8] >= 1.8).any(2)
-    labels, count = ndimage.label(slab)
+        labels, count = ndimage.label(slab)
     feet = []
     for k in range(1, count + 1):
         xy = np.argwhere(labels == k)
@@ -178,7 +202,7 @@ def _footprints(shell, *, thin_legs=False):
         column = shell.distance[
             max(0, center[0] - 1) : center[0] + 2,
             max(0, center[1] - 1) : center[1] + 2,
-            floor : floor + 8,
+            floor : floor + max(8, band_depth),
         ]
         if column.size and column.max() >= (0.9 if thin_legs else 1.8):
             feet.append(shell.origin + np.r_[center, floor + 1] * shell.step)

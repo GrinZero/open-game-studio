@@ -28,12 +28,131 @@ def mesh_arrays(meshes):
     return np.asarray(vertices, float), np.asarray(triangles, int)
 
 
-def export_shell(meshes, path):
-    v, f = mesh_arrays(meshes)
-    height = max(np.ptp(v[:, 2]), 1e-5)
-    shell = voxelize(v, f, 0.012 * height)
-    shell.save(path, v, f)
-    return shell, v, f
+def _remesh_watertight_shell_arrays(meshes, voxel_size):
+    """Build video2rig's smooth closed watertight shell via Blender's native VOXEL REMESH modifier."""
+    import bpy
+
+    char_meshes = [
+        obj
+        for obj in meshes
+        if not obj.name.startswith("Prop_") and len(obj.data.polygons) > 0
+    ]
+    if not char_meshes:
+        char_meshes = [obj for obj in meshes if len(obj.data.polygons) > 0]
+    if not char_meshes:
+        return np.zeros((0, 3), float), np.zeros((0, 3), int)
+
+    prev_active = bpy.context.view_layer.objects.active
+    prev_selected = [obj for obj in bpy.context.scene.objects if obj.select_get()]
+    prev_active_name = prev_active.name if prev_active is not None else None
+    prev_selected_names = [obj.name for obj in prev_selected]
+    copy_names = []
+    temp_mesh_names = []
+    shell_obj_name = None
+    try:
+        bpy.ops.object.select_all(action="DESELECT")
+        for obj in char_meshes:
+            copy_data = obj.data.copy()
+            temp_mesh_names.append(copy_data.name)
+            copy_obj = obj.copy()
+            copy_obj.data = copy_data
+            copy_obj.modifiers.clear()
+            bpy.context.collection.objects.link(copy_obj)
+            copy_obj.select_set(True)
+            copy_names.append(copy_obj.name)
+        bpy.context.view_layer.objects.active = bpy.data.objects[copy_names[0]]
+        if len(copy_names) > 1:
+            bpy.ops.object.join()
+        shell_obj = bpy.context.view_layer.objects.active
+        shell_obj_name = shell_obj.name
+        if shell_obj.data is not None:
+            temp_mesh_names.append(shell_obj.data.name)
+        mod = shell_obj.modifiers.new("Remesh", "REMESH")
+        mod.mode = "VOXEL"
+        mod.voxel_size = float(max(voxel_size, 1e-4))
+        mod.use_smooth_shade = False
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+        if shell_obj.data is not None:
+            temp_mesh_names.append(shell_obj.data.name)
+        v, f = mesh_arrays([shell_obj])
+        return v, f
+    finally:
+        for obj_name in [shell_obj_name, *copy_names]:
+            if obj_name:
+                rem_obj = bpy.data.objects.get(obj_name)
+                if rem_obj is not None:
+                    if rem_obj.data is not None:
+                        temp_mesh_names.append(rem_obj.data.name)
+                    bpy.data.objects.remove(rem_obj, do_unlink=True)
+        for mesh_name in set(temp_mesh_names):
+            rem_mesh = bpy.data.meshes.get(mesh_name)
+            if rem_mesh is not None and rem_mesh.users == 0:
+                bpy.data.meshes.remove(rem_mesh)
+        bpy.ops.object.select_all(action="DESELECT")
+        for obj_name in prev_selected_names:
+            sel_obj = bpy.data.objects.get(obj_name)
+            if sel_obj is not None:
+                sel_obj.select_set(True)
+        if prev_active_name:
+            act_obj = bpy.data.objects.get(prev_active_name)
+            if act_obj is not None:
+                bpy.context.view_layer.objects.active = act_obj
+
+
+def export_shell(meshes, path, voxel_share=0.012, facing="-Y"):
+    sv, sf = mesh_arrays(meshes)
+    lo = sv.min(axis=0)
+    hi = sv.max(axis=0)
+    height = max(float(np.ptp(sv[:, 2])), 1e-4)
+    voxel = float(voxel_share * height)
+    remesh_v, remesh_f = _remesh_watertight_shell_arrays(meshes, voxel)
+    if len(remesh_v) >= 3 and len(remesh_f) >= 1:
+        combined_v = np.vstack([remesh_v, sv])
+        combined_f = np.vstack([remesh_f, sf + len(remesh_v)])
+    else:
+        remesh_v, remesh_f = sv, sf
+        combined_v, combined_f = sv, sf
+    # Keep the closed Blender Voxel Remesh shell for interior bodies while
+    # retaining one-sided sheets (robes/hoods/leaves) from the skin mesh (video2rig unirig.py).
+    shell = voxelize(combined_v, combined_f, voxel)
+    shell.remesh_verts = remesh_v
+    shell.remesh_faces = remesh_f
+    shell.save(
+        path,
+        sv,
+        sf,
+        lo=lo.astype(np.float64),
+        hi=hi.astype(np.float64),
+        height=np.float64(height),
+        facing=np.array(facing),
+        meshes=np.array([obj.name for obj in meshes]),
+    )
+    return shell, sv, sf
+
+
+def _surface_component_sizes(vertices, edges, tolerance):
+    """Count geometric components across duplicate UV/normal seam vertices.
+
+    This adjacency is only used for skin repair; mesh topology and UVs stay intact.
+    """
+    from scipy.spatial import cKDTree
+
+    vertices = np.asarray(vertices, dtype=float)
+    parent = np.arange(len(vertices))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for a, b in edges:
+        parent[root(int(a))] = root(int(b))
+    if len(vertices):
+        for a, b in cKDTree(vertices).query_pairs(tolerance, output_type="ndarray"):
+            parent[root(int(a))] = root(int(b))
+    ids = np.array([root(i) for i in range(len(vertices))], dtype=int)
+    return np.bincount(ids, minlength=len(vertices))[ids]
 
 
 def loose_weights(meshes, arm, height):
@@ -61,20 +180,10 @@ def loose_weights(meshes, arm, height):
     for obj in meshes:
         groups = {g.index: g.name for g in obj.vertex_groups}
         verts = list(obj.data.vertices)
-        # Connected components distinguish a small independent fragment from the main body.
-        parent = np.arange(len(verts))
-
-        def root(i):
-            while parent[i] != i:
-                parent[i] = parent[parent[i]]
-                i = parent[i]
-            return i
-
-        for edge in obj.data.edges:
-            a, b = map(int, edge.vertices)
-            parent[root(a)] = root(b)
-        ids = np.array([root(i) for i in range(len(verts))])
-        counts = np.bincount(ids, minlength=len(verts))
+        points = np.array([list(obj.matrix_world @ v.co) for v in verts]).reshape(-1, 3)
+        component_sizes = _surface_component_sizes(
+            points, [edge.vertices for edge in obj.data.edges], 1e-6 * height
+        )
         for vertex in verts:
             point = np.array(obj.matrix_world @ vertex.co)
             dist = distances(point)
@@ -91,7 +200,7 @@ def loose_weights(meshes, arm, height):
                 for g in vertex.groups
                 if groups.get(g.group) in names and g.weight > 1e-6
             ]
-            small = counts[ids[vertex.index]] < 0.02 * max(1, total_character_vertices)
+            small = component_sizes[vertex.index] < 0.02 * max(1, total_character_vertices)
             weapon = [
                 i
                 for i, n in enumerate(names)
@@ -151,7 +260,7 @@ def _parent_heat_excluding_props(arm):
 
 
 def solid_copy(meshes, arm):
-    """100-cell outer shell Bone Heat, followed by nearest-surface weight transfer."""
+    """100-cell outer shell Bone Heat (with Blender VOXEL REMESH smoothing per video2rig autorig_build.py), followed by nearest-surface weight transfer."""
     import bpy
     from skimage.measure import marching_cubes
     from scipy.spatial import cKDTree
@@ -160,43 +269,86 @@ def solid_copy(meshes, arm):
     if not meshes:
         raise ValueError("Outer shell Heat requires a character mesh")
     v, f = mesh_arrays(meshes)
-    step = max(np.ptp(v, axis=0)) / 100
+    step = float(max(np.ptp(v, axis=0)) / 100)
     shell = voxelize(v, f, step)
-    verts, faces, _, _ = marching_cubes(shell.solid.astype(float), level=0.5)
-    verts = shell.origin + verts * step
+    mc_verts, mc_faces, _, _ = marching_cubes(shell.solid.astype(float), level=0.5)
+    mc_verts = shell.origin + mc_verts * step
+    # scikit-image marching_cubes on a {1=inside, 0=outside} volume produces inward winding;
+    # reverse triangle winding so face normals point outward for OpenVDB REMESH and Bone Heat.
+    mc_faces = mc_faces[:, ::-1].astype(int)
     data = bpy.data.meshes.new("__v3_heat_shell")
-    data.from_pydata(verts.tolist(), [], faces.tolist())
+    data.from_pydata(mc_verts.tolist(), [], mc_faces.tolist())
     data.update()
+    temp_mesh_names = [data.name]
     obj = bpy.data.objects.new("__v3_heat_shell", data)
+    obj_name = obj.name
     bpy.context.collection.objects.link(obj)
     try:
+        bpy.ops.object.select_all(action="DESELECT")
+        obj.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+        mod = obj.modifiers.new("Remesh", "REMESH")
+        mod.mode = "VOXEL"
+        mod.voxel_size = float(max(step, 1e-4))
+        mod.adaptivity = 0.0
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+        if obj.data is not None:
+            temp_mesh_names.append(obj.data.name)
+        if len(obj.data.vertices) < 3:
+            # Fallback to the Marching Cubes surface if a tiny synthetic mesh collapsed under VOXEL REMESH
+            fallback_data = bpy.data.meshes.new("__v3_heat_shell_fallback")
+            fallback_data.from_pydata(mc_verts.tolist(), [], mc_faces.tolist())
+            fallback_data.update()
+            temp_mesh_names.append(fallback_data.name)
+            obj.data = fallback_data
+        verts = np.array(
+            [list(obj.matrix_world @ p.co) for p in obj.data.vertices], float
+        )
         bpy.ops.object.select_all(action="DESELECT")
         obj.select_set(True)
         arm.select_set(True)
         bpy.context.view_layer.objects.active = arm
         _parent_heat_excluding_props(arm)
         group_names = {g.index: g.name for g in obj.vertex_groups}
-        tree = cKDTree(verts)
-        if not any(p.groups for p in obj.data.vertices):
+        weighted_ids = [
+            i
+            for i, p in enumerate(obj.data.vertices)
+            if sum(g.weight for g in p.groups if group_names.get(g.group) in arm.data.bones) > 1e-6
+        ]
+        if not weighted_ids:
             raise RuntimeError("Outer-shell Bone Heat produced no weights")
+        tree = cKDTree(verts[weighted_ids])
         for mesh in meshes:
             positions = np.array(
                 [list(mesh.matrix_world @ p.co) for p in mesh.data.vertices]
             )
             indices = tree.query(positions)[1]
-            for vertex, near in zip(mesh.data.vertices, indices):
+            for vertex, near_idx in zip(mesh.data.vertices, indices):
+                near = weighted_ids[int(near_idx)]
                 for group in list(mesh.vertex_groups):
                     if arm.data.bones.get(group.name):
                         group.remove([vertex.index])
-                for group in obj.data.vertices[int(near)].groups:
-                    name = group_names[group.group]
+                items = [
+                    (group_names[group.group], float(group.weight))
+                    for group in obj.data.vertices[int(near)].groups
+                    if group_names.get(group.group) in arm.data.bones and group.weight > 1e-6
+                ]
+                total_w = sum(w for _, w in items)
+                for name, w in items:
                     vg = mesh.vertex_groups.get(name) or mesh.vertex_groups.new(
                         name=name
                     )
-                    vg.add([vertex.index], float(group.weight), "REPLACE")
+                    vg.add([vertex.index], float(w / max(total_w, 1e-8)), "REPLACE")
     finally:
-        bpy.data.objects.remove(obj, do_unlink=True)
-        bpy.data.meshes.remove(data)
+        rem_obj = bpy.data.objects.get(obj_name)
+        if rem_obj is not None:
+            if rem_obj.data is not None:
+                temp_mesh_names.append(rem_obj.data.name)
+            bpy.data.objects.remove(rem_obj, do_unlink=True)
+        for m_name in set(temp_mesh_names):
+            rem_mesh = bpy.data.meshes.get(m_name)
+            if rem_mesh is not None and rem_mesh.users == 0:
+                bpy.data.meshes.remove(rem_mesh)
     return {"method": "100_cell_outer_shell_heat", "shell_vertices": len(verts)}
 
 
@@ -228,21 +380,33 @@ def heat_bind_updated_skeleton(meshes, arm):
         except RuntimeError as exc:
             report["mesh_heat_error"] = str(exc)
         total = weighted = 0
+        per_mesh_fraction = {}
         for obj in meshes:
             obj.matrix_world = worlds[obj]
             deform = {g.index for g in obj.vertex_groups if arm.data.bones.get(g.name)}
-            total += len(obj.data.vertices)
-            weighted += sum(
+            obj_total = len(obj.data.vertices)
+            obj_weighted = sum(
                 any(g.group in deform and g.weight > 1e-6 for g in vertex.groups)
                 for vertex in obj.data.vertices
             )
+            total += obj_total
+            weighted += obj_weighted
+            if obj_total > 0:
+                per_mesh_fraction[obj.name] = obj_weighted / obj_total
             modifiers = [
                 m for m in obj.modifiers if m.type == "ARMATURE" and m.object == arm
             ]
             for modifier in modifiers[1:]:
                 obj.modifiers.remove(modifier)
         report["mesh_weighted_fraction"] = weighted / max(total, 1)
-        if report["mesh_weighted_fraction"] < 0.5:
+        if len(per_mesh_fraction) > 1:
+            report["per_mesh_weighted_fraction"] = per_mesh_fraction
+        submesh_failed = len(meshes) > 1 and any(
+            len(obj.data.vertices) >= 0.02 * max(total, 1)
+            and per_mesh_fraction.get(obj.name, 0.0) < 0.5
+            for obj in meshes
+        )
+        if report["mesh_weighted_fraction"] < 0.5 or submesh_failed:
             report.update(fallback=True, outer_shell=solid_copy(meshes, arm))
     finally:
         arm.data.pose_position = position
@@ -386,14 +550,38 @@ def prepare_candidate(meshes, arm, out_dir, bones, fold_digits=False):
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    _, vertices, faces = export_shell(meshes, out / "shell.npz")
-    # Geometry decisions use the specified 1% H grid. The serialized dual shell
-    # independently retains its 1.2% H contract for downstream skinning/export.
-    shell = voxelize(vertices, faces, 0.01 * max(np.ptp(vertices[:, 2]), 1e-5))
+    dual_shell, vertices, faces = export_shell(meshes, out / "shell.npz")
+    surface_voxels = int(np.count_nonzero(dual_shell.surface))
+    solid_voxels = int(np.count_nonzero(dual_shell.solid))
+    watertight_shell_info = {
+        "path": str(out / "shell.npz"),
+        "voxel_size": float(dual_shell.step),
+        "grid_shape": [int(x) for x in dual_shell.solid.shape],
+        "surface_voxels": surface_voxels,
+        "solid_voxels": solid_voxels,
+        "watertight_ready": bool(surface_voxels > 0 and solid_voxels > 0),
+    }
+    # Geometry decisions use the specified 1% H grid, combining the closed Blender
+    # Voxel Remesh shell (V, F) with the raw skin mesh (SV, SF) so one-sided sheets
+    # (robes, hoods, leaves) and interior cavities are both preserved (video2rig unirig.py).
+    if (
+        dual_shell.remesh_verts is not None
+        and dual_shell.remesh_faces is not None
+        and len(dual_shell.remesh_verts) >= 3
+        and len(dual_shell.remesh_faces) >= 1
+    ):
+        combined_v = np.vstack([dual_shell.remesh_verts, vertices])
+        combined_f = np.vstack([dual_shell.remesh_faces, faces + len(dual_shell.remesh_verts)])
+    else:
+        combined_v, combined_f = vertices, faces
+    shell = voxelize(combined_v, combined_f, 0.01 * max(np.ptp(vertices[:, 2]), 1e-5))
+    shell.remesh_verts = dual_shell.remesh_verts
+    shell.remesh_faces = dual_shell.remesh_faces
     start = _capture_start_pose(meshes, arm)
     processed, report = postprocess_skintokens_skeleton(
         bones, vertices, shell, fold_digits
     )
+    report["watertight_shell"] = watertight_shell_info
     roots = [n for n in processed if processed[n].get("parent") not in processed]
     root = roots[0]
     many = manylegs_build(shell, np.array(processed[root]["rest_head_world"]))
@@ -489,16 +677,27 @@ def prepare_candidate(meshes, arm, out_dir, bones, fold_digits=False):
         processed, vertices.min(0).tolist(), vertices.max(0).tolist()
     )
     valid = total = 0
+    per_mesh_valid = {}
     for obj in meshes:
         names = {g.index: g.name for g in obj.vertex_groups}
+        obj_valid = 0
         for vertex in obj.data.vertices:
             total += 1
-            valid += any(
+            is_valid = any(
                 names.get(g.group) in processed and g.weight > 1e-6
                 for g in vertex.groups
             )
+            valid += is_valid
+            obj_valid += is_valid
+        if not obj.name.startswith("Prop_") and len(obj.data.vertices) > 0:
+            per_mesh_valid[obj.name] = (obj_valid, len(obj.data.vertices))
+    char_total = sum(cnt for _, cnt in per_mesh_valid.values())
+    submesh_underweighted = len(per_mesh_valid) > 1 and any(
+        cnt >= 0.02 * max(1, char_total) and (v_cnt / max(1, cnt)) < 0.5
+        for v_cnt, cnt in per_mesh_valid.values()
+    )
     added_deform = set(processed) - set(bones)
-    if valid / max(1, total) < 0.5 or added_deform:
+    if valid / max(1, total) < 0.5 or submesh_underweighted or added_deform:
         report["binding"] = heat_bind_updated_skeleton(meshes, arm)
         if report["binding"]["fallback"]:
             report["binding_fallback"] = report["binding"]["outer_shell"]

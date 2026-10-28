@@ -37,16 +37,17 @@ npm run monster:sop -- --help
 
 `preflight` 优先使用可导入 `bpy` 的 Python；本机也会发现已安装的 Blender。可用 `MONSTER_BPY_PYTHON` 或 `MONSTER_BLENDER` 指定路径。默认优先查找独立 bpy 5.2.3 环境（Colab `/content/monster-bpy/venv/bin/python`；桌面本地集成目录 `blender-python-5.2.3/bin/python`），不使用 SkinTokens 的 Python 3.11 处理新版 `.blend`。没有可用后端、Worker 报错或产物缺失时必须失败，不生成占位图或有效 U1 输入；旧成功报告在每次执行前立即失效。
 
-预检保存完整装饰备份、保留分件装配位置的 GLB、导出重导入检查、几何统计和真实 `1344×768` 正/侧视图。几何统计会在副本中合并 glTF UV/法线缝处的重合顶点，不修改源模型；边界、接触面和装饰语义仍需实际检查。不会推测固定的肢体遮挡率。
+预检保存完整装饰备份、保留分件装配位置的 GLB（自动无损清理孤立点、悬空边、零面积退化面与重复面）、`1.2% H` 双层体素水密壳 `shell.npz`、Marching Cubes 重建 3D 水密外壳 `watertight_shell.glb`、导出重导入检查、几何统计、真实 `1344×768` 原模型正/侧视图 `preflight_front_side.png`、真实 `1344×768` 水密壳正/侧视图 `preflight_watertight_shell.png` 以及并排审阅页 `preflight_review.html`。几何统计会在探测副本中合并 glTF UV/法线缝处的重合顶点，不修改源模型；边界、接触面、水密壳包裹与装饰语义仍需实际检查。不会推测固定的肢体遮挡率。
 
-自动检查通过后，首次执行仍返回 `status=awaiting_preflight_review`、`passed=false`（CLI 退出码 2）。执行者查看报告、正侧视图及必要的备份工程后，记录实际姿态、朝向、遮挡、装饰与开口判断；此记录是预检检查证据，不替代 G1/G2/G3 用户关卡，也不能绕过自动检查发现的几何错误：
+自动检查通过后，首次执行返回 `status=awaiting_preflight_review`、`passed=false`（CLI 退出码 2）。**本步骤为 Human-in-the-Loop 用户确认关卡**：Agent 必须先向用户展示 `preflight_front_side.png`（原模型正侧视图）与 `preflight_watertight_shell.png`（水密壳正侧视图）并明确提醒当前预检与水密壳结果 OK，**停下等待用户确认**；严禁在用户看到结果并确认前自行调用 `--review-visual` 或继续执行 U1 上传。待用户明确确认后，传入 `--user-quote '<用户确认原话>'` 登记通过并同步 U1：
 
 ```sh
 npm run monster:sop -- preflight --monster-id <id> --input <source.glb> --project-root <project>
-npm run monster:sop -- preflight --monster-id <id> --project-root <project> --review-visual --review-note '<实际观察结论>'
+# 向用户展示 preflight_front_side.png 与 preflight_watertight_shell.png 并等待用户确认后执行：
+npm run monster:sop -- preflight --monster-id <id> --project-root <project> --review-visual --review-note '<实际观察结论>' --user-quote '<用户确认原话>' --sync-u1 --drive-root <MonsterStudio目录>
 ```
 
-`--review-visual` 只登记已查看的当前证据，不重新运行 Blender；可在该命令添加 `--sync-u1 --drive-root <MonsterStudio目录>` 完成持久同步。U1 校验源模型、输入 GLB、检查图、装饰清单和完整备份的 SHA-256；任何证据改变、遗失或旧版 `passed=true` 报告均要求重新预检。
+`--review-visual` 要求必须提供 `--user-quote`（用户确认原话），只登记已确认的当前证据，不重新运行 Blender；可在该命令添加 `--sync-u1 --drive-root <MonsterStudio目录>` 完成持久同步。U1 校验源模型、输入 GLB、`shell.npz`、`watertight_shell.glb`、原模型检查图、水密壳检查图、装饰清单和完整备份的 SHA-256；任何证据改变、遗失或旧版 `passed=true` 报告均要求重新预检。
 
 `g1-pack` 同样复用 `_worker_command` 调用本机 Blender 或 `bpy` 环境执行 `--mode prepare_g1_candidates`，要求 4 套真实候选 GLB（`candidate_0..3.glb`）与 `ffmpeg` 均可用：在 Blender 中完成分件保持、装饰恢复（`rigid` 绑骨 / `flex` 独立蒙皮子网格）、全网格 `<KIND>_<SIDE>_<GROUP>_<INDEX>` 规范重命名、未压缩 `.blend` 保存（`compress=False`，兼容 Blender 5.x 与工作台回读）、16 张真实 3D 网格＋3D 八面体骨骼叠加图（`BLENDER_WORKBENCH`）、按形态模板驱动的真实变形拉伸指标审计（`follow_through_issues.json`）以及 `front`/`side`/`three_quarter` 三视角 2×2 四候选同步对比视频编码（校验 MP4 `ftyp`、`moov` 与非空 `mdat` 盒子），并写入 `g1_report.json` 记录全部 SHA-256 证据，绝不回退模板火柴人图或 24 字节占位 MP4。
 

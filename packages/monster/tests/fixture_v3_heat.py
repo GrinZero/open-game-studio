@@ -148,6 +148,46 @@ def policy_case(covered, *, mesh_error=False, shell_error=False):
 policies = [policy_case(k) for k in (49, 50, 51)]
 policies += [policy_case(0, mesh_error=True), policy_case(49, shell_error=True)]
 
+
+def submesh_underweighted_case():
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    body = cube("Body", (0, 0, 1), (0.6, 0.5, 2))
+    bpy.context.view_layer.objects.active = body
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.subdivide(number_cuts=2)
+    bpy.ops.object.mode_set(mode="OBJECT")
+    mane = cube("Mane", (0, 0, 1.5), (0.4, 0.4, 0.6))
+    arm = rig()
+    bind(body, arm)
+    bind(mane, arm)
+    original = bridge._parent_heat_excluding_props
+    calls = []
+
+    def submesh_partial_heat(_arm):
+        calls.append(True)
+        if len(calls) == 1:
+            # Body is 100% weighted, Mane is 0% weighted (overall >50%, but Mane >=2% is <50%)
+            body.vertex_groups["Root"].add(
+                list(range(len(body.data.vertices))), 1, "REPLACE"
+            )
+            return {"FINISHED"}
+        return original(_arm)
+
+    with patch.object(
+        bridge, "_parent_heat_excluding_props", side_effect=submesh_partial_heat
+    ):
+        rep = bridge.heat_bind_updated_skeleton([body, mane], arm)
+    assert rep["mesh_weighted_fraction"] > 0.5, rep
+    assert rep["per_mesh_weighted_fraction"]["Mane"] == 0.0, rep
+    assert rep["fallback"] is True, rep
+    assert len(calls) == 2, calls
+    assert np.all(bone_weights(body, arm) > 0.99)
+    assert np.all(bone_weights(mane, arm) > 0.99)
+    return rep
+
+
+policies.append(submesh_underweighted_case())
+
 # Directly observe the existing Prop exclusion wrapper on success and failure.
 for fail in (False, True):
     arm = next(o for o in bpy.context.scene.objects if o.type == "ARMATURE")

@@ -7,6 +7,18 @@ description: 将静态怪物模型推进到绑定、姿态训练和动作交付�
 
 以 [MonsterStudio 完整流程与用户审计规范](references/workflow-and-audit.md) 为制作依据。先读 [当前实现与操作入口](references/runtime.md)，确认正在使用的版本、能力与固化脚本入口。本技能已将全流程 SOP 执行层固化为统一 CLI 调度器 [monster_sop.py](scripts/monster_sop.py) 及 8 个标准子模块（[sop_gate.py](scripts/sop_gate.py)、[sop_preflight.py](scripts/sop_preflight.py)、[sop_g1_pack.py](scripts/sop_g1_pack.py)、[sop_joint_limits.py](scripts/sop_joint_limits.py)、[sop_g2_pack.py](scripts/sop_g2_pack.py)、[sop_g3_exam.py](scripts/sop_g3_exam.py)、[sop_delivery.py](scripts/sop_delivery.py)、[sop_colab_guard.py](scripts/sop_colab_guard.py)）；**优先复用现有脚本，尽量减少重复编写 Python / Blender / FFmpeg / JSON 处理代码；现有脚本不能满足需求时，可按需补充或编写临时代码**。本技能不替代普通项目整理，也不因编写文档或检查代码而启动 GPU。
 
+## 每步完成后的下一步提示
+
+每个实际执行的制作步骤或可独立验收的子步骤完成并核验后，立即向用户给出 1–2 句简易提示，再继续后续操作；同一轮连续完成多步也要逐步提示，不能只在阶段结束或最终回复时汇总。提示使用「已完成：<本步结果及可查看的产物/检查依据>。下一步：<紧接着的一项具体动作>。」的形式，用通俗语言说明即可，无需复述整条 SOP。
+
+- 以实际产物和检查结果确认本步完成；任务已提交、仍在运行或结果未知时，报告真实状态，下一步写查询或核验原任务。
+- 下一步依据当前角色、固定版本与有效关卡决定，包含返修、恢复和局部任务的实际分支；需要用户操作时，简要说明要查看什么、决定什么。
+- 审阅材料就绪与用户审批通过分别提示。**阶段一预检与水密壳确认（Preflight Human-in-the-Loop）**、G1、G2、G3 与最终批次验收均为必须由人看到结果并确认后才能进入下一步的关卡：
+  - 例如预检完成后：「已完成：Blender 预检与自动水密壳生成已通过（准备副本清理了 X 个退化面，生成 3D 水密壳 Y 体素，已展示原模型正侧视图 `preflight_front_side.png` 与水密壳正侧视图 `preflight_watertight_shell.png`）。下一步：请查看并确认预检与水密壳效果无误；确认后我将执行 U1 持久上传并生成四套候选骨架。」随后**必须停下等待用户回复**，严禁未获用户确认即自行调用 `--review-visual` 或继续执行 U1 上传与四候选生成。
+  - 例如 G1 就绪后：「已完成：G1 审阅包已生成并核验（附审阅页）。下一步：请查看四套候选并选定一套；G1 通过后再进行关节限制探测。」
+  - 仅在已获授权范围内且不属于上述用户确认关卡的子步骤，提示后直接继续。
+- 检查失败或遇到阻碍时，说明未完成项及紧接着的修复动作，修复并核验后再提示完成。本次请求范围全部完成时，明确「本次范围已完成」；有后续建议则标为可选，没有则说明「无需后续操作」。
+
 ## 定位与恢复
 
 新建角色、接续制作或整理目录时，先读 [角色独立工作目录规范](references/character-workspace.md)：以用户项目的 `scratch/work/<character_id>/` 为制作根，Monster 沿用同值 `monster_id`；按角色索引固定输入、训练和动作版本。执行现有脚本先核对该规范 §8 的兼容路径，新布局尚未全面接入，不移动正在使用的旧文件或另建审核账本。
@@ -33,16 +45,28 @@ npm run monster:sop -- gate --monster-id <id> --project-root . --drive-root "$MO
 
 只读取和执行本次任务需要的 SOP 章节；不要把整条生产流程套到局部检查任务上。各阶段优先使用 `monster_sop.py`（或 `npm run monster:sop --`）对应子命令：
 
-1. **预检与 U1（SOP §2，含工作区红线守卫与强制骨骼规范命名，调用 [sop_preflight.py](scripts/sop_preflight.py)）**：
+1. **预检、水密壳展示与 Human-in-the-Loop 用户确认及 U1（SOP §2，含工作区红线守卫与强制骨骼规范命名，调用 [sop_preflight.py](scripts/sop_preflight.py)）**：
    ```sh
+   # 1a. 执行 Blender 预检，自动无损清理网格并生成 3D 水密壳与正侧视预览图（返回 awaiting_preflight_review）
    npm run monster:sop -- preflight \
      --monster-id <id> \
      --input <path/to/source.glb> \
+     --project-root .
+
+   # 1b. 【Human-in-the-Loop 必停关卡】向用户展示 preflight_front_side.png 与 preflight_watertight_shell.png（及 preflight_review.html），
+   #     明确提醒当前预检与水密壳结果 OK，停下等待用户确认！严禁未获用户确认自行调用 --review-visual 或执行 U1 上传。
+
+   # 1c. 待用户明确确认后，传入 --user-quote "<用户确认原话>" 登记通过并同步 U1 至 Google Drive
+   npm run monster:sop -- preflight \
+     --monster-id <id> \
      --project-root . \
      --drive-root "$MONSTER_DRIVE_ROOT" \
+     --review-visual \
+     --review-note "<姿态/遮挡/装饰/水密壳核验结论>" \
+     --user-quote "<用户确认原话>" \
      --sync-u1
    ```
-   保留原工程，在 `scratch/work/` 下从副本准备精简主体输入（`rig_input_variant`）。脚本自动执行**工作区与 Git 卫生红线守卫**（在 `final_batch` 获用户明确确认前，严禁将任何中间产物放入 `art_source/`、禁止在 `art_source/` 下嵌套建立阶段/版本子目录、严禁加入项目 Git / LFS / DVC 或改动 `asset_sources.json` / `source_dependencies.json` / `runtime_manifest.json` 等受管清单）。自动完成 7 项模型体检（姿态朝向、实际几何原点归零、装饰拓扑独立性拆离并备份 `decoration_manifest.json`、网格质量、正侧视遮挡、多套动画冲突、骨骼命名门禁）。**强制骨骼命名预检（必做硬门禁）：** 凡输入模型已带骨架或在生成骨架后进入下游前，**必须在预检中将全部变形骨骼强制规范命名为 v3 解剖学语义名（如 `Root`、`Spine1`、`Thigh.L`、`Finger1_1.L`；v2 仅解析兼容） 格式**（10 类 `KIND`：`ROOT`/`RIGID`/`SPINE`/`HEAD`/`JAW`/`LIMB`/`WING`/`FLEX`/`TAIL`/`DIGIT`；`SIDE`：`C`/`L`/`R`），同步更新网格 `vertex_groups`、父子引用、动画 `fcurves` 与 `studio_rig_meta.json`，并通过 `validate_canonical_rig_bone_names` 校验零匿名骨（`valid=True`）；**严禁携带 `bone_0..N`、`Bone.001` 等未规范命名的骨骼跳过预检进入后续流程**。脚本自动产出正/侧视实模检查图、`preflight_report.json` 与 `u1_manifest.json`，并同步至 Google Drive 持久目录（U1），不能用 Gradio 临时上传代替 U1。
+   保留原工程，在 `scratch/work/` 下从副本准备精简主体输入（`rig_input_variant`）。脚本自动执行**工作区与 Git 卫生红线守卫**（在 `final_batch` 获用户明确确认前，严禁将任何中间产物放入 `art_source/`、禁止在 `art_source/` 下嵌套建立阶段/版本子目录、严禁加入项目 Git / LFS / DVC 或改动 `asset_sources.json` / `source_dependencies.json` / `runtime_manifest.json` 等受管清单）。自动完成 7 项模型体检（姿态朝向、实际几何原点归零、装饰拓扑独立性拆离并备份 `decoration_manifest.json`、网格质量自动无损清理与自动水密壳生成、正侧视遮挡、多套动画冲突、骨骼命名门禁）。**自动网格无损清理、自动水密壳（`shell.npz` + `watertight_shell.glb`）与可视化确认：** `sop_preflight_check` 在保存完整源备份 `decorations_backup.blend` 后，自动在准备副本上通过 `_sanitize_preflight_meshes` 清理不影响 UV/外观的孤立点、悬空线边、退化零面积面与重复面（严禁手工编写破坏 UV 的全局焊接或拓扑缝合脚本），自动调用 `export_shell` 生成持久化的 `1.2% H` 双层体素水密壳 `scratch/work/<id>/shell.npz`（含 `thin` 表皮与 `solid` 闭运算 + 6 连通洪水填充实心水密体），并通过 Marching Cubes 重建导出 3D 水密外壳模型 `scratch/work/<id>/watertight_shell.glb`、渲染水密壳正侧视图 `scratch/checks/<id>/preflight_watertight_shell.png` 及并排审阅页 `scratch/checks/<id>/preflight_review.html`。对于含叶片、披风、领口等正常开放边界或 AI 生成的多层接触非流形分件模型，只要自动生成的水密壳有效（`watertight_ready=True`），自动检查即就绪（`automatic_ready=True`、`watertight_shell_fallback_active=True`），下游骨架精修与 G1 蒙皮（`heat_bind_updated_skeleton` → `solid_copy` $100^3$ Marching Cubes 水密外壳 Bone Heat + `cKDTree` 最近表面权重回传）自动接管，无需手工补洞或改网格拓扑。**Human-in-the-Loop 验证（必做）：** 预检执行完毕后，**必须向用户展示原模型正侧视图 `preflight_front_side.png` 与水密壳正侧视图 `preflight_watertight_shell.png`，明确提醒当前预检步骤与水密壳状态 OK，并等待用户看到结果确认后，方可携带 `--user-quote` 执行 `--review-visual --sync-u1` 进入下一步**。**强制骨骼命名预检（必做硬门禁）：** 凡输入模型已带骨架或在生成骨架后进入下游前，**必须在预检中将全部变形骨骼强制规范命名为 v3 解剖学语义名（如 `Root`、`Spine1`、`Thigh.L`、`Finger1_1.L`；v2 仅解析兼容） 格式**（10 类 `KIND`：`ROOT`/`RIGID`/`SPINE`/`HEAD`/`JAW`/`LIMB`/`WING`/`FLEX`/`TAIL`/`DIGIT`；`SIDE`：`C`/`L`/`R`），同步更新网格 `vertex_groups`、父子引用、动画 `fcurves` 与 `studio_rig_meta.json`，并通过 `validate_canonical_rig_bone_names` 校验零匿名骨（`valid=True`）；**严禁携带 `bone_0..N`、`Bone.001` 等未规范命名的骨骼跳过预检进入后续流程**。脚本自动产出 `preflight_front_side.png`、`preflight_watertight_shell.png`、`watertight_shell.glb`、`shell.npz`、`preflight_review.html`、`preflight_report.json` 与 `u1_manifest.json`，并在获用户确认后同步至 Google Drive 持久目录（U1），不能用 Gradio 临时上传代替 U1。
 
 2. **四候选、强制骨骼规范命名、装饰恢复与 G1（SOP §3，调用 [sop_g1_pack.py](scripts/sop_g1_pack.py)）**：
    ```sh
