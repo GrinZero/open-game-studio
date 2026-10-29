@@ -477,7 +477,7 @@ def build_g3_exam_pack(
     g3_dir = dirs["checks_dir"] / "g3_review"
     g3_dir.mkdir(parents=True, exist_ok=True)
 
-    meta_path = work_dir / "g1_candidates" / f"candidate_{selected_cid}_rig_meta.json"
+    _, meta_path, _ = resolve_g1_candidate_files(work_dir, g1_info)
     rig_meta = json.loads(meta_path.read_text(encoding="utf-8"))
     classified = classify_rig_bones(
         rig_meta["bones"],

@@ -139,13 +139,14 @@ boundary_report = {}
 with patch.object(
     worker, "sample_stratified_pose_euler_dict", return_value=(seed_eulers, "fixture")
 ):
-    worker.sample_in_limit_pose(
+    boundary_sampled = worker.sample_in_limit_pose(
         arm,
         meta,
         random.Random(5),
         sampling_skin=skin,
         boundary_exploration=True,
         sampling_report=boundary_report,
+        sampling_events={"roam": False},
     )
 boundary_params = rig.zero()
 boundary_root = rig.slices["Hips"]
@@ -156,7 +157,7 @@ boundary_params[boundary_root.start + 3 : boundary_root.stop] = boundary_report[
     "translation"
 ]
 ix, channels = rig.slices["UpperArm.L"]
-boundary_params[ix] = np.asarray(seed_eulers["UpperArm.L"])[channels]
+boundary_params[ix] = np.asarray(boundary_sampled["UpperArm.L"])[channels]
 verify_pose(boundary_params, meshes, arm)
 for name in ("Root", "Spine0", "Rigid1"):
     np.testing.assert_allclose(
@@ -170,7 +171,7 @@ with patch.object(
         meta,
         random.Random(5),
         sampling_skin=skin,
-        sampling_events={"yaw": True, "pitch": True, "jump": True},
+        sampling_events={"yaw": True, "pitch": True, "jump": True, "roam": False},
         sampling_report=report,
     )
 p1 = rig.zero()
@@ -180,7 +181,7 @@ p1[root.start : root.start + 3] = Rotation.from_euler(
 ).as_rotvec()
 p1[root.start + 3 : root.stop] = report["translation"]
 indices, channels = rig.slices["UpperArm.L"]
-p1[indices] = np.array(seed_eulers["UpperArm.L"])[channels]
+p1[indices] = np.array(sampled["UpperArm.L"])[channels]
 verify_pose(p1, meshes, arm)
 for name in ("Root", "Spine0", "Rigid1"):
     np.testing.assert_allclose(

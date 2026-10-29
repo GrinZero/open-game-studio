@@ -16,5 +16,6 @@ def runtime_metadata():
         "blender_target": blender["blender_version"],
         "blender_python": blender["python_version"],
         "protocol_version": protocol["protocol_version"],
+        "orientation_contract": protocol["orientation_contract"],
         "release_id": manifest.get("release_id", "source-checkout"),
     }

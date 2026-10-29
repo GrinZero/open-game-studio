@@ -133,7 +133,7 @@ Real screenshots from an isolated local demo, using the repository’s original 
 
 ## Tools and documentation
 
-**26 domain MCP tools + 1 app-only bridge · 12 workflow skills.** HTTP and embedded MCP Apps share the same project core and asset history.
+**26 domain MCP tools + 1 app-only bridge · 13 workflow skills.** HTTP and embedded MCP Apps share the same project core and asset history.
 
 | Start here | Reference |
 | --- | --- |
@@ -143,6 +143,7 @@ Real screenshots from an isolated local demo, using the repository’s original 
 | [Verification record](docs/VERIFICATION.md) | What was tested and what still needs real-world validation. |
 | [Implementation status](docs/IMPLEMENTATION.md) | Architecture, incomplete milestones and planned work. |
 | [Monster module](packages/monster/README.md) | [![Open in Colab](docs/images/open-in-colab.svg)](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb) Worker source and auto-discovered local client. |
+| [Local GLB compression skill](skills/glb-compress/SKILL.md) | Portable offline CLI with Draco, textures, resizing and comparison reports. |
 
 <a id="limits"></a>
 

@@ -1,0 +1,2732 @@
+{
+  "date": "2026-10-30",
+  "policyVersion": "1.0.0",
+  "engine": "Godot 4.7.2",
+  "renderers": [
+    "Forward+ desktop",
+    "Mobile renderer on desktop"
+  ],
+  "screenshotPixels": [
+    640,
+    640
+  ],
+  "uniqueScreenshots": 120,
+  "sourceModels": 7,
+  "compressionCandidates": 17,
+  "geometryCompression": "off",
+  "metricsAreAcceptanceThresholds": false,
+  "assets": [
+    {
+      "id": "stairs",
+      "sourceRelativePath": "scratch/work/island/wooden_pier/stairs_textured_8k.glb",
+      "sourceSha256": "84f71fbd271d5d1528f0a7abfabfe4a7beaea104f2d1e96fa7707e53052b29c3",
+      "before": {
+        "bytes": 14356436,
+        "triangles": 996,
+        "vertices": 1044,
+        "primitives": 1,
+        "meshes": 1,
+        "nodes": 1,
+        "skins": 0,
+        "animations": 0,
+        "textures": [
+          {
+            "name": "tripo_rgb_91beb5ba-e53c-4db0-b707-0f387b96dc5f",
+            "mimeType": "image/jpeg",
+            "size": [
+              8192,
+              8192
+            ],
+            "levels": 1,
+            "bytes": 14315519
+          }
+        ],
+        "extensionsRequired": []
+      },
+      "candidates": [
+        {
+          "id": "webp1k",
+          "options": {
+            "preset": "balanced",
+            "geometry": "off",
+            "textures": "webp",
+            "resizeMax": 1024,
+            "simplify": false,
+            "simplifyRatio": 0.75,
+            "simplifyError": 0.0001,
+            "weld": false,
+            "weldTolerance": 0.0001,
+            "keepNames": true,
+            "stripAnimations": false,
+            "stripTangents": false,
+            "mipmaps": false,
+            "preservePrecision": false,
+            "encoding": {
+              "quality": 80,
+              "effort": 4,
+              "encodeSpeed": 5,
+              "decodeSpeed": 5,
+              "position": 14,
+              "normal": 10,
+              "texcoord": 12,
+              "color": 8,
+              "generic": 12,
+              "ktxQuality": 128
+            }
+          },
+          "after": {
+            "bytes": 129840,
+            "triangles": 996,
+            "vertices": 1044,
+            "primitives": 1,
+            "meshes": 1,
+            "nodes": 1,
+            "skins": 0,
+            "animations": 0,
+            "textures": [
+              {
+                "name": "tripo_rgb_91beb5ba-e53c-4db0-b707-0f387b96dc5f",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 88840
+              }
+            ],
+            "extensionsRequired": [
+              "EXT_texture_webp"
+            ]
+          },
+          "savedPercent": 99.1,
+          "outputSha256": "e6179543bd38aebc53c2e480c599e28f267bae97f72b27e8ffd63d1f6ab36a6b",
+          "metrics": {
+            "forward_plus": [
+              {
+                "id": "stairs",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 190199,
+                "foregroundFraction": 0.46435302734375,
+                "meanAbsRGB": 3.0331091821373053,
+                "p95MaxRGB": 12.0,
+                "foregroundSSIM": 0.9289918562011279
+              },
+              {
+                "id": "stairs",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 403208,
+                "foregroundFraction": 0.98439453125,
+                "meanAbsRGB": 5.967815618737723,
+                "p95MaxRGB": 24.0,
+                "foregroundSSIM": 0.7444033077294978
+              }
+            ],
+            "mobile": [
+              {
+                "id": "stairs",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 190199,
+                "foregroundFraction": 0.46435302734375,
+                "meanAbsRGB": 3.0486578092769503,
+                "p95MaxRGB": 12.0,
+                "foregroundSSIM": 0.9277509135210239
+              },
+              {
+                "id": "stairs",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 402400,
+                "foregroundFraction": 0.982421875,
+                "meanAbsRGB": 6.004440854870776,
+                "p95MaxRGB": 24.0,
+                "foregroundSSIM": 0.7418773507484109
+              }
+            ]
+          }
+        },
+        {
+          "id": "webp2k",
+          "options": {
+            "preset": "balanced",
+            "geometry": "off",
+            "textures": "webp",
+            "resizeMax": 2048,
+            "simplify": false,
+            "simplifyRatio": 0.75,
+            "simplifyError": 0.0001,
+            "weld": false,
+            "weldTolerance": 0.0001,
+            "keepNames": true,
+            "stripAnimations": false,
+            "stripTangents": false,
+            "mipmaps": false,
+            "preservePrecision": false,
+            "encoding": {
+              "quality": 80,
+              "effort": 4,
+              "encodeSpeed": 5,
+              "decodeSpeed": 5,
+              "position": 14,
+              "normal": 10,
+              "texcoord": 12,
+              "color": 8,
+              "generic": 12,
+              "ktxQuality": 128
+            }
+          },
+          "after": {
+            "bytes": 341448,
+            "triangles": 996,
+            "vertices": 1044,
+            "primitives": 1,
+            "meshes": 1,
+            "nodes": 1,
+            "skins": 0,
+            "animations": 0,
+            "textures": [
+              {
+                "name": "tripo_rgb_91beb5ba-e53c-4db0-b707-0f387b96dc5f",
+                "mimeType": "image/webp",
+                "size": [
+                  2048,
+                  2048
+                ],
+                "levels": 1,
+                "bytes": 300446
+              }
+            ],
+            "extensionsRequired": [
+              "EXT_texture_webp"
+            ]
+          },
+          "savedPercent": 97.62,
+          "outputSha256": "3c5ea42eee2a98c4322adbd6d08cd7bbb0e6bb79b2d508644e4e8f0fe9a484d4",
+          "metrics": {
+            "forward_plus": [
+              {
+                "id": "stairs",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 190199,
+                "foregroundFraction": 0.46435302734375,
+                "meanAbsRGB": 1.8703375587323452,
+                "p95MaxRGB": 7.0,
+                "foregroundSSIM": 0.9700743108576474
+              },
+              {
+                "id": "stairs",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 403208,
+                "foregroundFraction": 0.98439453125,
+                "meanAbsRGB": 3.484627454481723,
+                "p95MaxRGB": 14.0,
+                "foregroundSSIM": 0.906504025888092
+              }
+            ],
+            "mobile": [
+              {
+                "id": "stairs",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 190199,
+                "foregroundFraction": 0.46435302734375,
+                "meanAbsRGB": 1.8802096751297326,
+                "p95MaxRGB": 7.0,
+                "foregroundSSIM": 0.9690315053830804
+              },
+              {
+                "id": "stairs",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 402400,
+                "foregroundFraction": 0.982421875,
+                "meanAbsRGB": 3.505850728959576,
+                "p95MaxRGB": 14.0,
+                "foregroundSSIM": 0.9046370837297182
+              }
+            ]
+          }
+        },
+        {
+          "id": "webp4k",
+          "options": {
+            "preset": "balanced",
+            "geometry": "off",
+            "textures": "webp",
+            "resizeMax": 4096,
+            "simplify": false,
+            "simplifyRatio": 0.75,
+            "simplifyError": 0.0001,
+            "weld": false,
+            "weldTolerance": 0.0001,
+            "keepNames": true,
+            "stripAnimations": false,
+            "stripTangents": false,
+            "mipmaps": false,
+            "preservePrecision": false,
+            "encoding": {
+              "quality": 80,
+              "effort": 4,
+              "encodeSpeed": 5,
+              "decodeSpeed": 5,
+              "position": 14,
+              "normal": 10,
+              "texcoord": 12,
+              "color": 8,
+              "generic": 12,
+              "ktxQuality": 128
+            }
+          },
+          "after": {
+            "bytes": 914456,
+            "triangles": 996,
+            "vertices": 1044,
+            "primitives": 1,
+            "meshes": 1,
+            "morphTargets": 0,
+            "nodes": 1,
+            "skins": 0,
+            "animations": 0,
+            "textures": [
+              {
+                "slots": [
+                  "baseColorTexture"
+                ],
+                "name": "tripo_rgb_91beb5ba-e53c-4db0-b707-0f387b96dc5f",
+                "mimeType": "image/webp",
+                "size": [
+                  4096,
+                  4096
+                ],
+                "levels": 1,
+                "bytes": 873454
+              }
+            ],
+            "extensionsRequired": [
+              "EXT_texture_webp"
+            ]
+          },
+          "savedPercent": 93.63,
+          "outputSha256": "ad291bd6da44986a26213e738748d8233cd7808984dc79952a7da95f9ccd095e",
+          "metrics": {
+            "forward_plus": [
+              {
+                "id": "stairs",
+                "variant": "webp4k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 190199,
+                "foregroundFraction": 0.46435302734375,
+                "meanAbsRGB": 1.1421493628603026,
+                "p95MaxRGB": 5.0,
+                "foregroundSSIM": 0.9866695844563494
+              },
+              {
+                "id": "stairs",
+                "variant": "webp4k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 403208,
+                "foregroundFraction": 0.98439453125,
+                "meanAbsRGB": 1.9778989173495234,
+                "p95MaxRGB": 8.0,
+                "foregroundSSIM": 0.9662478038050409
+              }
+            ],
+            "mobile": [
+              {
+                "id": "stairs",
+                "variant": "webp4k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 190199,
+                "foregroundFraction": 0.46435302734375,
+                "meanAbsRGB": 1.1487599829652102,
+                "p95MaxRGB": 5.0,
+                "foregroundSSIM": 0.9857177751330869
+              },
+              {
+                "id": "stairs",
+                "variant": "webp4k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 402400,
+                "foregroundFraction": 0.982421875,
+                "meanAbsRGB": 1.9906626905235256,
+                "p95MaxRGB": 8.0,
+                "foregroundSSIM": 0.9646738688703586
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "paving",
+      "sourceRelativePath": "game/starforger/sandbox/ocean_city/buildings/main_route_strata/exports/paving_tile_pbr.glb",
+      "sourceSha256": "4c88800e8abe3add5f808835f0d10e5eef1d4fad72b46e4927581eacce0762e7",
+      "before": {
+        "bytes": 9028712,
+        "triangles": 2,
+        "vertices": 4,
+        "primitives": 1,
+        "meshes": 1,
+        "nodes": 1,
+        "skins": 0,
+        "animations": 0,
+        "textures": [
+          {
+            "name": "tripo_normal_7861989a_9b39_46c5_bf08_b244c7abfc8c",
+            "mimeType": "image/jpeg",
+            "size": [
+              4096,
+              4096
+            ],
+            "levels": 1,
+            "bytes": 3311818
+          },
+          {
+            "name": "tripo_rgb_8d0451aa_6683_47c1_aaa4_2c6eafc2fefc",
+            "mimeType": "image/jpeg",
+            "size": [
+              4096,
+              4096
+            ],
+            "levels": 1,
+            "bytes": 4258335
+          },
+          {
+            "name": "pavingtile6m_metallic_pavingtile6m_roughness",
+            "mimeType": "image/png",
+            "size": [
+              4096,
+              4096
+            ],
+            "levels": 1,
+            "bytes": 1456509
+          }
+        ],
+        "extensionsRequired": []
+      },
+      "candidates": [
+        {
+          "id": "webp1k",
+          "options": {
+            "preset": "balanced",
+            "geometry": "off",
+            "textures": "webp",
+            "resizeMax": 1024,
+            "simplify": false,
+            "simplifyRatio": 0.75,
+            "simplifyError": 0.0001,
+            "weld": false,
+            "weldTolerance": 0.0001,
+            "keepNames": true,
+            "stripAnimations": false,
+            "stripTangents": false,
+            "mipmaps": false,
+            "preservePrecision": false,
+            "encoding": {
+              "quality": 80,
+              "effort": 4,
+              "encodeSpeed": 5,
+              "decodeSpeed": 5,
+              "position": 14,
+              "normal": 10,
+              "texcoord": 12,
+              "color": 8,
+              "generic": 12,
+              "ktxQuality": 128
+            }
+          },
+          "after": {
+            "bytes": 299520,
+            "triangles": 2,
+            "vertices": 4,
+            "primitives": 1,
+            "meshes": 1,
+            "nodes": 1,
+            "skins": 0,
+            "animations": 0,
+            "textures": [
+              {
+                "name": "tripo_normal_7861989a_9b39_46c5_bf08_b244c7abfc8c",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 174422
+              },
+              {
+                "name": "tripo_rgb_8d0451aa_6683_47c1_aaa4_2c6eafc2fefc",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 119570
+              },
+              {
+                "name": "pavingtile6m_metallic_pavingtile6m_roughness",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 3350
+              }
+            ],
+            "extensionsRequired": [
+              "EXT_texture_webp"
+            ]
+          },
+          "savedPercent": 96.68,
+          "outputSha256": "d2ecc285866d17de4589183d860fcbc474284af79b9af933705b0e2e3bc9057d",
+          "metrics": {
+            "forward_plus": [
+              {
+                "id": "paving",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 235258,
+                "foregroundFraction": 0.5743603515625,
+                "meanAbsRGB": 1.0492976505226885,
+                "p95MaxRGB": 5.0,
+                "foregroundSSIM": 0.9833605741859704
+              },
+              {
+                "id": "paving",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 393925,
+                "foregroundFraction": 0.96173095703125,
+                "meanAbsRGB": 1.6727304266886676,
+                "p95MaxRGB": 7.0,
+                "foregroundSSIM": 0.9612873611521822
+              }
+            ],
+            "mobile": [
+              {
+                "id": "paving",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 235258,
+                "foregroundFraction": 0.5743603515625,
+                "meanAbsRGB": 1.0515901690909555,
+                "p95MaxRGB": 5.0,
+                "foregroundSSIM": 0.9832971093711776
+              },
+              {
+                "id": "paving",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 393925,
+                "foregroundFraction": 0.96173095703125,
+                "meanAbsRGB": 1.735733959510059,
+                "p95MaxRGB": 7.0,
+                "foregroundSSIM": 0.9576431387544709
+              }
+            ]
+          }
+        },
+        {
+          "id": "webp2k",
+          "options": {
+            "preset": "balanced",
+            "geometry": "off",
+            "textures": "webp",
+            "resizeMax": 2048,
+            "simplify": false,
+            "simplifyRatio": 0.75,
+            "simplifyError": 0.0001,
+            "weld": false,
+            "weldTolerance": 0.0001,
+            "keepNames": true,
+            "stripAnimations": false,
+            "stripTangents": false,
+            "mipmaps": false,
+            "preservePrecision": false,
+            "encoding": {
+              "quality": 80,
+              "effort": 4,
+              "encodeSpeed": 5,
+              "decodeSpeed": 5,
+              "position": 14,
+              "normal": 10,
+              "texcoord": 12,
+              "color": 8,
+              "generic": 12,
+              "ktxQuality": 128
+            }
+          },
+          "after": {
+            "bytes": 767984,
+            "triangles": 2,
+            "vertices": 4,
+            "primitives": 1,
+            "meshes": 1,
+            "nodes": 1,
+            "skins": 0,
+            "animations": 0,
+            "textures": [
+              {
+                "name": "tripo_normal_7861989a_9b39_46c5_bf08_b244c7abfc8c",
+                "mimeType": "image/webp",
+                "size": [
+                  2048,
+                  2048
+                ],
+                "levels": 1,
+                "bytes": 422342
+              },
+              {
+                "name": "tripo_rgb_8d0451aa_6683_47c1_aaa4_2c6eafc2fefc",
+                "mimeType": "image/webp",
+                "size": [
+                  2048,
+                  2048
+                ],
+                "levels": 1,
+                "bytes": 331202
+              },
+              {
+                "name": "pavingtile6m_metallic_pavingtile6m_roughness",
+                "mimeType": "image/webp",
+                "size": [
+                  2048,
+                  2048
+                ],
+                "levels": 1,
+                "bytes": 12260
+              }
+            ],
+            "extensionsRequired": [
+              "EXT_texture_webp"
+            ]
+          },
+          "savedPercent": 91.49,
+          "outputSha256": "e08b2daaaee8e6c8ca5b9ba679e406f25e4156e6fc9eb120c8112230c35c9173",
+          "metrics": {
+            "forward_plus": [
+              {
+                "id": "paving",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 235258,
+                "foregroundFraction": 0.5743603515625,
+                "meanAbsRGB": 0.6341902648723245,
+                "p95MaxRGB": 3.0,
+                "foregroundSSIM": 0.9932026470899469
+              },
+              {
+                "id": "paving",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 393925,
+                "foregroundFraction": 0.96173095703125,
+                "meanAbsRGB": 0.9919654756616108,
+                "p95MaxRGB": 4.0,
+                "foregroundSSIM": 0.9855375804620298
+              }
+            ],
+            "mobile": [
+              {
+                "id": "paving",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 235258,
+                "foregroundFraction": 0.5743603515625,
+                "meanAbsRGB": 0.6358565206425854,
+                "p95MaxRGB": 3.0,
+                "foregroundSSIM": 0.9931627794458685
+              },
+              {
+                "id": "paving",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 393925,
+                "foregroundFraction": 0.96173095703125,
+                "meanAbsRGB": 1.0341063231156522,
+                "p95MaxRGB": 4.0,
+                "foregroundSSIM": 0.9829656630219192
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "shrub",
+      "sourceRelativePath": "game/starforger/environments/vegetation/stylized_woody_lods/shrubs/shrub_low_distant.glb",
+      "sourceSha256": "daff35380af1c34c33527f2f921b37ea348ab3d1d620291840a00ab6da2cae2d",
+      "before": {
+        "bytes": 5790308,
+        "triangles": 52,
+        "vertices": 70,
+        "primitives": 2,
+        "meshes": 2,
+        "nodes": 2,
+        "skins": 0,
+        "animations": 0,
+        "textures": [
+          {
+            "name": "base_color",
+            "mimeType": "image/png",
+            "size": [
+              1024,
+              1024
+            ],
+            "levels": 1,
+            "bytes": 683736
+          },
+          {
+            "name": "normal",
+            "mimeType": "image/png",
+            "size": [
+              1024,
+              1024
+            ],
+            "levels": 1,
+            "bytes": 2794559
+          },
+          {
+            "name": "bark_base_color",
+            "mimeType": "image/png",
+            "size": [
+              1024,
+              1024
+            ],
+            "levels": 1,
+            "bytes": 2304437
+          }
+        ],
+        "extensionsRequired": []
+      },
+      "candidates": [
+        {
+          "id": "webp1k",
+          "options": {
+            "preset": "balanced",
+            "geometry": "off",
+            "textures": "webp",
+            "resizeMax": 1024,
+            "simplify": false,
+            "simplifyRatio": 0.75,
+            "simplifyError": 0.0001,
+            "weld": false,
+            "weldTolerance": 0.0001,
+            "keepNames": true,
+            "stripAnimations": false,
+            "stripTangents": false,
+            "mipmaps": false,
+            "preservePrecision": false,
+            "encoding": {
+              "quality": 80,
+              "effort": 4,
+              "encodeSpeed": 5,
+              "decodeSpeed": 5,
+              "position": 14,
+              "normal": 10,
+              "texcoord": 12,
+              "color": 8,
+              "generic": 12,
+              "ktxQuality": 128
+            }
+          },
+          "after": {
+            "bytes": 60992,
+            "triangles": 52,
+            "vertices": 70,
+            "primitives": 2,
+            "meshes": 2,
+            "nodes": 2,
+            "skins": 0,
+            "animations": 0,
+            "textures": [
+              {
+                "name": "base_color",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 39140
+              },
+              {
+                "name": "normal",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 8186
+              },
+              {
+                "name": "bark_base_color",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 6218
+              }
+            ],
+            "extensionsRequired": [
+              "EXT_texture_webp"
+            ]
+          },
+          "savedPercent": 98.95,
+          "outputSha256": "1636c16b0f66938b37464c8107c2d042354ac8b06964593b874f075ce35e8a31",
+          "metrics": {
+            "forward_plus": [
+              {
+                "id": "shrub",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 27420,
+                "foregroundFraction": 0.066943359375,
+                "meanAbsRGB": 3.374762946754194,
+                "p95MaxRGB": 25.0,
+                "foregroundSSIM": 0.9686873086472906
+              },
+              {
+                "id": "shrub",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 159129,
+                "foregroundFraction": 0.38849853515625,
+                "meanAbsRGB": 1.4601759159759273,
+                "p95MaxRGB": 6.0,
+                "foregroundSSIM": 0.9764484703365401
+              }
+            ],
+            "mobile": [
+              {
+                "id": "shrub",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 27455,
+                "foregroundFraction": 0.06702880859375,
+                "meanAbsRGB": 3.6815637710192437,
+                "p95MaxRGB": 27.0,
+                "foregroundSSIM": 0.9582116471057766
+              },
+              {
+                "id": "shrub",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 159182,
+                "foregroundFraction": 0.3886279296875,
+                "meanAbsRGB": 1.4683841975432734,
+                "p95MaxRGB": 7.0,
+                "foregroundSSIM": 0.977016873120824
+              }
+            ]
+          }
+        },
+        {
+          "id": "webp2k",
+          "options": {
+            "preset": "balanced",
+            "geometry": "off",
+            "textures": "webp",
+            "resizeMax": 2048,
+            "simplify": false,
+            "simplifyRatio": 0.75,
+            "simplifyError": 0.0001,
+            "weld": false,
+            "weldTolerance": 0.0001,
+            "keepNames": true,
+            "stripAnimations": false,
+            "stripTangents": false,
+            "mipmaps": false,
+            "preservePrecision": false,
+            "encoding": {
+              "quality": 80,
+              "effort": 4,
+              "encodeSpeed": 5,
+              "decodeSpeed": 5,
+              "position": 14,
+              "normal": 10,
+              "texcoord": 12,
+              "color": 8,
+              "generic": 12,
+              "ktxQuality": 128
+            }
+          },
+          "after": {
+            "bytes": 60992,
+            "triangles": 52,
+            "vertices": 70,
+            "primitives": 2,
+            "meshes": 2,
+            "nodes": 2,
+            "skins": 0,
+            "animations": 0,
+            "textures": [
+              {
+                "name": "base_color",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 39140
+              },
+              {
+                "name": "normal",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 8186
+              },
+              {
+                "name": "bark_base_color",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 6218
+              }
+            ],
+            "extensionsRequired": [
+              "EXT_texture_webp"
+            ]
+          },
+          "savedPercent": 98.95,
+          "outputSha256": "1636c16b0f66938b37464c8107c2d042354ac8b06964593b874f075ce35e8a31",
+          "metrics": {
+            "forward_plus": [
+              {
+                "id": "shrub",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 27420,
+                "foregroundFraction": 0.066943359375,
+                "meanAbsRGB": 3.374762946754194,
+                "p95MaxRGB": 25.0,
+                "foregroundSSIM": 0.9686873086472906
+              },
+              {
+                "id": "shrub",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 159129,
+                "foregroundFraction": 0.38849853515625,
+                "meanAbsRGB": 1.4601759159759273,
+                "p95MaxRGB": 6.0,
+                "foregroundSSIM": 0.9764484703365401
+              }
+            ],
+            "mobile": [
+              {
+                "id": "shrub",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 27455,
+                "foregroundFraction": 0.06702880859375,
+                "meanAbsRGB": 3.6815637710192437,
+                "p95MaxRGB": 27.0,
+                "foregroundSSIM": 0.9582116471057766
+              },
+              {
+                "id": "shrub",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 159182,
+                "foregroundFraction": 0.3886279296875,
+                "meanAbsRGB": 1.4683841975432734,
+                "p95MaxRGB": 7.0,
+                "foregroundSSIM": 0.977016873120824
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "merchant",
+      "sourceRelativePath": "game/starforger/characters/lobby_merchant/merchant.glb",
+      "sourceSha256": "300cae0b8436a9f2c1b9f648ef90e47e6410b1cb1a2c3f9fbff732211000c34a",
+      "before": {
+        "bytes": 14165544,
+        "triangles": 30920,
+        "vertices": 28660,
+        "primitives": 1,
+        "meshes": 1,
+        "nodes": 31,
+        "skins": 1,
+        "animations": 1,
+        "textures": [
+          {
+            "name": "base_color",
+            "mimeType": "image/png",
+            "size": [
+              4096,
+              4096
+            ],
+            "levels": 1,
+            "bytes": 12377962
+          }
+        ],
+        "extensionsRequired": []
+      },
+      "candidates": [
+        {
+          "id": "webp1k",
+          "options": {
+            "preset": "balanced",
+            "geometry": "off",
+            "textures": "webp",
+            "resizeMax": 1024,
+            "simplify": false,
+            "simplifyRatio": 0.75,
+            "simplifyError": 0.0001,
+            "weld": false,
+            "weldTolerance": 0.0001,
+            "keepNames": true,
+            "stripAnimations": false,
+            "stripTangents": false,
+            "mipmaps": false,
+            "preservePrecision": false,
+            "encoding": {
+              "quality": 80,
+              "effort": 4,
+              "encodeSpeed": 5,
+              "decodeSpeed": 5,
+              "position": 14,
+              "normal": 10,
+              "texcoord": 12,
+              "color": 8,
+              "generic": 12,
+              "ktxQuality": 128
+            }
+          },
+          "after": {
+            "bytes": 1958348,
+            "triangles": 30920,
+            "vertices": 28660,
+            "primitives": 1,
+            "meshes": 1,
+            "nodes": 31,
+            "skins": 1,
+            "animations": 1,
+            "textures": [
+              {
+                "name": "base_color",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 174964
+              }
+            ],
+            "extensionsRequired": [
+              "EXT_texture_webp"
+            ]
+          },
+          "savedPercent": 86.18,
+          "outputSha256": "1dd11422657ef22d40c55f407ac46bfba120afda38f57f2680bb704785b41b15",
+          "metrics": {
+            "forward_plus": [
+              {
+                "id": "merchant",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 50734,
+                "foregroundFraction": 0.1238623046875,
+                "meanAbsRGB": 1.7214162757388207,
+                "p95MaxRGB": 7.0,
+                "foregroundSSIM": 0.9808856395751946
+              },
+              {
+                "id": "merchant",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 199245,
+                "foregroundFraction": 0.48643798828125,
+                "meanAbsRGB": 2.2151538725354882,
+                "p95MaxRGB": 10.0,
+                "foregroundSSIM": 0.9568883381002836
+              },
+              {
+                "id": "merchant",
+                "variant": "webp1k",
+                "pose": "animated",
+                "framing": "full",
+                "foregroundPixels": 50902,
+                "foregroundFraction": 0.1242724609375,
+                "meanAbsRGB": 1.6322148442104436,
+                "p95MaxRGB": 7.0,
+                "foregroundSSIM": 0.9806918054406856
+              },
+              {
+                "id": "merchant",
+                "variant": "webp1k",
+                "pose": "animated",
+                "framing": "detail",
+                "foregroundPixels": 203937,
+                "foregroundFraction": 0.49789306640625,
+                "meanAbsRGB": 2.2291197771860918,
+                "p95MaxRGB": 10.0,
+                "foregroundSSIM": 0.9597155817406425
+              }
+            ],
+            "mobile": [
+              {
+                "id": "merchant",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 50741,
+                "foregroundFraction": 0.12387939453125,
+                "meanAbsRGB": 1.7330429698534386,
+                "p95MaxRGB": 7.0,
+                "foregroundSSIM": 0.9793050062238653
+              },
+              {
+                "id": "merchant",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 199247,
+                "foregroundFraction": 0.48644287109375,
+                "meanAbsRGB": 2.2250389382692504,
+                "p95MaxRGB": 10.0,
+                "foregroundSSIM": 0.9554739902103415
+              },
+              {
+                "id": "merchant",
+                "variant": "webp1k",
+                "pose": "animated",
+                "framing": "full",
+                "foregroundPixels": 50907,
+                "foregroundFraction": 0.12428466796875,
+                "meanAbsRGB": 1.6428716417519529,
+                "p95MaxRGB": 7.0,
+                "foregroundSSIM": 0.979055473690645
+              },
+              {
+                "id": "merchant",
+                "variant": "webp1k",
+                "pose": "animated",
+                "framing": "detail",
+                "foregroundPixels": 203941,
+                "foregroundFraction": 0.49790283203125,
+                "meanAbsRGB": 2.239583997332562,
+                "p95MaxRGB": 10.0,
+                "foregroundSSIM": 0.9582468341173681
+              }
+            ]
+          }
+        },
+        {
+          "id": "webp2k",
+          "options": {
+            "preset": "balanced",
+            "geometry": "off",
+            "textures": "webp",
+            "resizeMax": 2048,
+            "simplify": false,
+            "simplifyRatio": 0.75,
+            "simplifyError": 0.0001,
+            "weld": false,
+            "weldTolerance": 0.0001,
+            "keepNames": true,
+            "stripAnimations": false,
+            "stripTangents": false,
+            "mipmaps": false,
+            "preservePrecision": false,
+            "encoding": {
+              "quality": 80,
+              "effort": 4,
+              "encodeSpeed": 5,
+              "decodeSpeed": 5,
+              "position": 14,
+              "normal": 10,
+              "texcoord": 12,
+              "color": 8,
+              "generic": 12,
+              "ktxQuality": 128
+            }
+          },
+          "after": {
+            "bytes": 2173596,
+            "triangles": 30920,
+            "vertices": 28660,
+            "primitives": 1,
+            "meshes": 1,
+            "nodes": 31,
+            "skins": 1,
+            "animations": 1,
+            "textures": [
+              {
+                "name": "base_color",
+                "mimeType": "image/webp",
+                "size": [
+                  2048,
+                  2048
+                ],
+                "levels": 1,
+                "bytes": 390212
+              }
+            ],
+            "extensionsRequired": [
+              "EXT_texture_webp"
+            ]
+          },
+          "savedPercent": 84.66,
+          "outputSha256": "3fcafb3ce628b6b8b14ee2951931091c3bb04bb53973813bb6a2f4821dbd7fdf",
+          "metrics": {
+            "forward_plus": [
+              {
+                "id": "merchant",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 50734,
+                "foregroundFraction": 0.1238623046875,
+                "meanAbsRGB": 1.1097685969960973,
+                "p95MaxRGB": 5.0,
+                "foregroundSSIM": 0.9898468860772514
+              },
+              {
+                "id": "merchant",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 199245,
+                "foregroundFraction": 0.48643798828125,
+                "meanAbsRGB": 1.4691594101064853,
+                "p95MaxRGB": 6.0,
+                "foregroundSSIM": 0.9750715722554583
+              },
+              {
+                "id": "merchant",
+                "variant": "webp2k",
+                "pose": "animated",
+                "framing": "full",
+                "foregroundPixels": 50902,
+                "foregroundFraction": 0.1242724609375,
+                "meanAbsRGB": 1.0756027922936886,
+                "p95MaxRGB": 4.0,
+                "foregroundSSIM": 0.9893010081309396
+              },
+              {
+                "id": "merchant",
+                "variant": "webp2k",
+                "pose": "animated",
+                "framing": "detail",
+                "foregroundPixels": 203937,
+                "foregroundFraction": 0.49789306640625,
+                "meanAbsRGB": 1.440227455864638,
+                "p95MaxRGB": 6.0,
+                "foregroundSSIM": 0.9765993169128486
+              }
+            ],
+            "mobile": [
+              {
+                "id": "merchant",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 50741,
+                "foregroundFraction": 0.12387939453125,
+                "meanAbsRGB": 1.1160074364583539,
+                "p95MaxRGB": 5.0,
+                "foregroundSSIM": 0.9884942465596441
+              },
+              {
+                "id": "merchant",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 199247,
+                "foregroundFraction": 0.48644287109375,
+                "meanAbsRGB": 1.4756959954227666,
+                "p95MaxRGB": 6.0,
+                "foregroundSSIM": 0.9737343822249043
+              },
+              {
+                "id": "merchant",
+                "variant": "webp2k",
+                "pose": "animated",
+                "framing": "full",
+                "foregroundPixels": 50907,
+                "foregroundFraction": 0.12428466796875,
+                "meanAbsRGB": 1.083826061903733,
+                "p95MaxRGB": 5.0,
+                "foregroundSSIM": 0.9878004500940171
+              },
+              {
+                "id": "merchant",
+                "variant": "webp2k",
+                "pose": "animated",
+                "framing": "detail",
+                "foregroundPixels": 203941,
+                "foregroundFraction": 0.49790283203125,
+                "meanAbsRGB": 1.4461094139971855,
+                "p95MaxRGB": 6.0,
+                "foregroundSSIM": 0.9752906493812242
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "horse",
+      "sourceRelativePath": "game/starforger/characters/mounts/horse/baseline/horse.glb",
+      "sourceSha256": "5c2d346004a6a372234d443ae80494c72438cb40f0cea7ab17badf18c1917eb5",
+      "before": {
+        "bytes": 7279952,
+        "triangles": 29142,
+        "vertices": 16680,
+        "primitives": 2,
+        "meshes": 1,
+        "nodes": 22,
+        "skins": 1,
+        "animations": 6,
+        "textures": [
+          {
+            "name": "normal",
+            "mimeType": "image/png",
+            "size": [
+              4096,
+              4096
+            ],
+            "levels": 1,
+            "bytes": 2739710
+          },
+          {
+            "name": "base_color",
+            "mimeType": "image/jpeg",
+            "size": [
+              4096,
+              4096
+            ],
+            "levels": 1,
+            "bytes": 1730582
+          },
+          {
+            "name": "rm",
+            "mimeType": "image/jpeg",
+            "size": [
+              4096,
+              4096
+            ],
+            "levels": 1,
+            "bytes": 1453532
+          },
+          {
+            "name": "horse_belly_repair",
+            "mimeType": "image/png",
+            "size": [
+              256,
+              256
+            ],
+            "levels": 1,
+            "bytes": 70042
+          }
+        ],
+        "extensionsRequired": []
+      },
+      "candidates": [
+        {
+          "id": "webp1k",
+          "options": {
+            "preset": "balanced",
+            "geometry": "off",
+            "textures": "webp",
+            "resizeMax": 1024,
+            "simplify": false,
+            "simplifyRatio": 0.75,
+            "simplifyError": 0.0001,
+            "weld": false,
+            "weldTolerance": 0.0001,
+            "keepNames": true,
+            "stripAnimations": false,
+            "stripTangents": false,
+            "mipmaps": false,
+            "preservePrecision": false,
+            "encoding": {
+              "quality": 80,
+              "effort": 4,
+              "encodeSpeed": 5,
+              "decodeSpeed": 5,
+              "position": 14,
+              "normal": 10,
+              "texcoord": 12,
+              "color": 8,
+              "generic": 12,
+              "ktxQuality": 128
+            }
+          },
+          "after": {
+            "bytes": 1352636,
+            "triangles": 29142,
+            "vertices": 16680,
+            "primitives": 2,
+            "meshes": 1,
+            "nodes": 22,
+            "skins": 1,
+            "animations": 6,
+            "textures": [
+              {
+                "name": "normal",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 6658
+              },
+              {
+                "name": "base_color",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 36604
+              },
+              {
+                "name": "rm",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 29100
+              },
+              {
+                "name": "horse_belly_repair",
+                "mimeType": "image/webp",
+                "size": [
+                  256,
+                  256
+                ],
+                "levels": 1,
+                "bytes": 1818
+              }
+            ],
+            "extensionsRequired": [
+              "EXT_texture_webp"
+            ]
+          },
+          "savedPercent": 81.42,
+          "outputSha256": "3822e90759615b4181cbc556444fc3e3689ac3b8c516c63afdc41a56b9eb813e",
+          "metrics": {
+            "forward_plus": [
+              {
+                "id": "horse",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 65348,
+                "foregroundFraction": 0.159541015625,
+                "meanAbsRGB": 1.3171940992838342,
+                "p95MaxRGB": 5.0,
+                "foregroundSSIM": 0.9837533509119607
+              },
+              {
+                "id": "horse",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 388030,
+                "foregroundFraction": 0.9473388671875,
+                "meanAbsRGB": 0.9726885378278312,
+                "p95MaxRGB": 4.0,
+                "foregroundSSIM": 0.9781691614712711
+              },
+              {
+                "id": "horse",
+                "variant": "webp1k",
+                "pose": "animated",
+                "framing": "full",
+                "foregroundPixels": 65364,
+                "foregroundFraction": 0.159580078125,
+                "meanAbsRGB": 1.3153876751728781,
+                "p95MaxRGB": 5.0,
+                "foregroundSSIM": 0.983795053050619
+              },
+              {
+                "id": "horse",
+                "variant": "webp1k",
+                "pose": "animated",
+                "framing": "detail",
+                "foregroundPixels": 377576,
+                "foregroundFraction": 0.92181640625,
+                "meanAbsRGB": 0.9633310026767238,
+                "p95MaxRGB": 4.0,
+                "foregroundSSIM": 0.9789147520769831
+              }
+            ],
+            "mobile": [
+              {
+                "id": "horse",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 65350,
+                "foregroundFraction": 0.1595458984375,
+                "meanAbsRGB": 1.3223004335628665,
+                "p95MaxRGB": 5.0,
+                "foregroundSSIM": 0.9791844386080322
+              },
+              {
+                "id": "horse",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 389387,
+                "foregroundFraction": 0.95065185546875,
+                "meanAbsRGB": 0.9872526132955988,
+                "p95MaxRGB": 5.0,
+                "foregroundSSIM": 0.9733172580865168
+              },
+              {
+                "id": "horse",
+                "variant": "webp1k",
+                "pose": "animated",
+                "framing": "full",
+                "foregroundPixels": 65366,
+                "foregroundFraction": 0.1595849609375,
+                "meanAbsRGB": 1.327259839468021,
+                "p95MaxRGB": 5.0,
+                "foregroundSSIM": 0.9790451645324245
+              },
+              {
+                "id": "horse",
+                "variant": "webp1k",
+                "pose": "animated",
+                "framing": "detail",
+                "foregroundPixels": 379146,
+                "foregroundFraction": 0.9256494140625,
+                "meanAbsRGB": 0.9759063790729693,
+                "p95MaxRGB": 5.0,
+                "foregroundSSIM": 0.974046297980825
+              }
+            ]
+          }
+        },
+        {
+          "id": "webp2k",
+          "options": {
+            "preset": "balanced",
+            "geometry": "off",
+            "textures": "webp",
+            "resizeMax": 2048,
+            "simplify": false,
+            "simplifyRatio": 0.75,
+            "simplifyError": 0.0001,
+            "weld": false,
+            "weldTolerance": 0.0001,
+            "keepNames": true,
+            "stripAnimations": false,
+            "stripTangents": false,
+            "mipmaps": false,
+            "preservePrecision": false,
+            "encoding": {
+              "quality": 80,
+              "effort": 4,
+              "encodeSpeed": 5,
+              "decodeSpeed": 5,
+              "position": 14,
+              "normal": 10,
+              "texcoord": 12,
+              "color": 8,
+              "generic": 12,
+              "ktxQuality": 128
+            }
+          },
+          "after": {
+            "bytes": 1462012,
+            "triangles": 29142,
+            "vertices": 16680,
+            "primitives": 2,
+            "meshes": 1,
+            "nodes": 22,
+            "skins": 1,
+            "animations": 6,
+            "textures": [
+              {
+                "name": "normal",
+                "mimeType": "image/webp",
+                "size": [
+                  2048,
+                  2048
+                ],
+                "levels": 1,
+                "bytes": 21386
+              },
+              {
+                "name": "base_color",
+                "mimeType": "image/webp",
+                "size": [
+                  2048,
+                  2048
+                ],
+                "levels": 1,
+                "bytes": 84660
+              },
+              {
+                "name": "rm",
+                "mimeType": "image/webp",
+                "size": [
+                  2048,
+                  2048
+                ],
+                "levels": 1,
+                "bytes": 75694
+              },
+              {
+                "name": "horse_belly_repair",
+                "mimeType": "image/webp",
+                "size": [
+                  256,
+                  256
+                ],
+                "levels": 1,
+                "bytes": 1818
+              }
+            ],
+            "extensionsRequired": [
+              "EXT_texture_webp"
+            ]
+          },
+          "savedPercent": 79.92,
+          "outputSha256": "7bb02bc075487577fd87b559a76e93b2df79e41a2a2cb846c021d1e53dd755ef",
+          "metrics": {
+            "forward_plus": [
+              {
+                "id": "horse",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 65348,
+                "foregroundFraction": 0.159541015625,
+                "meanAbsRGB": 0.9889718634592234,
+                "p95MaxRGB": 3.0,
+                "foregroundSSIM": 0.988924563951182
+              },
+              {
+                "id": "horse",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 388030,
+                "foregroundFraction": 0.9473388671875,
+                "meanAbsRGB": 0.8480736025565033,
+                "p95MaxRGB": 4.0,
+                "foregroundSSIM": 0.9795078308626937
+              },
+              {
+                "id": "horse",
+                "variant": "webp2k",
+                "pose": "animated",
+                "framing": "full",
+                "foregroundPixels": 65364,
+                "foregroundFraction": 0.159580078125,
+                "meanAbsRGB": 0.9888164739000062,
+                "p95MaxRGB": 3.0,
+                "foregroundSSIM": 0.9889242241826975
+              },
+              {
+                "id": "horse",
+                "variant": "webp2k",
+                "pose": "animated",
+                "framing": "detail",
+                "foregroundPixels": 377576,
+                "foregroundFraction": 0.92181640625,
+                "meanAbsRGB": 0.8383636671822362,
+                "p95MaxRGB": 4.0,
+                "foregroundSSIM": 0.980186843934663
+              }
+            ],
+            "mobile": [
+              {
+                "id": "horse",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 65350,
+                "foregroundFraction": 0.1595458984375,
+                "meanAbsRGB": 1.0005814843152256,
+                "p95MaxRGB": 4.0,
+                "foregroundSSIM": 0.9843686836150839
+              },
+              {
+                "id": "horse",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 389387,
+                "foregroundFraction": 0.95065185546875,
+                "meanAbsRGB": 0.8626216762929082,
+                "p95MaxRGB": 4.0,
+                "foregroundSSIM": 0.9745988609463496
+              },
+              {
+                "id": "horse",
+                "variant": "webp2k",
+                "pose": "animated",
+                "framing": "full",
+                "foregroundPixels": 65366,
+                "foregroundFraction": 0.1595849609375,
+                "meanAbsRGB": 0.9995563442768411,
+                "p95MaxRGB": 4.0,
+                "foregroundSSIM": 0.9843517027775628
+              },
+              {
+                "id": "horse",
+                "variant": "webp2k",
+                "pose": "animated",
+                "framing": "detail",
+                "foregroundPixels": 379146,
+                "foregroundFraction": 0.9256494140625,
+                "meanAbsRGB": 0.8523137085274098,
+                "p95MaxRGB": 4.0,
+                "foregroundSSIM": 0.9752362138608758
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "forge",
+      "sourceRelativePath": "game/starforger/sandbox/ocean_city/buildings/forge/forge.glb",
+      "sourceSha256": "711b27504b7f931b39e7cf35517a49fc24f29ea56df99c15874360b762c4f48e",
+      "before": {
+        "bytes": 14880352,
+        "triangles": 88777,
+        "vertices": 70283,
+        "primitives": 1,
+        "meshes": 1,
+        "nodes": 1,
+        "skins": 0,
+        "animations": 0,
+        "textures": [
+          {
+            "name": "normalgl_11c91d79_cdee_4d42_bdf1_661abeeb1205",
+            "mimeType": "image/png",
+            "size": [
+              4096,
+              4096
+            ],
+            "levels": 1,
+            "bytes": 4335711
+          },
+          {
+            "name": "color_11c91d79_cdee_4d42_bdf1_661abeeb1205",
+            "mimeType": "image/jpeg",
+            "size": [
+              4096,
+              4096
+            ],
+            "levels": 1,
+            "bytes": 3625176
+          },
+          {
+            "name": "orm_11c91d79_cdee_4d42_bdf1_661abeeb1205",
+            "mimeType": "image/jpeg",
+            "size": [
+              4096,
+              4096
+            ],
+            "levels": 1,
+            "bytes": 1916011
+          }
+        ],
+        "extensionsRequired": []
+      },
+      "candidates": [
+        {
+          "id": "webp1k",
+          "options": {
+            "preset": "balanced",
+            "geometry": "off",
+            "textures": "webp",
+            "resizeMax": 1024,
+            "simplify": false,
+            "simplifyRatio": 0.75,
+            "simplifyError": 0.0001,
+            "weld": false,
+            "weldTolerance": 0.0001,
+            "keepNames": true,
+            "stripAnimations": false,
+            "stripTangents": false,
+            "mipmaps": false,
+            "preservePrecision": false,
+            "encoding": {
+              "quality": 80,
+              "effort": 4,
+              "encodeSpeed": 5,
+              "decodeSpeed": 5,
+              "position": 14,
+              "normal": 10,
+              "texcoord": 12,
+              "color": 8,
+              "generic": 12,
+              "ktxQuality": 128
+            }
+          },
+          "after": {
+            "bytes": 5234076,
+            "triangles": 88777,
+            "vertices": 70283,
+            "primitives": 1,
+            "meshes": 1,
+            "nodes": 1,
+            "skins": 0,
+            "animations": 0,
+            "textures": [
+              {
+                "name": "normalgl_11c91d79_cdee_4d42_bdf1_661abeeb1205",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 37722
+              },
+              {
+                "name": "color_11c91d79_cdee_4d42_bdf1_661abeeb1205",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 142858
+              },
+              {
+                "name": "orm_11c91d79_cdee_4d42_bdf1_661abeeb1205",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 49988
+              }
+            ],
+            "extensionsRequired": [
+              "EXT_texture_webp"
+            ]
+          },
+          "savedPercent": 64.83,
+          "outputSha256": "7fb78681d40a5e377590804c8eb84f2bacaf499db27916a95712944c5b910472",
+          "metrics": {
+            "forward_plus": [
+              {
+                "id": "forge",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 78242,
+                "foregroundFraction": 0.1910205078125,
+                "meanAbsRGB": 2.8298697204400023,
+                "p95MaxRGB": 13.0,
+                "foregroundSSIM": 0.9670109574249615
+              },
+              {
+                "id": "forge",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 245316,
+                "foregroundFraction": 0.598916015625,
+                "meanAbsRGB": 5.664969535891123,
+                "p95MaxRGB": 34.0,
+                "foregroundSSIM": 0.8965509278993505
+              }
+            ],
+            "mobile": [
+              {
+                "id": "forge",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 78247,
+                "foregroundFraction": 0.19103271484375,
+                "meanAbsRGB": 2.8519985856752763,
+                "p95MaxRGB": 13.0,
+                "foregroundSSIM": 0.9664713249949041
+              },
+              {
+                "id": "forge",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 245319,
+                "foregroundFraction": 0.59892333984375,
+                "meanAbsRGB": 5.686951819195959,
+                "p95MaxRGB": 34.0,
+                "foregroundSSIM": 0.895816681473045
+              }
+            ]
+          }
+        },
+        {
+          "id": "webp2k",
+          "options": {
+            "preset": "balanced",
+            "geometry": "off",
+            "textures": "webp",
+            "resizeMax": 2048,
+            "simplify": false,
+            "simplifyRatio": 0.75,
+            "simplifyError": 0.0001,
+            "weld": false,
+            "weldTolerance": 0.0001,
+            "keepNames": true,
+            "stripAnimations": false,
+            "stripTangents": false,
+            "mipmaps": false,
+            "preservePrecision": false,
+            "encoding": {
+              "quality": 80,
+              "effort": 4,
+              "encodeSpeed": 5,
+              "decodeSpeed": 5,
+              "position": 14,
+              "normal": 10,
+              "texcoord": 12,
+              "color": 8,
+              "generic": 12,
+              "ktxQuality": 128
+            }
+          },
+          "after": {
+            "bytes": 5578276,
+            "triangles": 88777,
+            "vertices": 70283,
+            "primitives": 1,
+            "meshes": 1,
+            "nodes": 1,
+            "skins": 0,
+            "animations": 0,
+            "textures": [
+              {
+                "name": "normalgl_11c91d79_cdee_4d42_bdf1_661abeeb1205",
+                "mimeType": "image/webp",
+                "size": [
+                  2048,
+                  2048
+                ],
+                "levels": 1,
+                "bytes": 105548
+              },
+              {
+                "name": "color_11c91d79_cdee_4d42_bdf1_661abeeb1205",
+                "mimeType": "image/webp",
+                "size": [
+                  2048,
+                  2048
+                ],
+                "levels": 1,
+                "bytes": 344028
+              },
+              {
+                "name": "orm_11c91d79_cdee_4d42_bdf1_661abeeb1205",
+                "mimeType": "image/webp",
+                "size": [
+                  2048,
+                  2048
+                ],
+                "levels": 1,
+                "bytes": 125194
+              }
+            ],
+            "extensionsRequired": [
+              "EXT_texture_webp"
+            ]
+          },
+          "savedPercent": 62.51,
+          "outputSha256": "f08688fbcdf8b80e0f04aa3b72dbde52330d6c19dba0525c91660f4607bd8895",
+          "metrics": {
+            "forward_plus": [
+              {
+                "id": "forge",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 78242,
+                "foregroundFraction": 0.1910205078125,
+                "meanAbsRGB": 1.6393710113068003,
+                "p95MaxRGB": 7.0,
+                "foregroundSSIM": 0.9860957779994707
+              },
+              {
+                "id": "forge",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 245316,
+                "foregroundFraction": 0.598916015625,
+                "meanAbsRGB": 2.834122791284167,
+                "p95MaxRGB": 15.0,
+                "foregroundSSIM": 0.9608753096262305
+              }
+            ],
+            "mobile": [
+              {
+                "id": "forge",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 78247,
+                "foregroundFraction": 0.19103271484375,
+                "meanAbsRGB": 1.6483784255839415,
+                "p95MaxRGB": 7.0,
+                "foregroundSSIM": 0.9857816896465126
+              },
+              {
+                "id": "forge",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 245319,
+                "foregroundFraction": 0.59892333984375,
+                "meanAbsRGB": 2.8465440236318154,
+                "p95MaxRGB": 16.0,
+                "foregroundSSIM": 0.9602489678189557
+              }
+            ]
+          }
+        },
+        {
+          "id": "simplify75",
+          "options": {
+            "preset": "balanced",
+            "geometry": "off",
+            "textures": "off",
+            "resizeMax": 0,
+            "simplify": true,
+            "simplifyRatio": 0.75,
+            "simplifyError": 0.0001,
+            "weld": false,
+            "weldTolerance": 0.0001,
+            "keepNames": true,
+            "stripAnimations": false,
+            "stripTangents": false,
+            "mipmaps": false,
+            "preservePrecision": false,
+            "encoding": {
+              "quality": 80,
+              "effort": 4,
+              "encodeSpeed": 5,
+              "decodeSpeed": 5,
+              "position": 14,
+              "normal": 10,
+              "texcoord": 12,
+              "color": 8,
+              "generic": 12,
+              "ktxQuality": 128
+            }
+          },
+          "after": {
+            "bytes": 13903900,
+            "triangles": 76126,
+            "vertices": 63716,
+            "primitives": 1,
+            "meshes": 1,
+            "nodes": 1,
+            "skins": 0,
+            "animations": 0,
+            "textures": [
+              {
+                "name": "normalgl_11c91d79_cdee_4d42_bdf1_661abeeb1205",
+                "mimeType": "image/png",
+                "size": [
+                  4096,
+                  4096
+                ],
+                "levels": 1,
+                "bytes": 4335711
+              },
+              {
+                "name": "color_11c91d79_cdee_4d42_bdf1_661abeeb1205",
+                "mimeType": "image/jpeg",
+                "size": [
+                  4096,
+                  4096
+                ],
+                "levels": 1,
+                "bytes": 3625176
+              },
+              {
+                "name": "orm_11c91d79_cdee_4d42_bdf1_661abeeb1205",
+                "mimeType": "image/jpeg",
+                "size": [
+                  4096,
+                  4096
+                ],
+                "levels": 1,
+                "bytes": 1916011
+              }
+            ],
+            "extensionsRequired": []
+          },
+          "savedPercent": 6.56,
+          "outputSha256": "5241a62c25d6a8b925c91beed5bed8d604cff3c57b7e0d4bf37d0d543b0a54a9",
+          "metrics": {
+            "forward_plus": [
+              {
+                "id": "forge",
+                "variant": "simplify75",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 78242,
+                "foregroundFraction": 0.1910205078125,
+                "meanAbsRGB": 0.9961870436168128,
+                "p95MaxRGB": 7.0,
+                "foregroundSSIM": 0.9859259357424076
+              },
+              {
+                "id": "forge",
+                "variant": "simplify75",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 245316,
+                "foregroundFraction": 0.598916015625,
+                "meanAbsRGB": 1.6659641713816737,
+                "p95MaxRGB": 12.0,
+                "foregroundSSIM": 0.9731223563044341
+              }
+            ],
+            "mobile": [
+              {
+                "id": "forge",
+                "variant": "simplify75",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 78247,
+                "foregroundFraction": 0.19103271484375,
+                "meanAbsRGB": 1.1649733110108589,
+                "p95MaxRGB": 8.0,
+                "foregroundSSIM": 0.984255637283237
+              },
+              {
+                "id": "forge",
+                "variant": "simplify75",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 245319,
+                "foregroundFraction": 0.59892333984375,
+                "meanAbsRGB": 1.706652698459285,
+                "p95MaxRGB": 12.0,
+                "foregroundSSIM": 0.9725464431111224
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "astrolabe",
+      "sourceRelativePath": "game/starforger/props/astrolabe/astrolabe_art.glb",
+      "sourceSha256": "122f88061d66adf8f7c6eace066fdf3429343f586f6d19919716c12508c2ad6e",
+      "before": {
+        "bytes": 51376512,
+        "triangles": 372308,
+        "vertices": 737019,
+        "primitives": 40,
+        "meshes": 40,
+        "nodes": 51,
+        "skins": 0,
+        "animations": 1,
+        "textures": [
+          {
+            "name": "blue_normal",
+            "mimeType": "image/png",
+            "size": [
+              1024,
+              1024
+            ],
+            "levels": 1,
+            "bytes": 1174485
+          },
+          {
+            "name": "blue_albedo",
+            "mimeType": "image/png",
+            "size": [
+              1024,
+              1024
+            ],
+            "levels": 1,
+            "bytes": 977122
+          },
+          {
+            "name": "gold_normal",
+            "mimeType": "image/png",
+            "size": [
+              1024,
+              1024
+            ],
+            "levels": 1,
+            "bytes": 946546
+          },
+          {
+            "name": "gold_albedo",
+            "mimeType": "image/png",
+            "size": [
+              1024,
+              1024
+            ],
+            "levels": 1,
+            "bytes": 2125586
+          },
+          {
+            "name": "ivory_normal",
+            "mimeType": "image/png",
+            "size": [
+              1024,
+              1024
+            ],
+            "levels": 1,
+            "bytes": 1174485
+          },
+          {
+            "name": "ivory_albedo",
+            "mimeType": "image/png",
+            "size": [
+              1024,
+              1024
+            ],
+            "levels": 1,
+            "bytes": 1177833
+          }
+        ],
+        "extensionsRequired": []
+      },
+      "candidates": [
+        {
+          "id": "webp1k",
+          "options": {
+            "preset": "balanced",
+            "geometry": "off",
+            "textures": "webp",
+            "resizeMax": 1024,
+            "simplify": false,
+            "simplifyRatio": 0.75,
+            "simplifyError": 0.0001,
+            "weld": false,
+            "weldTolerance": 0.0001,
+            "keepNames": true,
+            "stripAnimations": false,
+            "stripTangents": false,
+            "mipmaps": false,
+            "preservePrecision": false,
+            "encoding": {
+              "quality": 80,
+              "effort": 4,
+              "encodeSpeed": 5,
+              "decodeSpeed": 5,
+              "position": 14,
+              "normal": 10,
+              "texcoord": 12,
+              "color": 8,
+              "generic": 12,
+              "ktxQuality": 128
+            }
+          },
+          "after": {
+            "bytes": 44029108,
+            "triangles": 372308,
+            "vertices": 737019,
+            "primitives": 40,
+            "meshes": 40,
+            "nodes": 51,
+            "skins": 0,
+            "animations": 1,
+            "textures": [
+              {
+                "name": "blue_normal",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 20844
+              },
+              {
+                "name": "blue_albedo",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 11320
+              },
+              {
+                "name": "gold_normal",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 4026
+              },
+              {
+                "name": "gold_albedo",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 157156
+              },
+              {
+                "name": "ivory_normal",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 20844
+              },
+              {
+                "name": "ivory_albedo",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 23198
+              }
+            ],
+            "extensionsRequired": [
+              "EXT_texture_webp"
+            ]
+          },
+          "savedPercent": 14.3,
+          "outputSha256": "7c596ae38f8769b1ae985a1296ba9ef786dd05d4023a58454a19016e77d2db6e",
+          "metrics": {
+            "forward_plus": [
+              {
+                "id": "astrolabe",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 73904,
+                "foregroundFraction": 0.1804296875,
+                "meanAbsRGB": 0.2542938586995742,
+                "p95MaxRGB": 1.0,
+                "foregroundSSIM": 0.999157410541184
+              },
+              {
+                "id": "astrolabe",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 218628,
+                "foregroundFraction": 0.533759765625,
+                "meanAbsRGB": 0.351081898628416,
+                "p95MaxRGB": 2.0,
+                "foregroundSSIM": 0.9976434844783303
+              }
+            ],
+            "mobile": [
+              {
+                "id": "astrolabe",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 73904,
+                "foregroundFraction": 0.1804296875,
+                "meanAbsRGB": 0.25853810348560297,
+                "p95MaxRGB": 1.0,
+                "foregroundSSIM": 0.9990846698777688
+              },
+              {
+                "id": "astrolabe",
+                "variant": "webp1k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 218628,
+                "foregroundFraction": 0.533759765625,
+                "meanAbsRGB": 0.35369364094870437,
+                "p95MaxRGB": 2.0,
+                "foregroundSSIM": 0.9972049947157743
+              }
+            ]
+          }
+        },
+        {
+          "id": "webp2k",
+          "options": {
+            "preset": "balanced",
+            "geometry": "off",
+            "textures": "webp",
+            "resizeMax": 2048,
+            "simplify": false,
+            "simplifyRatio": 0.75,
+            "simplifyError": 0.0001,
+            "weld": false,
+            "weldTolerance": 0.0001,
+            "keepNames": true,
+            "stripAnimations": false,
+            "stripTangents": false,
+            "mipmaps": false,
+            "preservePrecision": false,
+            "encoding": {
+              "quality": 80,
+              "effort": 4,
+              "encodeSpeed": 5,
+              "decodeSpeed": 5,
+              "position": 14,
+              "normal": 10,
+              "texcoord": 12,
+              "color": 8,
+              "generic": 12,
+              "ktxQuality": 128
+            }
+          },
+          "after": {
+            "bytes": 44029108,
+            "triangles": 372308,
+            "vertices": 737019,
+            "primitives": 40,
+            "meshes": 40,
+            "nodes": 51,
+            "skins": 0,
+            "animations": 1,
+            "textures": [
+              {
+                "name": "blue_normal",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 20844
+              },
+              {
+                "name": "blue_albedo",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 11320
+              },
+              {
+                "name": "gold_normal",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 4026
+              },
+              {
+                "name": "gold_albedo",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 157156
+              },
+              {
+                "name": "ivory_normal",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 20844
+              },
+              {
+                "name": "ivory_albedo",
+                "mimeType": "image/webp",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 23198
+              }
+            ],
+            "extensionsRequired": [
+              "EXT_texture_webp"
+            ]
+          },
+          "savedPercent": 14.3,
+          "outputSha256": "7c596ae38f8769b1ae985a1296ba9ef786dd05d4023a58454a19016e77d2db6e",
+          "metrics": {
+            "forward_plus": [
+              {
+                "id": "astrolabe",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 73904,
+                "foregroundFraction": 0.1804296875,
+                "meanAbsRGB": 0.2542938586995742,
+                "p95MaxRGB": 1.0,
+                "foregroundSSIM": 0.999157410541184
+              },
+              {
+                "id": "astrolabe",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 218628,
+                "foregroundFraction": 0.533759765625,
+                "meanAbsRGB": 0.351081898628416,
+                "p95MaxRGB": 2.0,
+                "foregroundSSIM": 0.9976434844783303
+              }
+            ],
+            "mobile": [
+              {
+                "id": "astrolabe",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 73904,
+                "foregroundFraction": 0.1804296875,
+                "meanAbsRGB": 0.2586598830915783,
+                "p95MaxRGB": 1.0,
+                "foregroundSSIM": 0.9990843533652024
+              },
+              {
+                "id": "astrolabe",
+                "variant": "webp2k",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 218628,
+                "foregroundFraction": 0.533759765625,
+                "meanAbsRGB": 0.35367991901006884,
+                "p95MaxRGB": 2.0,
+                "foregroundSSIM": 0.9972068092403314
+              }
+            ]
+          }
+        },
+        {
+          "id": "simplify75",
+          "options": {
+            "preset": "balanced",
+            "geometry": "off",
+            "textures": "off",
+            "resizeMax": 0,
+            "simplify": true,
+            "simplifyRatio": 0.75,
+            "simplifyError": 0.0001,
+            "weld": false,
+            "weldTolerance": 0.0001,
+            "keepNames": true,
+            "stripAnimations": false,
+            "stripTangents": false,
+            "mipmaps": false,
+            "preservePrecision": false,
+            "encoding": {
+              "quality": 80,
+              "effort": 4,
+              "encodeSpeed": 5,
+              "decodeSpeed": 5,
+              "position": 14,
+              "normal": 10,
+              "texcoord": 12,
+              "color": 8,
+              "generic": 12,
+              "ktxQuality": 128
+            }
+          },
+          "after": {
+            "bytes": 50203744,
+            "triangles": 344152,
+            "vertices": 719254,
+            "primitives": 40,
+            "meshes": 40,
+            "nodes": 51,
+            "skins": 0,
+            "animations": 1,
+            "textures": [
+              {
+                "name": "blue_normal",
+                "mimeType": "image/png",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 1174485
+              },
+              {
+                "name": "blue_albedo",
+                "mimeType": "image/png",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 977122
+              },
+              {
+                "name": "gold_normal",
+                "mimeType": "image/png",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 946546
+              },
+              {
+                "name": "gold_albedo",
+                "mimeType": "image/png",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 2125586
+              },
+              {
+                "name": "ivory_normal",
+                "mimeType": "image/png",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 1174485
+              },
+              {
+                "name": "ivory_albedo",
+                "mimeType": "image/png",
+                "size": [
+                  1024,
+                  1024
+                ],
+                "levels": 1,
+                "bytes": 1177833
+              }
+            ],
+            "extensionsRequired": []
+          },
+          "savedPercent": 2.28,
+          "outputSha256": "b7f74c3993e14aba448469b2fea343f0a02f709f181f46cc6607e7ab0ea0b98a",
+          "metrics": {
+            "forward_plus": [
+              {
+                "id": "astrolabe",
+                "variant": "simplify75",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 73904,
+                "foregroundFraction": 0.1804296875,
+                "meanAbsRGB": 0.12814371797647398,
+                "p95MaxRGB": 0.0,
+                "foregroundSSIM": 0.9988055193711441
+              },
+              {
+                "id": "astrolabe",
+                "variant": "simplify75",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 218628,
+                "foregroundFraction": 0.533759765625,
+                "meanAbsRGB": 0.2551457269883089,
+                "p95MaxRGB": 1.0,
+                "foregroundSSIM": 0.9966100391058701
+              }
+            ],
+            "mobile": [
+              {
+                "id": "astrolabe",
+                "variant": "simplify75",
+                "pose": "rest",
+                "framing": "full",
+                "foregroundPixels": 73904,
+                "foregroundFraction": 0.1804296875,
+                "meanAbsRGB": 0.1299162877967814,
+                "p95MaxRGB": 0.0,
+                "foregroundSSIM": 0.9987528501346712
+              },
+              {
+                "id": "astrolabe",
+                "variant": "simplify75",
+                "pose": "rest",
+                "framing": "detail",
+                "foregroundPixels": 218628,
+                "foregroundFraction": 0.533759765625,
+                "meanAbsRGB": 0.26324776942264183,
+                "p95MaxRGB": 1.0,
+                "foregroundSSIM": 0.9963655824985819
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

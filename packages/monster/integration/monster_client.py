@@ -128,6 +128,9 @@ class MonsterClient:
 
     def rig_candidates(self, identity, input_glb=None, run_auto_audit=True):
         identity = monster_id(identity)
+        status = self.heartbeat()
+        if status.get('orientation_contract') != PROTOCOL['orientation_contract']:
+            raise ValueError('Worker lacks reviewed orientation protection; upgrade the Worker release before rig generation')
         uploaded = self._upload(input_glb, ".glb") if input_glb else None
         return self._client.predict(
             identity, uploaded, run_auto_audit,

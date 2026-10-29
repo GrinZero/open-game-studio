@@ -10,3 +10,7 @@ Call export_bundle with the exact delivery inputs, runId, expectedRevision and s
 Read the returned bundle and actual manifest. Technical passed in this version covers file integrity and import format structure only. Blend opening, mesh budget, skinning, materials and engine behavior require real tools; do not reinterpret these as passed. The engine field remains not_verified until a future adapter performs real import and records evidence.
 
 Complete with the bundle path, version set and remaining checks. Exporting arbitrary resources without a run is supported but does not create visual approval.
+
+## Textured model completion
+
+After a complete model has geometry, UVs, materials and textures, load [glb-compress](../glb-compress/SKILL.md) and its compression policy by default before delivery. Re-run this step after texture changes. Generate project-aware recommendations and visual candidates in one dedicated temporary directory; keep the complete source and fixed production versions intact. Godot projects use geometry=off. Choose between WebP 1K/2K (or source resolution when detail requires it) using actual size and same-camera renders, not triangle count alone. Do not apply this step to unfinished meshes or replace a reviewed rig/training source with a compressed derivative.

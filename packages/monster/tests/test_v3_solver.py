@@ -187,6 +187,16 @@ class SolverBehaviorTests(unittest.TestCase):
         _, report = fit_clip_2d_reprojection(rig, cameras(), uv, np.ones(uv.shape[:-1]))
         self.assertEqual(report["frames"][0]["planted_feet"], [])
 
+    def test_observed_foot_roll_near_floor_overrides_flat_contact_prior(self):
+        rig, cams = radial_rig(foot=True), cameras()
+        twist = rig.slices["Foot.L"][0][0]
+        target = rig.zero()
+        target[twist] = 0.7
+        uv = observations(rig, cams, [target])
+        result, report = fit_clip_2d_reprojection(rig, cams, uv, np.ones(uv.shape[:-1]))
+        self.assertEqual(report["frames"][0]["planted_feet"], [])
+        self.assertAlmostEqual(result[0, twist], 0.7, places=4)
+
     def test_lateral_vector_jacobian_in_rotated_ancestor_frames(self):
         meta = copy.deepcopy(radial_rig(foot=True).meta)
         meta["Spine1"].update(

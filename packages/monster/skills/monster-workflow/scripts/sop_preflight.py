@@ -14,7 +14,7 @@ Enforces:
      - Topological independence check (detects shared/welded vertices vs independent sub-meshes)
      - Base mesh quality check (non-manifold edges, degenerate faces, loose vertices, normal consistency)
      - Front/Side orthographic check image (`preflight_front_side.png`) & lateral limb occlusion ratio
-     - Mandatory Canonical Bone Naming Gate (`<KIND>_<SIDE>_<GROUP>_<INDEX>`) if input already has a rig
+     - Mandatory Canonical Bone Naming Gate (`monster-bone-taxonomy-v3`) if input already has a rig
   3. U1 Persistent Google Drive Transfer (`sync_u1_to_drive`):
      Uploads `rig_input_variant.glb` + `u1_manifest.json` to `MonsterStudio/monsters/<monster_id>/u1/`
      and updates the SOP audit ledger fingerprints.
@@ -621,6 +621,7 @@ def sync_u1_to_drive(
         shutil.copy2(shell_glb, target_shell_glb)
         if shell_preview_png.is_file():
             shutil.copy2(shell_preview_png, target_shell_png)
+    shutil.copy2(dirs['checks_dir'] / 'preflight_front_side.png', u1_dir / 'preflight_front_side.png')
     shutil.copy2(report_path, u1_dir / "preflight_report.json")
 
     u1_manifest = {
@@ -629,6 +630,8 @@ def sync_u1_to_drive(
         "synced_at": now_taipei_iso(),
         "skipped_unchanged_upload": already_synced,
         "drive_u1_glb": str(target_glb),
+        "drive_orientation_review_png": str(u1_dir / 'preflight_front_side.png'),
+        "orientation_review_png_sha256": report['visual_review']['front_side_sha256'],
         "drive_u1_shell_npz": str(target_shell),
         "drive_u1_shell_glb": str(target_shell_glb),
         "drive_u1_shell_preview_png": str(target_shell_png),

@@ -133,7 +133,7 @@ npm run install:local
 
 ## 工具与文档
 
-**26 个领域 MCP 工具 + 1 个界面专用桥接工具 · 12 个工作流技能。** HTTP 与 MCP 内嵌工作台共用项目核心与资源历史。
+**26 个领域 MCP 工具 + 1 个界面专用桥接工具 · 13 个工作流技能。** HTTP 与 MCP 内嵌工作台共用项目核心与资源历史。
 
 | 入口 | 内容 |
 | --- | --- |
@@ -143,6 +143,7 @@ npm run install:local
 | [验证记录](docs/VERIFICATION.md) | 已执行检查与仍需实测的能力。 |
 | [实现状态](docs/IMPLEMENTATION.md) | 架构、未完成阶段与后续计划。 |
 | [Monster 模块](packages/monster/README.md) | [![Open in Colab](docs/images/open-in-colab.svg)](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb) 一键启动、Worker 源码与自动配对本机客户端。 |
+| [本地 GLB 压缩技能](skills/glb-compress/SKILL.md) | 可独立分发的离线 CLI，支持 Draco、贴图、尺寸调整与对比报告。 |
 
 <a id="limits"></a>
 

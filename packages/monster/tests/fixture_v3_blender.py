@@ -17,7 +17,7 @@ from bpy_extras.object_utils import world_to_camera_view
 import studio_bpy_worker as worker
 from studio_camera import Camera
 from reprojection_solver import aligned_rest_rotation, RigModel
-from video2rig_blender import StripRenderer, solid_copy, render_v3_review
+from video2rig_blender import StripRenderer, heat_bind_updated_skeleton, render_v3_review
 
 if os.environ.get("MONSTER_TEST_LAYOUT") == "stacked":
     os.environ["MONSTER_STUDIO_LAYOUT"] = "stacked"
@@ -135,8 +135,8 @@ np.testing.assert_allclose(
     atol=1e-10,
 )
 print("CUSTOM_CAMERA_EXPORTED_AND_CONSUMED")
-# Force the fallback path explicitly on this disposable fixture and verify all vertices get weights.
-print("SOLID_COPY", solid_copy([mesh], arm))
+# Force the welded Heat binding path explicitly on this disposable fixture and verify all vertices get weights.
+print("SOLID_COPY", heat_bind_updated_skeleton([mesh], arm))
 assert all(v.groups for v in mesh.data.vertices)
 prop_group = mesh.vertex_groups.get("Prop_sword")
 if prop_group is not None:

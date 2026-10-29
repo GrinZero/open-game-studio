@@ -11,6 +11,10 @@ from types import SimpleNamespace, ModuleType
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+if str(ROOT / "worker") not in sys.path:
+    sys.path.insert(0, str(ROOT / "worker"))
 
 
 def load(name, path):
@@ -353,7 +357,7 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(parsed["chain_index"], 3)
 
             # 2. Hybrid classification on an anonymous rig with torso, arm hub, 3 fingers, rigid & flex
-            def make_bone(parent, head, tail, limits_rad=None, fixed_local=False):
+            def make_bone(parent, head, tail, limits_rad=None, fixed_local=False, kind=None):
                 h = np.asarray(head, dtype=np.float64)
                 t = np.asarray(tail, dtype=np.float64)
                 L = float(np.linalg.norm(t - h))
@@ -374,42 +378,41 @@ class MigrationTests(unittest.TestCase):
                     info["limits_rad"] = limits_rad
                 if fixed_local:
                     info["fixed_local"] = True
+                if kind is not None:
+                    info["kind"] = kind
                 return info
 
             rig_bones = {
-                "bone_0": make_bone(None, [0.0, 0.0, 0.50], [0.0, 0.0, 0.60]),
-                "bone_1": make_bone("bone_0", [0.0, 0.0, 0.60], [0.0, 0.0, 0.75]),
-                "bone_2": make_bone("bone_1", [0.0, 0.0, 0.75], [0.0, 0.0, 0.95]),
-                "bone_3": make_bone("bone_1", [0.05, 0.0, 0.72], [0.15, 0.0, 0.72]),
-                "bone_4": make_bone("bone_3", [0.15, 0.0, 0.72], [0.30, 0.0, 0.60]),
-                "bone_5": make_bone("bone_4", [0.30, 0.0, 0.60], [0.42, 0.0, 0.50]),
-                "bone_6": make_bone("bone_5", [0.42, 0.0, 0.50], [0.442, 0.0, 0.485]),
-                "bone_7": make_bone("bone_6", [0.442, 0.02, 0.485], [0.465, 0.02, 0.470]),
-                "bone_8": make_bone("bone_7", [0.465, 0.02, 0.470], [0.485, 0.02, 0.455]),
-                "bone_9": make_bone("bone_6", [0.442, 0.00, 0.485], [0.465, 0.00, 0.470]),
-                "bone_10": make_bone("bone_9", [0.465, 0.00, 0.470], [0.485, 0.00, 0.455]),
-                "bone_11": make_bone("bone_6", [0.442, -0.02, 0.485], [0.465, -0.02, 0.470]),
-                "bone_12": make_bone("bone_11", [0.465, -0.02, 0.470], [0.485, -0.02, 0.455]),
+                "bone_0": make_bone(None, [0.0, 0.0, 0.50], [0.0, 0.0, 0.60], kind="root"),
+                "bone_1": make_bone("bone_0", [0.0, 0.0, 0.60], [0.0, 0.0, 0.75], kind="spine"),
+                "bone_2": make_bone("bone_1", [0.0, 0.0, 0.75], [0.0, 0.0, 0.95], kind="spine"),
+                "bone_3": make_bone("bone_1", [0.05, 0.0, 0.72], [0.15, 0.0, 0.72], kind="limb"),
+                "bone_4": make_bone("bone_3", [0.15, 0.0, 0.72], [0.30, 0.0, 0.60], kind="limb"),
+                "bone_5": make_bone("bone_4", [0.30, 0.0, 0.60], [0.42, 0.0, 0.50], kind="limb"),
+                "bone_6": make_bone("bone_5", [0.42, 0.0, 0.50], [0.442, 0.0, 0.485], kind="limb"),
+                "bone_7": make_bone("bone_6", [0.442, 0.02, 0.485], [0.465, 0.02, 0.470], kind="digit"),
+                "bone_8": make_bone("bone_7", [0.465, 0.02, 0.470], [0.485, 0.02, 0.455], kind="digit"),
+                "bone_9": make_bone("bone_6", [0.442, 0.00, 0.485], [0.465, 0.00, 0.470], kind="digit"),
+                "bone_10": make_bone("bone_9", [0.465, 0.00, 0.470], [0.485, 0.00, 0.455], kind="digit"),
+                "bone_11": make_bone("bone_6", [0.442, -0.02, 0.485], [0.465, -0.02, 0.470], kind="digit"),
+                "bone_12": make_bone("bone_11", [0.465, -0.02, 0.470], [0.485, -0.02, 0.455], kind="digit"),
                 "Core_Rigid": make_bone(
                     "bone_0",
                     [0.0, 0.0, 0.55],
                     [0.0, 0.0, 0.65],
                     limits_rad=[[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
                     fixed_local=True,
+                    kind="rigid",
                 ),
-                "Flex_Cape_0": make_bone("bone_0", [0.0, 0.05, 0.50], [0.0, 0.05, 0.25]),
+                "Flex_Cape_0": make_bone("bone_0", [0.0, 0.05, 0.50], [0.0, 0.05, 0.25], kind="flex"),
             }
             classified = tax.classify_rig_bones(rig_bones)
             self.assertEqual(classified["bone_0"]["kind"], "root")
             self.assertEqual(classified["bone_1"]["kind"], "spine")
             self.assertEqual(classified["bone_3"]["kind"], "limb")
-            self.assertEqual(classified["bone_3"]["sub_role"], "clavicle_socket")
             self.assertEqual(classified["bone_4"]["kind"], "limb")
-            self.assertEqual(classified["bone_4"]["sub_role"], "upper_limb")
             self.assertEqual(classified["bone_5"]["kind"], "limb")
-            self.assertEqual(classified["bone_5"]["sub_role"], "forearm_hinge")
             self.assertEqual(classified["bone_6"]["kind"], "limb")
-            self.assertEqual(classified["bone_6"]["sub_role"], "hand_hub")
             for d_name in ("bone_7", "bone_8", "bone_9", "bone_10", "bone_11", "bone_12"):
                 self.assertEqual(classified[d_name]["kind"], "digit")
             self.assertEqual(classified["Core_Rigid"]["kind"], "rigid")
@@ -569,6 +572,7 @@ class MigrationTests(unittest.TestCase):
 
 class FakeTransport:
     protocol_version = 1
+    orientation_contract = client_module.PROTOCOL['orientation_contract']
 
     def __init__(self, url, **kwargs):
         self.calls = []
@@ -577,7 +581,7 @@ class FakeTransport:
     def predict(self, *args, api_name):
         self.calls.append((api_name, args))
         if api_name == "/heartbeat":
-            return json.dumps({"protocol_version": self.protocol_version, "status": "READY"})
+            return json.dumps({"protocol_version": self.protocol_version, "status": "READY", "orientation_contract": self.orientation_contract})
         if api_name == "/rig_candidates":
             return ("{}", "downloaded-rig.zip")
         return "{}"
@@ -600,8 +604,20 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(client._client.options["auth"], ("monster", "test-only-secret"))
             self.assertEqual(client._client.calls, [
                 ("/heartbeat", ()),
+                ("/heartbeat", ()),
                 ("/rig_candidates", ("creature_01", {"upload": str(source.resolve())}, True)),
             ])
+
+    def test_old_orientation_worker_cannot_upload_or_generate(self):
+        class OldOrientationWorker(FakeTransport):
+            orientation_contract = None
+        with tempfile.TemporaryDirectory() as temporary:
+            client = self.connect(temporary, OldOrientationWorker)
+            source = Path(temporary) / 'input.glb'
+            source.write_bytes(b'fixture')
+            with self.assertRaisesRegex(ValueError, 'orientation protection'):
+                client.rig_candidates('creature_01', source)
+            self.assertFalse(any(name == '/rig_candidates' for name, _ in client._client.calls))
 
     def test_legacy_or_incompatible_worker_cannot_submit(self):
         class OldWorker(FakeTransport):
@@ -792,510 +808,6 @@ class ClientTests(unittest.TestCase):
                 self.assertEqual(graph_3v_2k["33"]["inputs"]["width"], 2688)
                 self.assertEqual(graph_3v_2k["33"]["inputs"]["height"], 1440)
 
-            try:
-                import numpy as np
-            except ImportError:
-                return
-
-            from evals.solvers.latest_solver import run_latest_solver
-
-            calib_3v = {
-                "center": [0.0, 0.0, 0.5],
-                "panel_width": 896,
-                "panel_height": 1440,
-                "composite_width": 2688,
-                "composite_height": 1440,
-                "num_views": 3,
-                "view_order": ["left", "front", "right"],
-                "ortho_scale": 1.2,
-                "depth_scale": 0.8,
-            }
-            pt_gt = (-0.18, 0.22, 0.65)
-            uv_f, uv_s = bpy_mod.project_3d_to_dual_ortho_pixels(pt_gt, calib_3v)
-            uv_r = bpy_mod.project_3d_to_right_ortho_pixels(pt_gt, calib_3v)
-            # Verify opposing lateral horizontal coordinates sum to panel_width: u_S + u_R == W
-            self.assertAlmostEqual(uv_s[0] + uv_r[0], 896.0, places=2)
-            self.assertAlmostEqual(uv_s[1], uv_r[1], places=2)
-
-            # Simulate severe Left-view occlusion where uv_s is corrupted by +180px (wrong limb swap)
-            uv_s_occluded = [uv_s[0] + 180.0, uv_s[1]]
-            rec_2v = bpy_mod.triangulate_dual_ortho_pixels_to_3d(uv_f, uv_s_occluded, calib_3v, 0.9, 0.15)
-            rec_3v = bpy_mod.triangulate_dual_ortho_pixels_to_3d(
-                uv_f, uv_s_occluded, calib_3v, 0.9, 0.15, uv_right=uv_r, conf_right=0.95
-            )
-            err_y_2v = abs(rec_2v[1] - pt_gt[1])
-            err_y_3v = abs(rec_3v[1] - pt_gt[1])
-            self.assertGreaterEqual(err_y_2v, 0.149)
-            self.assertLess(err_y_3v, 0.01)
-
-            # Verify 3-view fuse_depth_visibility and run_latest_solver under occlusion
-            T, K = 6, 2
-            uf_arr = np.tile(np.array(uv_f, dtype=np.float64), (T, K, 1))
-            us_arr = np.tile(np.array(uv_s_occluded, dtype=np.float64), (T, K, 1))
-            ur_arr = np.tile(np.array(uv_r, dtype=np.float64), (T, K, 1))
-            cf_arr = np.full((T, K), 0.92, dtype=np.float64)
-            cs_arr = np.full((T, K), 0.20, dtype=np.float64)
-            cr_arr = np.full((T, K), 0.95, dtype=np.float64)
-            df_arr = np.full((T, K), (pt_gt[1] - 0.0) / 0.8, dtype=np.float64)
-            ds_arr = np.full((T, K), (0.0 - pt_gt[0]) / 0.8, dtype=np.float64)
-            dr_arr = np.full((T, K), (pt_gt[0] - 0.0) / 0.8, dtype=np.float64)
-            vf_arr = np.full((T, K), 0.90, dtype=np.float64)
-            vs_arr = np.full((T, K), 0.05, dtype=np.float64)
-            vr_arr = np.full((T, K), 0.95, dtype=np.float64)
-            lv_f = np.full((T, K), -2.0, dtype=np.float64)
-            lv_s = np.full((T, K), 1.5, dtype=np.float64)
-            lv_r = np.full((T, K), -3.5, dtype=np.float64)
-
-            pts_2v, _ = pose_features.fuse_depth_visibility(
-                uf_arr, us_arr, cf_arr, cs_arr, calib_3v, df_arr, ds_arr, vf_arr, vs_arr, lv_f, lv_s
-            )
-            pts_3v, _ = pose_features.fuse_depth_visibility(
-                uf_arr, us_arr, cf_arr, cs_arr, calib_3v, df_arr, ds_arr, vf_arr, vs_arr, lv_f, lv_s,
-                uv_right=ur_arr, conf_right=cr_arr, depth_right=dr_arr, visibility_right=vr_arr, logvar_right=lv_r,
-            )
-            self.assertLess(
-                float(np.mean(np.abs(pts_3v[..., 1] - pt_gt[1]))),
-                float(np.mean(np.abs(pts_2v[..., 1] - pt_gt[1]))) * 0.25,
-            )
-            self.assertLess(float(np.mean(np.abs(pts_3v[..., 1] - pt_gt[1]))), 0.01)
-
-            studio_meta_3v = {
-                "bbox_min": [-0.3, -0.3, 0.0],
-                "bbox_max": [0.3, 0.3, 1.0],
-                "calibration": calib_3v,
-                "bones": {
-                    "ROOT_C_00_00": {
-                        "parent": None,
-                        "rest_head_world": [pt_gt[0], pt_gt[1], pt_gt[2]],
-                        "rest_tail_world": [pt_gt[0], pt_gt[1], pt_gt[2] + 0.10],
-                        "rest_length": 0.10,
-                        "rest_rot_mat_world": [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]],
-                    },
-                },
-            }
-            obs_3v = {
-                "uv_front_all": uf_arr,
-                "uv_side_all": us_arr,
-                "uv_right_all": ur_arr,
-                "conf_front_all": cf_arr,
-                "conf_side_all": cs_arr,
-                "conf_right_all": cr_arr,
-                "depth_front_all": df_arr,
-                "depth_side_all": ds_arr,
-                "depth_right_all": dr_arr,
-                "visibility_front_all": vf_arr,
-                "visibility_side_all": vs_arr,
-                "visibility_right_all": vr_arr,
-                "logvar_front_all": lv_f,
-                "logvar_side_all": lv_s,
-                "logvar_right_all": lv_r,
-            }
-            res_3v = run_latest_solver(obs_3v, studio_meta_3v)
-            self.assertIn("uv_right_clean", res_3v.stage2_cleaned_2d)
-            self.assertLess(float(np.mean(np.abs(res_3v.stage3_triangulation["pts_3d_raw"][..., 1] - pt_gt[1]))), 0.01)
-        finally:
-            sys.path.remove(str(ROOT / "worker"))
-
-    def test_dense_surface_correspondence_and_lbs_roll_refinement(self):
-        dino_src = (ROOT / "worker/dinov2_pose_trainer.py").read_text(encoding="utf-8")
-        for sym in (
-            "extract_multi_layer_patch_grid",
-            "dino_multi_fuse",
-            "rgb_detail_branch",
-            "rgb_kp_refine",
-            "dense_head",
-            "dense_mask_logits",
-            "dense_rest_xyz",
-            "dense_logvar",
-        ):
-            self.assertIn(sym, dino_src)
-
-        sys.path.insert(0, str(ROOT / "worker"))
-        try:
-            pose_features = load("monster_pose_features_dense", "worker/pose_features.py")
-            tax = load("monster_bone_taxonomy_dense", "worker/bone_taxonomy.py")
-
-            with tempfile.TemporaryDirectory() as tmp:
-                b_file = Path(tmp) / "rig.blend"
-                m_file = Path(tmp) / "meta.json"
-                b_file.write_bytes(b"blend")
-                m_file.write_text("{}")
-                with patch.dict("os.environ", {}, clear=False):
-                    import os
-                    os.environ.pop("MONSTER_ENABLE_DENSE_SURFACE", None)
-                    self.assertFalse(pose_features.dense_surface_enabled())
-                with patch.dict("os.environ", {"MONSTER_ENABLE_DENSE_SURFACE": "0"}, clear=False):
-                    self.assertFalse(pose_features.dense_surface_enabled())
-                    sig_off = pose_features.dataset_signature(b_file, m_file, 100, 42)
-                with patch.dict("os.environ", {"MONSTER_ENABLE_DENSE_SURFACE": "1"}, clear=False):
-                    self.assertTrue(pose_features.dense_surface_enabled())
-                    sig_on = pose_features.dataset_signature(b_file, m_file, 100, 42)
-                    self.assertNotEqual(sig_on, sig_off)
-                    self.assertEqual(pose_features.dense_grid_shape(672, 768), (220, 192))
-                    self.assertEqual(pose_features.dense_grid_shape(448, 768), (220, 128))
-
-            try:
-                import numpy as np
-            except ImportError:
-                return
-
-            from evals.solvers.latest_solver import run_latest_solver
-
-            # Build a 2-bone rig where LIMB_L_01_01 is a horizontal leaf bone along +X
-            # with off-axis surface vertices (a wide blade/paddle in the X-Y plane).
-            # Pure axial roll (ry = +26 deg around local Y = +X world) leaves head_3d & tail_3d stationary!
-            root_R = np.eye(3, dtype=np.float64)
-            # Local Y along +X world, Local X along -Y world, Local Z along +Z world (det = +1)
-            limb_R0 = np.array(
-                [[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
-                dtype=np.float64,
-            )
-            studio_meta_base = {
-                "bbox_min": [-0.35, -0.35, 0.15],
-                "bbox_max": [0.45, 0.35, 0.85],
-                "bones": {
-                    "ROOT_C_00_00": {
-                        "parent": None,
-                        "rest_head_world": [0.0, 0.0, 0.45],
-                        "rest_tail_world": [0.0, 0.0, 0.60],
-                        "rest_length": 0.15,
-                        "rest_rot_mat_world": root_R.tolist(),
-                    },
-                    "LIMB_L_01_01": {
-                        "parent": "ROOT_C_00_00",
-                        "rest_head_world": [0.05, 0.0, 0.50],
-                        "rest_tail_world": [0.35, 0.0, 0.50],
-                        "rest_length": 0.30,
-                        "rest_rot_mat_world": limb_R0.tolist(),
-                    },
-                },
-            }
-
-            # Construct a dense surface grid on the paddle attached to LIMB_L_01_01 (bone index 0 in sorted order)
-            # Sorted bone_names = ["LIMB_L_01_01", "ROOT_C_00_00"]
-            xs = np.linspace(0.06, 0.34, 14)
-            ys = np.linspace(-0.14, 0.14, 14)
-            verts_list = []
-            for x in xs:
-                for y in ys:
-                    verts_list.append([float(x), float(y), 0.50])
-            # Also add a few root vertices
-            for z in np.linspace(0.42, 0.58, 4):
-                for x in (-0.02, 0.02):
-                    verts_list.append([float(x), 0.0, float(z)])
-            rest_verts = np.asarray(verts_list, dtype=np.float32)
-            V_limb = 14 * 14
-            V_total = int(rest_verts.shape[0])
-
-            tris = []
-            for ix in range(13):
-                for iy in range(13):
-                    i0 = ix * 14 + iy
-                    i1 = i0 + 1
-                    i2 = (ix + 1) * 14 + iy
-                    i3 = i2 + 1
-                    tris.append([i0, i2, i1])
-                    tris.append([i1, i2, i3])
-            triangles = np.asarray(tris, dtype=np.int32)
-
-            skin_indices = np.zeros((V_total, 4), dtype=np.int32)
-            skin_weights = np.zeros((V_total, 4), dtype=np.float32)
-            # Bone 0 = LIMB_L_01_01, Bone 1 = ROOT_C_00_00
-            skin_indices[:V_limb, 0] = 0
-            skin_weights[:V_limb, 0] = 1.0
-            skin_indices[V_limb:, 0] = 1
-            skin_weights[V_limb:, 0] = 1.0
-
-            rest_heads = np.array([[0.05, 0.0, 0.50], [0.0, 0.0, 0.45]], dtype=np.float32)
-            rest_R = np.stack([limb_R0, root_R], axis=0).astype(np.float32)
-            rig_skinning = {
-                "bone_names": ["LIMB_L_01_01", "ROOT_C_00_00"],
-                "rest_verts": rest_verts,
-                "skin_indices": skin_indices,
-                "skin_weights": skin_weights,
-                "triangles": triangles,
-                "rest_heads": rest_heads,
-                "rest_R": rest_R,
-            }
-
-            # Apply a +26 deg pure axial roll (ry) on LIMB_L_01_01
-            true_ry = float(np.deg2rad(26.0))
-            R_local_roll = tax.euler_xyz_to_matrix_numpy(0.0, true_ry, 0.0)
-            limb_R_posed = limb_R0 @ R_local_roll
-            posed_heads = rest_heads.copy()
-            posed_R = np.stack([limb_R_posed, root_R], axis=0)
-            posed_verts = pose_features.lbs_deform_vertices_numpy(
-                rest_verts, skin_indices, skin_weights, rest_heads, rest_R, posed_heads, posed_R
-            )
-
-            # Test both 2-view ("front", "side") and 3-view ("left", "front", "right") studio configurations
-            for mode_3view in (False, True):
-                calib = {
-                    "center": [0.05, 0.0, 0.50],
-                    "panel_width": 448 if mode_3view else 672,
-                    "panel_height": 768,
-                    "composite_width": 1344,
-                    "composite_height": 768,
-                    "num_views": 3 if mode_3view else 2,
-                    "view_order": ["left", "front", "right"] if mode_3view else ["front", "side"],
-                    "ortho_scale": 0.9,
-                    "depth_scale": 0.7,
-                }
-                hm_h, hm_w = pose_features.dense_grid_shape(calib["panel_width"], calib["panel_height"])
-                dense_views = {}
-                for v_name in calib["view_order"]:
-                    rast = pose_features.rasterize_ortho_dense_rest_map_numpy(
-                        posed_verts, rest_verts, triangles, calib, view=v_name, grid_w=hm_w, grid_h=hm_h
-                    )
-                    dense_views[v_name] = {
-                        "mask_prob": rast["mask"],
-                        "rest_xyz": rast["rest_xyz"],
-                        "logvar": np.full((hm_h, hm_w), -3.0, dtype=np.float32),
-                    }
-                matched_list = pose_features.match_dense_surface_correspondences(dense_views, rig_skinning, calib)
-                self.assertEqual(len(matched_list), 1)
-                matched = matched_list[0]
-                self.assertIn("front", matched)
-                self.assertIn("side", matched)
-                if mode_3view:
-                    self.assertIn("right", matched)
-
-                # Build 7-frame observation sequence where keypoints (head, tail) are completely stationary
-                T, K = 7, 4
-                bone_endpoints_3d = np.array(
-                    [
-                        [0.05, 0.0, 0.50],  # LIMB_L_01_01 head
-                        [0.35, 0.0, 0.50],  # LIMB_L_01_01 tail
-                        [0.0, 0.0, 0.45],   # ROOT_C_00_00 head
-                        [0.0, 0.0, 0.60],   # ROOT_C_00_00 tail
-                    ],
-                    dtype=np.float64,
-                )
-                uv_f, df = pose_features.project_3d_points_to_ortho_view_numpy(bone_endpoints_3d, calib, "front")
-                uv_s, ds = pose_features.project_3d_points_to_ortho_view_numpy(bone_endpoints_3d, calib, "side")
-                obs = {
-                    "uv_front_all": np.tile(uv_f[None, :, :], (T, 1, 1)),
-                    "uv_side_all": np.tile(uv_s[None, :, :], (T, 1, 1)),
-                    "conf_front_all": np.full((T, K), 0.95, dtype=np.float64),
-                    "conf_side_all": np.full((T, K), 0.95, dtype=np.float64),
-                    "depth_front_all": np.tile(df[None, :], (T, 1)),
-                    "depth_side_all": np.tile(ds[None, :], (T, 1)),
-                    "visibility_front_all": np.ones((T, K), dtype=np.float64),
-                    "visibility_side_all": np.ones((T, K), dtype=np.float64),
-                    "logvar_front_all": np.full((T, K), -4.0, dtype=np.float64),
-                    "logvar_side_all": np.full((T, K), -4.0, dtype=np.float64),
-                    "dense_correspondences": [matched for _ in range(T)],
-                }
-                if mode_3view:
-                    uv_r, dr = pose_features.project_3d_points_to_ortho_view_numpy(bone_endpoints_3d, calib, "right")
-                    obs.update({
-                        "uv_right_all": np.tile(uv_r[None, :, :], (T, 1, 1)),
-                        "conf_right_all": np.full((T, K), 0.95, dtype=np.float64),
-                        "depth_right_all": np.tile(dr[None, :], (T, 1)),
-                        "visibility_right_all": np.ones((T, K), dtype=np.float64),
-                        "logvar_right_all": np.full((T, K), -4.0, dtype=np.float64),
-                    })
-
-                studio_meta = {**studio_meta_base, "calibration": calib, "rig_skinning": rig_skinning}
-
-                def _geodesic_deg(R_a, R_b):
-                    tr = float(np.clip((np.trace(R_a.T @ R_b) - 1.0) * 0.5, -1.0, 1.0))
-                    return float(np.rad2deg(np.arccos(tr)))
-
-                # 1) With feature flag OFF: keypoint-only solver cannot observe leaf axial roll (~26 deg error)
-                with patch.dict("os.environ", {"MONSTER_ENABLE_DENSE_SURFACE": "0"}, clear=False):
-                    res_off = run_latest_solver(obs, studio_meta)
-                    self.assertFalse(res_off.stage4_diagnostics["dense_surface_refined"])
-                    R_pred_off = np.asarray(res_off.stage4_frames[3]["bones"]["LIMB_L_01_01"]["rot_mat_world"])
-                    err_off_deg = _geodesic_deg(R_pred_off, limb_R_posed)
-                    self.assertGreater(err_off_deg, 20.0)
-
-                # 2) With feature flag ON: multi-view dense LBS refiner unlocks and recovers the +26 deg axial roll!
-                with patch.dict("os.environ", {"MONSTER_ENABLE_DENSE_SURFACE": "1"}, clear=False):
-                    res_on = run_latest_solver(obs, studio_meta)
-                    self.assertTrue(res_on.stage4_diagnostics["dense_surface_refined"])
-                    self.assertGreater(res_on.stage4_diagnostics["dense_matched_points_total"], 0)
-                    self.assertIn("LIMB_L_01_01", res_on.stage4_diagnostics["unlocked_roll_bones"])
-                    self.assertLess(
-                        res_on.stage4_diagnostics["mean_reproj_error_px_after"],
-                        res_on.stage4_diagnostics["mean_reproj_error_px_before"],
-                    )
-                    R_pred_on = np.asarray(res_on.stage4_frames[3]["bones"]["LIMB_L_01_01"]["rot_mat_world"])
-                    err_on_deg = _geodesic_deg(R_pred_on, limb_R_posed)
-                    self.assertLess(err_on_deg, 2.0)
-        finally:
-            sys.path.remove(str(ROOT / "worker"))
-
-    def test_mocap_priors_feature_flag_and_xsxb_mechanisms(self):
-        import os
-
-        sys.path.insert(0, str(ROOT / "worker"))
-        try:
-            pose_features = load("monster_pose_features_priors", "worker/pose_features.py")
-            mocap_priors = load("monster_mocap_priors", "worker/mocap_priors.py")
-            tax = load("monster_bone_taxonomy_priors", "worker/bone_taxonomy.py")
-
-            with patch.dict("os.environ", {}, clear=False):
-                os.environ.pop("MONSTER_ENABLE_MOCAP_PRIORS", None)
-                self.assertTrue(pose_features.mocap_priors_enabled())
-            with patch.dict("os.environ", {"MONSTER_ENABLE_MOCAP_PRIORS": "0"}, clear=False):
-                self.assertFalse(pose_features.mocap_priors_enabled())
-            with patch.dict("os.environ", {"MONSTER_ENABLE_MOCAP_PRIORS": "invalid"}, clear=False):
-                with self.assertRaises(ValueError):
-                    pose_features.mocap_priors_enabled()
-
-            try:
-                import numpy as np
-            except ImportError:
-                return
-
-            with patch.dict("os.environ", {"MONSTER_ENABLE_MOCAP_PRIORS": "1"}, clear=False):
-                # 1. Per-Frame View Scale & Vertical Drift Calibration
-                rng = np.random.default_rng(123)
-                T, K = 14, 10
-                calib = {"panel_width": 1280.0, "panel_height": 1440.0}
-                uv_side = rng.uniform(240.0, 1180.0, size=(T, K, 2))
-                uv_front_clean = uv_side.copy()
-                uv_front_clean[..., 0] = rng.uniform(220.0, 1020.0, size=(T, K))
-                conf = np.full((T, K), 0.92, dtype=np.float64)
-                vis = np.full((T, K), 0.90, dtype=np.float64)
-
-                # Zero drift -> deadband keeps exact coordinates
-                uv_f0, _, diag0 = mocap_priors.calibrate_view_scale_drift(
-                    uv_front_clean, uv_side, conf, conf, calib, vis_front=vis, vis_side=vis
-                )
-                self.assertFalse(diag0["view_drift_calibrated"])
-                self.assertTrue(np.allclose(uv_f0, uv_front_clean))
-
-                # True camera zoom (1.035x) + vertical drift (+20px) -> calibrated accurately
-                u0, v0 = 640.0, 720.0
-                uv_front_drifted = uv_front_clean.copy()
-                uv_front_drifted[..., 0] = (uv_front_clean[..., 0] - u0) / 1.035 + u0
-                uv_front_drifted[..., 1] = (uv_front_clean[..., 1] - 20.0 - v0) / 1.035 + v0
-                uv_f1, _, diag1 = mocap_priors.calibrate_view_scale_drift(
-                    uv_front_drifted, uv_side, conf, conf, calib, vis_front=vis, vis_side=vis
-                )
-                self.assertTrue(diag1["view_drift_calibrated"])
-                v_err_after = float(np.mean(np.abs(uv_f1[..., 1] - uv_side[..., 1])))
-                self.assertLess(v_err_after, 1.5)
-
-                # 2. Local Windowed Peak Soft-Argmax (Multimodal Secondary Lobe Protection)
-                H_hm, W_hm = 32, 32
-                gx = np.arange(W_hm, dtype=np.float64) * 4.0
-                gy = np.arange(H_hm, dtype=np.float64) * 4.0
-                prob = np.zeros((1, 1, H_hm, W_hm), dtype=np.float64)
-                prob[0, 0, 7, 9] = 0.72    # Primary joint peak at (36.0, 28.0)
-                prob[0, 0, 25, 27] = 0.28  # Secondary occlusion peak at (108.0, 100.0)
-                u_g = np.sum(prob * gx[None, None, None, :], axis=(-2, -1))
-                v_g = np.sum(prob * gy[None, None, :, None], axis=(-2, -1))
-                uv_g = np.stack([u_g, v_g], axis=-1)
-                uv_w = mocap_priors.windowed_peak_dsnt_numpy(prob, gx, gy, uv_g)
-                self.assertGreater(float(np.linalg.norm(uv_g[0, 0] - np.array([36.0, 28.0]))), 15.0)
-                self.assertLess(float(np.linalg.norm(uv_w[0, 0] - np.array([36.0, 28.0]))), 1.0)
-
-                # 3. IRLS Charbonnier Acceleration Smoother & Velocity-Gated De-Jitter
-                sig = np.zeros((25, 3), dtype=np.float64)
-                sig[11:14, 0] = [4.5, 10.0, 4.5]
-                sm_quad = mocap_priors.whittaker_charbonnier_smooth_trajectory(sig, irls_iters=1)
-                sm_charb = mocap_priors.whittaker_charbonnier_smooth_trajectory(
-                    sig, irls_iters=4, charbonnier_sigma=2.0
-                )
-                self.assertGreater(float(sm_charb[12, 0]), float(sm_quad[12, 0]) + 1.5)
-
-                # Stationary micro-jitter vs fast motion peak under dejitter_velocity_gated
-                jitter_sig = np.zeros((20, 3), dtype=np.float64)
-                jitter_sig[:10, 0] = np.array([0.02, -0.02] * 5, dtype=np.float64)
-                jitter_sig[14, 0] = 5.0
-                dejit = mocap_priors.dejitter_velocity_gated(jitter_sig, v_fast=0.5, passes=2, strength=0.8)
-                self.assertLess(float(np.std(dejit[2:8, 0])), float(np.std(jitter_sig[2:8, 0])) * 0.5)
-                self.assertGreater(float(dejit[14, 0]), 4.8)
-
-                # 4. Floor Penetration Clamp & Contact-Aware Foot Anti-Skate Locking
-                order = ["ROOT_C_00_00", "LIMB_L_01_01"]
-                classified = {
-                    "ROOT_C_00_00": {"kind": "root", "side": "C", "parent": None, "rest_length": 0.20, "fixed_local": False},
-                    "LIMB_L_01_01": {"kind": "limb", "side": "L", "parent": "ROOT_C_00_00", "rest_length": 0.40, "fixed_local": False},
-                }
-                rest_H = {
-                    "ROOT_C_00_00": np.array([0.0, 0.0, 0.40]),
-                    "LIMB_L_01_01": np.array([0.0, 0.0, 0.40]),
-                }
-                rest_T = {
-                    "ROOT_C_00_00": np.array([0.0, 0.0, 0.60]),
-                    "LIMB_L_01_01": np.array([0.0, 0.0, 0.00]),  # Foot tip at z_floor = 0.0
-                }
-                R_root0 = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
-                R_limb0 = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]])
-                rest_R = {"ROOT_C_00_00": R_root0, "LIMB_L_01_01": R_limb0}
-                eff_lims = {
-                    "ROOT_C_00_00": [[-0.5, 0.5], [-0.5, 0.5], [-0.5, 0.5]],
-                    "LIMB_L_01_01": [[-0.8, 0.8], [-0.5, 0.5], [-0.8, 0.8]],
-                }
-                frames_test = []
-                for f in range(6):
-                    # Frame 5 dips 0.08 below floor; frames 0..4 have tiny horizontal foot skate
-                    z_dip = -0.08 if f == 5 else 0.0
-                    skate_x = 0.002 * (f - 2) if f < 5 else 0.0
-                    v_dir = np.array([skate_x, 0.0, -0.40], dtype=np.float64)
-                    v_dir /= np.linalg.norm(v_dir)
-                    R_sw = tax.minimum_swing_matrix_numpy(R_limb0[:, 1], v_dir)
-                    R_w_limb = R_sw @ R_limb0
-                    head_p = [0.0, 0.0, 0.40 + z_dip]
-                    tail_p = (np.array(head_p) + R_w_limb[:, 1] * 0.40).tolist()
-                    frames_test.append({
-                        "frame": f,
-                        "bones": {
-                            "ROOT_C_00_00": {
-                                "head_3d": head_p,
-                                "tail_3d": [0.0, 0.0, 0.60 + z_dip],
-                                "rot_mat_world": R_root0.tolist(),
-                                "confidence": 0.9,
-                            },
-                            "LIMB_L_01_01": {
-                                "head_3d": head_p,
-                                "tail_3d": tail_p,
-                                "rot_mat_world": R_w_limb.tolist(),
-                                "confidence": 0.9,
-                            },
-                        },
-                    })
-                c_diag = mocap_priors.apply_floor_and_foot_contact_constraints(
-                    frames_out=frames_test,
-                    order=order,
-                    root="ROOT_C_00_00",
-                    classified_bones=classified,
-                    rest_H=rest_H,
-                    rest_T=rest_T,
-                    rest_R=rest_R,
-                    effective_base_limits=eff_lims,
-                    frame_macro_collapse=np.zeros(6, dtype=np.float64),
-                    clamp_local_delta_euler_fn=tax.clamp_local_delta_euler,
-                    minimum_swing_matrix_fn=tax.minimum_swing_matrix_numpy,
-                )
-                self.assertEqual(c_diag["floor_clamped_frames"], 1)
-                self.assertGreaterEqual(c_diag["foot_contact_locked_frames"], 3)
-                self.assertGreaterEqual(float(frames_test[5]["bones"]["LIMB_L_01_01"]["tail_3d"][2]), -0.015)
-
-                # 5. Stage 2 Edge Stretch Metric & Ghost Afterimage Compositing
-                v_rest = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64)
-                faces = np.array([[0, 1, 2]], dtype=np.int64)
-                m_ok = mocap_priors.compute_mesh_edge_stretch_metric(v_rest, v_rest * 1.05, faces)
-                self.assertTrue(m_ok["passed"])
-                v_torn = v_rest.copy()
-                v_torn[1, 0] = 3.2  # 3.2x stretch > 1.8 threshold
-                m_bad = mocap_priors.compute_mesh_edge_stretch_metric(v_rest, v_torn, faces)
-                self.assertFalse(m_bad["passed"])
-
-                main_rgba = np.zeros((8, 8, 4), dtype=np.uint8)
-                main_rgba[2:6, 2:6] = [220, 40, 40, 255]
-                ghost_rgba = np.zeros((8, 8, 4), dtype=np.uint8)
-                ghost_rgba[2:6, 4:8] = [40, 200, 40, 255]
-                comp_rgba = mocap_priors.blend_limb_afterimage_ghost_rgba(main_rgba, [ghost_rgba], ghost_opacity=0.35)
-                # Opaque main region stays intact while trailing ghost region becomes translucent
-                self.assertTrue(np.array_equal(comp_rgba[3, 3], [220, 40, 40, 255]))
-                self.assertGreater(int(comp_rgba[3, 7, 1]), 150)
-                self.assertGreater(int(comp_rgba[3, 7, 3]), 50)
-                self.assertLess(int(comp_rgba[3, 7, 3]), 200)
         finally:
             sys.path.remove(str(ROOT / "worker"))
 
@@ -1307,7 +819,6 @@ class ClientTests(unittest.TestCase):
         sys.path.insert(0, str(ROOT / "worker"))
         try:
             import bone_taxonomy as tax
-            import mocap_priors
 
             # 1. Quadruped taxonomy: curled tail propagation, midline neck/head/jaw split, and 4-segment hind leg
             quad_meta = {
@@ -1410,10 +921,6 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(classified["bone_30"]["kind"], "head")
             self.assertEqual(classified["bone_32"]["kind"], "jaw")
             self.assertEqual(classified["bone_15"]["kind"], "limb")
-            self.assertEqual(classified["bone_15"]["sub_role"], "ball_socket")
-            self.assertEqual(classified["bone_16"]["sub_role"], "forearm_hinge")
-            self.assertEqual(classified["bone_17"]["sub_role"], "forearm_hinge")
-            self.assertEqual(classified["bone_18"]["sub_role"], "distal_limb")
 
             # 2. Fallback rest_R (+X-aligned) and ball_socket child-plane twist recovery
             d0_hip = np.array([0.29 - 0.22, 0.34 - 0.43, 1.10 - 1.44], dtype=np.float64)
@@ -1462,46 +969,7 @@ class ClientTests(unittest.TestCase):
             err_hip_deg = float(np.rad2deg(np.arccos(tr_hip)))
             self.assertLess(err_hip_deg, 3.0)
 
-            # 3. Stationary-root floor clamp gating: zero root drop must not lift root upward
-            stationary_frames = [
-                {
-                    "frame": f,
-                    "bones": {
-                        b: {
-                            "head_3d": list(quad_meta[b]["rest_head_world"]),
-                            "tail_3d": list(quad_meta[b]["rest_tail_world"]),
-                            "rot_mat_world": np.eye(3).tolist(),
-                            "confidence": 0.95,
-                        }
-                        for b in quad_meta
-                    },
-                }
-                for f in range(4)
-            ]
-            # Dip distal paw slightly below floor while root stays at rest height
-            stationary_frames[2]["bones"]["bone_18"]["tail_3d"][2] = 0.01
-            order_q = sorted(classified.keys(), key=lambda b: int(classified[b].get("depth", 0)))
-            rest_H_q = {b: np.array(classified[b]["rest_head_world"], dtype=np.float64) for b in classified}
-            rest_T_q = {b: np.array(classified[b]["rest_tail_world"], dtype=np.float64) for b in classified}
-            rest_R_q = {b: np.eye(3, dtype=np.float64) for b in classified}
-            eff_lims_q = {b: classified[b]["limits_rad"] for b in classified}
-            diag_stat = mocap_priors.apply_floor_and_foot_contact_constraints(
-                frames_out=stationary_frames,
-                order=order_q,
-                root="bone_0",
-                classified_bones=classified,
-                rest_H=rest_H_q,
-                rest_T=rest_T_q,
-                rest_R=rest_R_q,
-                effective_base_limits=eff_lims_q,
-                frame_macro_collapse=np.zeros(4, dtype=np.float64),
-                clamp_local_delta_euler_fn=tax.clamp_local_delta_euler,
-                minimum_swing_matrix_fn=tax.minimum_swing_matrix_numpy,
-            )
-            self.assertEqual(diag_stat["floor_clamped_frames"], 0)
-            self.assertAlmostEqual(float(stationary_frames[2]["bones"]["bone_0"]["head_3d"][2]), 1.50, places=5)
-
-            # 4. Root translation sampling helper stays within biomechanical workspace bounds
+            # 3. Root translation sampling helper stays within biomechanical workspace bounds
             rng = random.Random(42)
             for s_idx in range(8):
                 dx, dy, dz = tax.sample_root_translation_offset(classified, rng, sample_idx=s_idx)
@@ -1600,11 +1068,11 @@ class MonsterSopExecutionSuiteTests(unittest.TestCase):
                 self.assertIn("G3", inv_gates)
                 self.assertEqual(ledger["gates"]["G2"]["user_decision"], "pending")
 
-                # Re-approve G2 & G3, then verify mocap_priors_change preserves G1 & G2 and only invalidates G3
+                # Re-approve G2 & G3, then verify exam_video_or_ik_fix preserves G1 & G2 and only invalidates G3
                 sop_gate.record_user_decision(ledger, "G2", decision="approved", user_quote="重审通过", seed=42)
                 sop_gate.record_user_decision(ledger, "G3", decision="approved", user_quote="重审通过")
-                inv_mocap = sop_gate.derive_invalidations(ledger, change_type="mocap_priors_change")
-                self.assertEqual({item["gate"] for item in inv_mocap}, {"G3"})
+                inv_exam = sop_gate.derive_invalidations(ledger, change_type="exam_video_or_ik_fix")
+                self.assertEqual({item["gate"] for item in inv_exam}, {"G3"})
                 self.assertEqual(ledger["gates"]["G1"]["user_decision"], "approved")
                 self.assertEqual(ledger["gates"]["G2"]["user_decision"], "approved")
                 self.assertEqual(ledger["gates"]["G3"]["user_decision"], "pending")

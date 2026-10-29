@@ -66,7 +66,6 @@ from pose_features import (  # noqa: E402
     features_enabled,
     fold_digits_enabled,
     keypoint_mode,
-    mocap_priors_enabled,
     no_cut_tracks_enabled,
     panel_drift_enabled,
     pipeline_mode,
@@ -134,7 +133,6 @@ def current_studio_config_snapshot(env: dict[str, str] | None = None) -> dict[st
             "enable_3view": three_view_enabled(),
             "depth_visibility": features_enabled(),
             "dense_surface": dense_surface_enabled(),
-            "mocap_priors": mocap_priors_enabled(),
             "pipeline_mode": pipeline_mode(),
             "rig_contract_v3": rig_contract_v3_enabled(),
             "fold_digits": fold_digits_enabled(),
@@ -157,9 +155,7 @@ def current_studio_config_snapshot(env: dict[str, str] | None = None) -> dict[st
 
 
 def dataset_config_signature(cfg: dict[str, Any]) -> str:
-    """Signature of studio parameters that require re-synthesizing dataset & re-training DINOv2.
-    Note: `mocap_priors` is an inference/kinematic solver prior and does NOT alter dataset_signature!
-    """
+    """Signature of studio parameters that require re-synthesizing dataset & re-training DINOv2."""
     core = {
         "camera_lens": cfg.get("camera_lens", "0"),
         "camera_layout": cfg.get("camera_layout", "horizontal"),
@@ -313,7 +309,6 @@ def derive_invalidations(
       - `resolution_or_view_mode_change`: Preserves G1 and G2; invalidates dataset, checkpoint, G3, final_batch.
       - `dense_surface_enabled_0_to_1`: Preserves G1 and G2; invalidates dataset, checkpoint, G3, final_batch.
       - `dense_surface_disabled_1_to_0`: Preserves G1, G2, dataset, and checkpoint; only invalidates G3 for re-exam.
-      - `mocap_priors_change`: Preserves G1, G2, dataset, and checkpoint; only invalidates G3 for re-exam.
       - `exam_video_or_ik_fix`: Preserves G1, G2, dataset, and checkpoint; only invalidates G3 for re-exam.
       - `action_prompt_or_seed_change`: Preserves G1, G2, G3; only invalidates final_batch.
     """
@@ -344,7 +339,7 @@ def derive_invalidations(
         mark(["G3", "final_batch"], "目标最高分辨率档位（MONSTER_ENABLE_2K）或视角模式（MONSTER_ENABLE_3VIEW）变更，旧训练集/checkpoint/G3 失效（保留 G1/G2）")
     elif change_type in ("dense_surface_enabled_0_to_1", "reader_label_contract_change"):
         mark(["G3", "final_batch"], "稠密表面坐标与可微 LBS 开关从 0 开启为 1，dataset_signature 变更，需重合成标签、训练 dense_head 并重考 G3（保留 G1/G2）")
-    elif change_type in ("dense_surface_disabled_1_to_0", "mocap_priors_change", "exam_video_or_ik_fix"):
+    elif change_type in ("dense_surface_disabled_1_to_0", "exam_video_or_ik_fix"):
         mark(["G3", "final_batch"], f"仅运动学求解器/考试链路变更 ({change_type})，兼容现有数据集与 dinov2_head.pt，仅需重考 G3（保留 G1/G2/checkpoint）")
     elif change_type == "action_prompt_or_seed_change":
         mark(["final_batch"], "仅修改生产动作规格、提示词或动作 seed（保留 G1/G2/G3，仅重审对应动作批次）")
@@ -411,12 +406,6 @@ def derive_invalidations(
                 ["G3", "final_batch"],
                 "MONSTER_ENABLE_DENSE_SURFACE 从 1 回退为 0，无需重训权重，但需重跑 G3 考试确认纯关键点解析解表现",
             )
-        if old_cfg.get("mocap_priors") is not None and cur_cfg.get("mocap_priors") is not None:
-            if bool(old_cfg.get("mocap_priors")) != bool(cur_cfg.get("mocap_priors")):
-                mark(
-                    ["G3", "final_batch"],
-                    "MONSTER_ENABLE_MOCAP_PRIORS 开关变更，不改变数据集签名且兼容已有 dinov2_head.pt，仅失效 G3 需重考",
-                )
         if old_cfg.get("pipeline_mode") is not None and cur_cfg.get("pipeline_mode") is not None:
             if old_cfg.get("pipeline_mode") != cur_cfg.get("pipeline_mode"):
                 mark(
@@ -464,7 +453,7 @@ def derive_invalidations(
 
 
 def verify_rig_meta_canonical_bones(rig_meta_path: Path | str) -> dict[str, Any]:
-    """Hard gate verifying that `studio_rig_meta.json` has 100% canonical bone names (`<KIND>_<SIDE>_<GROUP>_<INDEX>`)."""
+    """Hard gate verifying that `studio_rig_meta.json` has 100% canonical bone names (`monster-bone-taxonomy-v3`)."""
     p = Path(rig_meta_path)
     if not p.is_file():
         return {"valid": False, "error": f"studio_rig_meta.json not found: {p}", "non_canonical_bones": []}
@@ -559,6 +548,24 @@ def verify_review_materials(ledger: dict[str, Any], ginfo: dict[str, Any], gate:
         raise RuntimeError(reason)
 
 
+def verify_g1_review_materials(ginfo: dict[str, Any]) -> None:
+    """New candidate-video submissions bind their report; legacy approvals stay readable."""
+    materials = ginfo.get("materials") or {}
+    if not materials.get("presentation_contract"):
+        return
+    from sop_g1_pack import validate_g1_evidence
+
+    report_path = Path(materials.get("g1_report_json", ""))
+    if not report_path.is_file() or sha256_file(report_path) != materials.get("g1_report_sha256"):
+        raise RuntimeError("G1 候选视频报告已改变或缺失，请重建并审查当前材料")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if report.get("presentation_contract") != materials["presentation_contract"]:
+        raise RuntimeError("G1 报告与审阅材料的候选视频契约不一致")
+    if Path(report.get("review_html", "")).resolve() != Path(ginfo.get("review_pack_path", "")).resolve():
+        raise RuntimeError("G1 报告与实际审阅入口不一致")
+    validate_g1_evidence(report)
+
+
 def mark_awaiting_review(
     ledger: dict[str, Any],
     gate: str,
@@ -586,6 +593,9 @@ def mark_awaiting_review(
         derive_invalidations(ledger, new_fingerprints=fingerprints)
 
     if gate == "G1":
+        if materials.get("presentation_contract"):
+            materials["g1_report_sha256"] = sha256_file(materials.get("g1_report_json", ""))
+            verify_g1_review_materials({"materials": materials, "review_pack_path": review_pack_path})
         # G1 requires canonical bone naming verification on all candidate rigs or the target rig_meta
         mats = materials or {}
         meta_p = mats.get("rig_meta_path")
@@ -594,7 +604,7 @@ def mark_awaiting_review(
             if not bone_check.get("valid"):
                 raise ValueError(
                     f"G1 硬门禁阻断：存在未规范命名的匿名骨骼 {bone_check.get('non_canonical_bones')}，"
-                    "必须先完成 <KIND>_<SIDE>_<GROUP>_<INDEX> 强制重命名并通过 validate_canonical_rig_bone_names！"
+                    "必须先完成解剖学骨骼规范重命名并通过 validate_canonical_rig_bone_names！"
                 )
         for blend_p in mats.get("candidate_blends") or []:
             bp = Path(blend_p)
@@ -652,6 +662,7 @@ def record_user_decision(
 
     if decision == "approved":
         if gate == "G1":
+            verify_g1_review_materials(ginfo)
             cand_id = selected_candidate_id if selected_candidate_id is not None else ginfo.get("selected_candidate_id")
             if cand_id is None or str(cand_id).strip() == "":
                 raise ValueError("G1 通过时必须指定唯一的 selected_candidate_id")
@@ -740,6 +751,7 @@ def assert_gate(ledger: dict[str, Any], required_gate: str) -> dict[str, Any]:
                 f"[SOP 门禁拦截] 尚未通过 {g} 用户审计关卡（{reason}），严禁越级执行下游任务！"
             )
         if g == "G1":
+            verify_g1_review_materials(ginfo)
             bval = ginfo.get("bone_naming_validation", {})
             if not bval.get("valid"):
                 raise RuntimeError("[SOP 门禁拦截] G1 缺少有效的骨骼规范命名校验记录 (bone_naming_validation.valid != True)")
@@ -787,7 +799,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "dense_surface_enabled_0_to_1",
             "reader_label_contract_change",
             "dense_surface_disabled_1_to_0",
-            "mocap_priors_change",
             "exam_video_or_ik_fix",
             "action_prompt_or_seed_change",
         ),

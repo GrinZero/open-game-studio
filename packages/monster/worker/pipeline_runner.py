@@ -186,34 +186,17 @@ print("[SkinTokens Batch Runner] Completed all candidates with Beam Search + Vox
 
 
 def run_stage1_skintokens_candidates(input_glb: Path, cand_dir: Path, num_candidates: int = 4) -> list[Path]:
-    """Pre-sanitizes the input `.glb` (applying transforms, outward normals, centering, and optional
-    yaw alignment) and runs VAST-AI SkinTokens (`num_beams=10`, `use_postprocess=True`, `use_transfer=True`)
-    across 4 stochastic seeds.
-    """
+    """Prepares sanitized proxy mesh and runs VAST-AI SkinTokens across 4 stochastic seeds."""
     cand_dir.mkdir(parents=True, exist_ok=True)
     bpy_worker = Path(__file__).resolve().parent / "studio_bpy_worker.py"
     py_bpy = resolve_bpy_python()
 
-    sanitized_glb = cand_dir / "_sanitized_input.glb"
-    if not sanitized_glb.exists() and bpy_worker.exists():
-        try:
-            run_cmd(
-                [
-                    py_bpy,
-                    str(bpy_worker),
-                    "--mode",
-                    "sanitize_input",
-                    "--input_glb",
-                    str(input_glb.resolve()),
-                    "--out_glb",
-                    str(sanitized_glb.resolve()),
-                ]
-            )
-        except Exception as exc:
-            print(f"[Mesh Sanitizer Warning] Falling back to raw input GLB: {exc}")
-            shutil.copy2(input_glb, sanitized_glb)
-    elif not sanitized_glb.exists():
-        shutil.copy2(input_glb, sanitized_glb)
+    sanitized_glb = cand_dir / "sanitized_input.glb"
+    if not sanitized_glb.is_file():
+        if not bpy_worker.is_file():
+            raise FileNotFoundError("Blender worker is missing")
+        run_cmd([py_bpy, str(bpy_worker), "--mode", "sanitize_input",
+                 "--input_glb", str(input_glb.resolve()), "--out_glb", str(sanitized_glb.resolve())])
 
     candidates = [cand_dir / f"candidate_{i}.glb" for i in range(num_candidates)]
     repo_dir = SKINTOKENS_ROOT / "upstream"
@@ -239,13 +222,19 @@ def run_stage1_skintokens_candidates(input_glb: Path, cand_dir: Path, num_candid
             )
 
     for c in candidates:
-        if c.exists():
-            summary = validate_rigged_glb_binary(c)
-            print(f"[Stage 1 GLB Verified] {summary}")
+        summary = validate_rigged_glb_binary(c)
+        print(f"[Stage 1 GLB Verified] {summary}")
+
     return candidates
 
 
-def register_new_monster(monster_id: str, input_glb: Path, num_synth: int = 5000, epochs: int = 15) -> None:
+def register_new_monster(
+    monster_id: str,
+    input_glb: Path,
+    num_synth: int = 5000,
+    epochs: int = 15,
+    skinning_mode: str | None = None,
+) -> None:
     """Executes Phase A (Stages 1-4) for a new 3D monster asset and archives outputs to Google Drive."""
     free_comfyui_vram()
 
@@ -270,20 +259,22 @@ def register_new_monster(monster_id: str, input_glb: Path, num_synth: int = 5000
 
     # Stage 1: Sanitize mesh + Generate 4 SkinTokens candidates + Geometric Audit + Chord/Finger Pruning
     cands = run_stage1_skintokens_candidates(archived_input, monster_work / "candidates", num_candidates=4)
-    run_cmd(
-        [
-            py_bpy,
-            str(bpy_worker),
-            "--mode",
-            "audit",
-            "--candidates",
-            *[str(c) for c in cands],
-            "--blend_path",
-            str(blend_path),
-            "--meta_path",
-            str(meta_path),
-        ]
-    )
+    audit_cmd = [
+        py_bpy,
+        str(bpy_worker),
+        "--mode",
+        "audit",
+        "--candidates",
+        *[str(c) for c in cands],
+        "--blend_path",
+        str(blend_path),
+        "--meta_path",
+        str(meta_path),
+    ]
+    resolved_skinning_mode = skinning_mode or os.environ.get("MONSTER_SKINNING_MODE")
+    if resolved_skinning_mode:
+        audit_cmd.extend(["--skinning_mode", resolved_skinning_mode])
+    run_cmd(audit_cmd)
     if not limits_path.exists():
         run_cmd(
             [
@@ -1032,6 +1023,7 @@ def main() -> None:
     p_reg.add_argument("--input_glb", required=True, type=Path)
     p_reg.add_argument("--num_synth", type=int, default=5000)
     p_reg.add_argument("--epochs", type=int, default=15)
+    p_reg.add_argument("--skinning_mode", choices=["bone_heat", "skintokens"], default=None)
 
     p_re = sub.add_parser("reexam", help="Fast Stage 4 Re-Exam & Swing+Twist GLB Round-Trip (0 retraining)")
     p_re.add_argument("--monster_id", required=True)
@@ -1045,7 +1037,7 @@ def main() -> None:
 
     args = parser.parse_args()
     if args.cmd == "register":
-        register_new_monster(args.monster_id, args.input_glb, args.num_synth, args.epochs)
+        register_new_monster(args.monster_id, args.input_glb, args.num_synth, args.epochs, skinning_mode=args.skinning_mode)
     elif args.cmd == "reexam":
         reexam_existing_monster(args.monster_id, args.rerender_exam)
     elif args.cmd == "animate":

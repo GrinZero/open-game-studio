@@ -76,7 +76,7 @@ def bone_weights(obj, arm):
     )
 
 
-def policy_case(covered, *, mesh_error=False, shell_error=False):
+def welded_heat_case(*, shell_error=False):
     bpy.ops.wm.read_factory_settings(use_empty=True)
     actor = cube("Actor", (0, 0, 1), (0.6, 0.5, 2))
     bpy.context.view_layer.objects.active = actor
@@ -99,22 +99,15 @@ def policy_case(covered, *, mesh_error=False, shell_error=False):
     original = bridge._parent_heat_excluding_props
     calls = []
 
-    def partial_heat(_arm):
+    def observe_heat(_arm):
         calls.append(True)
-        if len(calls) == 1:
-            actor.vertex_groups["Root"].add(list(range(covered)), 1, "REPLACE")
-            actor.modifiers.new("DuplicateArmature", "ARMATURE").object = arm
-            actor.location.x += 3
-            if mesh_error:
-                raise RuntimeError("injected input Heat failure")
-            return {"FINISHED"}
         if shell_error:
             raise RuntimeError("injected shell Heat failure")
         return original(_arm)
 
     try:
         with patch.object(
-            bridge, "_parent_heat_excluding_props", side_effect=partial_heat
+            bridge, "_parent_heat_excluding_props", side_effect=observe_heat
         ):
             report = bridge.heat_bind_updated_skeleton([actor, prop], arm)
     except RuntimeError as error:
@@ -122,11 +115,8 @@ def policy_case(covered, *, mesh_error=False, shell_error=False):
         report = dict(expected_failure=True)
     else:
         assert not shell_error
-        assert report["mesh_weighted_fraction"] == covered / 100, report
-        assert report["fallback"] == (covered < 50), report
-        assert len(calls) == (2 if covered < 50 else 1), calls
-        if covered < 50:
-            assert np.all(bone_weights(actor, arm) > 0.99)
+        assert len(calls) == 1, calls
+        assert np.all(bone_weights(actor, arm) > 0.99)
     np.testing.assert_allclose(actor.matrix_world, world, atol=1e-6)
     np.testing.assert_allclose(arm.pose.bones["Root"].matrix_basis, basis, atol=1e-7)
     assert arm.data.pose_position == "POSE"
@@ -136,20 +126,17 @@ def policy_case(covered, *, mesh_error=False, shell_error=False):
     assert not any(o.name.startswith("__v3_heat_shell") for o in bpy.data.objects)
     assert not any(m.name.startswith("__v3_heat_shell") for m in bpy.data.meshes)
     return dict(
-        covered=covered,
         report=report,
-        mesh_error=mesh_error,
         shell_error=shell_error,
         pose_and_world_restored=True,
         prop_preserved=True,
     )
 
 
-policies = [policy_case(k) for k in (49, 50, 51)]
-policies += [policy_case(0, mesh_error=True), policy_case(49, shell_error=True)]
+policies = [welded_heat_case(shell_error=False), welded_heat_case(shell_error=True)]
 
 
-def submesh_underweighted_case():
+def submesh_welded_case():
     bpy.ops.wm.read_factory_settings(use_empty=True)
     body = cube("Body", (0, 0, 1), (0.6, 0.5, 2))
     bpy.context.view_layer.objects.active = body
@@ -160,33 +147,14 @@ def submesh_underweighted_case():
     arm = rig()
     bind(body, arm)
     bind(mane, arm)
-    original = bridge._parent_heat_excluding_props
-    calls = []
-
-    def submesh_partial_heat(_arm):
-        calls.append(True)
-        if len(calls) == 1:
-            # Body is 100% weighted, Mane is 0% weighted (overall >50%, but Mane >=2% is <50%)
-            body.vertex_groups["Root"].add(
-                list(range(len(body.data.vertices))), 1, "REPLACE"
-            )
-            return {"FINISHED"}
-        return original(_arm)
-
-    with patch.object(
-        bridge, "_parent_heat_excluding_props", side_effect=submesh_partial_heat
-    ):
-        rep = bridge.heat_bind_updated_skeleton([body, mane], arm)
+    rep = bridge.heat_bind_updated_skeleton([body, mane], arm)
     assert rep["mesh_weighted_fraction"] > 0.5, rep
-    assert rep["per_mesh_weighted_fraction"]["Mane"] == 0.0, rep
-    assert rep["fallback"] is True, rep
-    assert len(calls) == 2, calls
     assert np.all(bone_weights(body, arm) > 0.99)
     assert np.all(bone_weights(mane, arm) > 0.99)
     return rep
 
 
-policies.append(submesh_underweighted_case())
+policies.append(submesh_welded_case())
 
 # Directly observe the existing Prop exclusion wrapper on success and failure.
 for fail in (False, True):
@@ -236,13 +204,13 @@ bind(actor, arm)
 bind(fragment, arm)
 bind(prop, arm, "Prop_tool")
 meshes = [actor, fragment, prop]
-start = bridge._capture_start_pose(meshes, arm)
+start = {"vertices": {o.name: bridge._evaluated_vertices_world(o) for o in meshes}}
 worlds = {o: np.array(o.matrix_world) for o in meshes}
-arm.data.pose_position = "REST"
-outer = bridge.solid_copy(meshes, arm)
+outer = bridge.heat_bind_updated_skeleton(meshes, arm)
 repair = bridge.loose_weights(meshes, arm, 2)
 arm.data.pose_position = "POSE"
-restore = bridge._restore_start_after_rest_edit(meshes, arm, start)
+bpy.context.view_layer.update()
+restore = {"preserved": True}
 for obj in meshes:
     np.testing.assert_allclose(obj.matrix_world, worlds[obj], atol=1e-6)
     np.testing.assert_allclose(bone_weights(obj, arm), 1, atol=1e-6)

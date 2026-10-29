@@ -158,11 +158,11 @@ flowchart TB
 
 ### Phase 6：视频生成禁特效/慢动作、第 0 帧三大自动校准、2-Pass 移动窗口/时序上下文与 8x TTA 推理（B4~B5 + C1.1/C1.2）
 
-#### [MODIFY] [`packages/monster/worker/pipeline_runner.py`](../../packages/monster/worker/pipeline_runner.py), [`mocap_priors.py`](../../packages/monster/worker/mocap_priors.py), [`dinov2_pose_trainer.py`](../../packages/monster/worker/dinov2_pose_trainer.py)
+#### [MODIFY] [`packages/monster/worker/pipeline_runner.py`](../../packages/monster/worker/pipeline_runner.py), [`pose_features.py`](../../packages/monster/worker/pose_features.py), [`dinov2_pose_trainer.py`](../../packages/monster/worker/dinov2_pose_trainer.py)
 1. **视频生成 Prompt 自动禁烟尘/刀光尾句（`NO_EFFECTS`）与慢动作生成 + `time_scale` 倍速回放（B5）**：
    - 在 [`pipeline_runner.py:build_split_screen_prompt`](../../packages/monster/worker/pipeline_runner.py) 中默认追加 `NO_EFFECTS` 禁视觉特效约束；支持 `slow_motion_scale` 半速生成与 `time_scale` 倍速烘焙。
 2. **第 0 帧接触阴影剥离（`learn_shadow`）、第 0 帧双向 Chamfer + IoU 6-DoF 相机重对齐（`align`）与 DIS 光流抽帧节奏检测（`cadence`）（B5）**：
-   - 在 [`mocap_priors.py`](../../packages/monster/worker/mocap_priors.py) 中合入 `learn_frame0_shadow_table`、`align_frame0_camera_chamfer` 与 `detect_video_cadence_optical_flow`。
+   - 在 [`pose_features.py`](../../packages/monster/worker/pose_features.py) 中合入 `learn_frame0_shadow_table`、`align_frame0_camera_chamfer` 与 `detect_video_cadence_optical_flow`。
 3. **2-Pass 动态移动窗口读取（C1.1）+ 2-Pass 时序上下文读取（C1.2）+ 8x TTA 热图逆变换平均推理（B4）**：
    - 在 [`dinov2_pose_trainer.py:infer_dual_view_frames`](../../packages/monster/worker/dinov2_pose_trainer.py) 中完整实现：
      - **2-Pass 动态移动窗口缩放（C1.1）**：当启用动态窗口时，Pass 1 全面板粗读定位每帧生物可见核心点中心，经时序平滑后在 Pass 2 裁剪 `1.12 × p95_extent` 移动窗口放大至 `448×448` 精读，并将窗口内坐标映射回全面板像素；
@@ -173,9 +173,9 @@ flowchart TB
 
 ### Phase 7：Viterbi 左右消歧、逐帧多起点 Cauchy 2D 重投影最小二乘求解器、弹簧/踏步后处理与 SOP 门禁（B6~B8 + C1.3）
 
-#### [MODIFY] [`mocap_priors.py`](../../packages/monster/worker/mocap_priors.py), [`bone_taxonomy.py`](../../packages/monster/worker/bone_taxonomy.py), [`studio_bpy_worker.py`](../../packages/monster/worker/studio_bpy_worker.py), [`packages/monster/skills/monster-workflow/scripts/*`](../../packages/monster/skills/monster-workflow/scripts)
+#### [MODIFY] [`pose_features.py`](../../packages/monster/worker/pose_features.py), [`bone_taxonomy.py`](../../packages/monster/worker/bone_taxonomy.py), [`studio_bpy_worker.py`](../../packages/monster/worker/studio_bpy_worker.py), [`packages/monster/skills/monster-workflow/scripts/*`](../../packages/monster/skills/monster-workflow/scripts)
 1. **多视图左右双生肢体消歧与长短遮挡预处理管线（B6）**：
-   - 在 [`mocap_priors.py`](../../packages/monster/worker/mocap_priors.py) 中按序执行：
+   - 在 [`pose_features.py`](../../packages/monster/worker/pose_features.py) 中按序执行：
      1. **`fix_twins_viterbi`**：利用正视图与侧视图的双视图正交/透视三角化残差对比「保持 vs 交换侧视图 `.L/.R` 肢体读数」，运行 **2 状态 Viterbi 动态规划**（切换代价 `6.0` 帧）全局纠正侧视图左右肢体互换；
      2. **`jump_pass_constant_velocity`**：基于前两帧常速外推 $2\mathbf{u}_{t-1} - \mathbf{u}_{t-2}$ 纠正单面板内的单帧左右跳变互换；
      3. **`downweight_overlapping_twins`（`twin_same`）**：侧视图中左右同名关节距离 $<0.06 H_{\text{px}}$ 时将两者置信度乘以 `0.4`；

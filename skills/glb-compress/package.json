@@ -1,0 +1,24 @@
+{
+  "name": "@open-game-studio/glb-compress-skill",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "compress": "node scripts/compress.mjs",
+    "test": "node --test scripts/*.test.mjs",
+    "package": "node scripts/package.mjs",
+    "recommend": "node scripts/recommend.mjs"
+  },
+  "dependencies": {
+    "@gltf-transform/core": "4.5.1",
+    "@gltf-transform/extensions": "4.5.1",
+    "@gltf-transform/functions": "4.5.1",
+    "draco3dgltf": "1.5.9",
+    "meshoptimizer": "1.3.0",
+    "sharp": "0.35.5"
+  }
+}

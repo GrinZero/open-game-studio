@@ -55,6 +55,20 @@ def nested_rig():
 
 
 class MotionRootTests(unittest.TestCase):
+    def test_small_weighted_digits_keep_channels_below_global_mass_cutoff(self):
+        meta, skin = nested_rig()
+        meta["Finger2_1.L"] = dict(
+            parent="Spine1", kind="digit", rest_head_world=[.2, 0, 1.3],
+            rest_tail_world=[.3, 0, 1.3], limits_rad=[[-1, 1], [0, 0], [-.2, .2]])
+        skin["bone_names"].append("Finger2_1.L")
+        # One small but real skin influence, below 0.4% of the full model.
+        skin["skin_indices"] = np.vstack([skin["skin_indices"], [[len(skin["bone_names"]) - 1]]])
+        skin["skin_weights"] = np.vstack([skin["skin_weights"], [[.001]]])
+        skin["rest_verts"] = np.vstack([skin["rest_verts"], [[.3, 0, 1.3]]])
+        rig = RigModel(meta, skin=skin)
+        self.assertIn("Finger2_1.L", rig.slices)
+        self.assertEqual(len(rig.slices["Finger2_1.L"][0]), 2)
+
     def test_nested_empty_ancestors_have_no_channels_and_hips_has_six(self):
         meta, skin = nested_rig()
         rig = RigModel(meta, skin=skin)

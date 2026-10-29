@@ -116,7 +116,9 @@ def _fit_structure(meta, skin=None):
             or "jaw_hinge" in meta.get(n, {})
             or int(np.count_nonzero(np.any((indices == i) & (weights > 0.3), axis=1))) >= 1
         )
-        if m <= 0.004 and not has_jaw_support:
+        # Small weighted parts (fingers, toes, eyelids) still deform the model.
+        # A whole-character mass cutoff silently freezes them in synthesis/fitting.
+        if m <= 0.0 and not has_jaw_support:
             continue
         while n in meta and n not in active:
             active.add(n)
@@ -282,12 +284,14 @@ class RigModel:
             pending.difference_update(ready)
         self.h = {n: np.asarray(meta[n]["rest_head_world"], float) for n in self.names}
         self.t = {n: np.asarray(meta[n]["rest_tail_world"], float) for n in self.names}
+        from rig_pose import rigid_rotation, rigid_pose_basis
+
         self.R = {
-            n: np.asarray(
+            n: rigid_rotation(
                 meta[n].get(
                     "rest_rot_mat_world", aligned_rest_rotation(self.h[n], self.t[n])
                 ),
-                float,
+                n,
             )
             for n in self.names
         }
@@ -304,7 +308,7 @@ class RigModel:
                 )
         active, self.motion_roots = _fit_structure(meta, skin)
         self.basis = {
-            n: np.asarray(meta[n].get("pose_basis", np.eye(4)), dtype=float)
+            n: rigid_pose_basis(meta[n].get("pose_basis", np.eye(4)), n)
             for n in self.names
         }
         self.slices = {}
@@ -333,7 +337,7 @@ class RigModel:
         self.extra = list(
             extra_points
             if extra_points is not None
-            else surface_keypoints(meta, self.names, skin)
+            else surface_keypoints(meta, self.names, skin, snap_to_vertices=True)
         )
         self.point_names = [
             n + "." + end for n in self.names for end in ("head", "tail")
@@ -354,7 +358,7 @@ class RigModel:
         ]
         self.held_guards = []
         self.floor = (
-            float(np.min(np.asarray(skin["rest_verts"])[:, 2]))
+            float(skin.get("floor_z", np.min(np.asarray(skin["rest_verts"])[:, 2])))
             if skin is not None
             else min(p[2] for p in list(self.h.values()) + list(self.t.values()))
         )
@@ -374,7 +378,7 @@ class RigModel:
                 d = self.t[n] - self.h[n]
                 L = np.dot(d, d)
                 bone_len = float(np.sqrt(max(L, 1e-10)))
-                if meta[n].get("kind") in ("root", "spine", "head"):
+                if meta[n].get("kind") in ("root", "spine", "head") and not n.startswith("Prop_"):
                     nearest = (
                         self.h[n]
                         + np.clip((pts - self.h[n]) @ d / max(L, 1e-10), 0, 1)[:, None] * d
@@ -468,7 +472,8 @@ class RigModel:
 
         matrices = start_pose_matrices(
             {
-                n: {**b, "rest_rot_mat_world": self.R[n].tolist()}
+                n: {**b, "rest_rot_mat_world": self.R[n].tolist(),
+                    "pose_basis": self.basis[n].tolist()}
                 for n, b in self.meta.items()
             }
         )
@@ -484,9 +489,7 @@ class RigModel:
                     matrices[name][:3, 3] - self.h[name]
                 )
             elif entry is not None:
-                basis = np.asarray(
-                    self.meta[name].get("pose_basis", np.eye(4)), dtype=float
-                )
+                basis = self.basis[name]
                 # Blender stores pose matrices as float32; parent-rest rebasing
                 # can leave sub-micrometre local translation roundoff.
                 if not np.allclose(basis[:3, 3], 0, atol=1e-6 * self.height):
@@ -705,8 +708,75 @@ class RigModel:
                 elif np.isfinite(pts[2 * i]).all():
                     p[entry.start + 3 : entry.stop] = pts[2 * i] - self.h[n]
             elif np.isfinite(pts[2 * i : 2 * i + 2]).all():
-                p = self.align_bone_to_tip(n, pts[2 * i + 1], p)
+                # Off-axis surface readings and child attachment offsets observe
+                # parent twist. A tip direction alone cannot initialize it.
+                anchors = [k for k, owner in enumerate(self.point_bones) if owner == n]
+                anchors += [2 * self.index[c] for c in self.order
+                            if self.parents[c] == n and c not in self.motion_roots]
+                valid = [k for k in anchors if np.isfinite(pts[k]).all()]
+                source = np.array([self.h[self.point_bones[k]]
+                                   + self.R[self.point_bones[k]] @ self.local_points[k]
+                                   for k in valid])
+                target = pts[valid]
+                A, B = source - source.mean(0), target - target.mean(0)
+                U, singular, V = np.linalg.svd(A.T @ B)
+                if singular[1] <= max(singular[0] * 1e-6, 1e-14 * self.height**2):
+                    p = self.align_bone_to_tip(n, pts[2 * i + 1], p)
+                    continue
+                world_delta = V.T @ np.diag([1, 1, np.linalg.det(V.T @ U.T)]) @ U.T
+                _, _, rotations = self.fk(p)
+                parent = self.parents[n]
+                base = rotations[parent] @ self.R[parent].T @ self.R[n]
+                desired = base.T @ world_delta @ self.R[n]
+                angles = Rotation.from_matrix(desired).as_euler("xyz")
+                ix, ch = entry
+                limits = np.asarray(self.meta[n].get("limits_rad", [[-np.pi, np.pi]] * 3), dtype=float)
+                options = []
+                for candidate in (angles, np.array([angles[0] + np.pi,
+                                                    np.pi - angles[1], angles[2] + np.pi])):
+                    current = limits[:, 0].copy()
+                    for slot, channel in zip(ix, ch):
+                        choices = candidate[channel] + 2 * np.pi * np.arange(-2, 3)
+                        current[channel] = min(choices, key=lambda v: (
+                            max(self.lower[slot] - v, v - self.upper[slot], 0),
+                            abs(v - p[slot])))
+                    trial = p.copy()
+                    trial[ix] = np.clip(current[ch], self.lower[ix], self.upper[ix])
+                    current[ch] = trial[ix]
+                    options.append((np.linalg.norm(_euler(current)[0] - desired), trial))
+                p = min(options, key=lambda item: item[0])[1]
         return np.clip(p, self.lower, self.upper)
+
+    def refine_read_start(self, points, previous):
+        """Resolve chained hinge/twist ambiguity using triangulated readings only.
+
+        Direction alignment cannot observe a thigh's roll until the knee bends.
+        Fit the complete observed chain before the robust pixel objective, whose
+        wide Cauchy plateaus can otherwise trap a badly folded initial chain.
+        """
+        target = np.asarray(points, dtype=float)
+        valid = np.isfinite(target).all(axis=1)
+        if not self.size or not np.any(valid):
+            return previous.copy()
+        start_points = self.fk(previous)[0]
+        if np.max(np.linalg.norm(start_points[valid] - target[valid], axis=1)) < 1e-7 * self.height:
+            return previous.copy()
+        evaluated = [None, None]
+
+        def objective(q):
+            if evaluated[0] is None or not np.array_equal(q, evaluated[0]):
+                X, J, _, _ = self.fk(q, jac=True)
+                evaluated[:] = [q.copy(), ((X[valid] - target[valid]).ravel() / self.height,
+                                          J[valid].reshape(-1, self.size) / self.height)]
+            return tuple(value.copy() for value in evaluated[1])
+
+        result = least_squares(
+            lambda q: objective(q)[0], np.clip(previous, self.lower, self.upper),
+            jac=lambda q: objective(q)[1], bounds=(self.lower, self.upper),
+            tr_solver="lsmr", tr_options={"atol": 1e-10, "btol": 1e-10},
+            x_scale="jac", max_nfev=80, ftol=1e-10, xtol=1e-10, gtol=1e-10,
+        )
+        return result.x
 
     def _guard_samples(self, points, J):
         samples = list(points)
@@ -1160,6 +1230,22 @@ def _flat_foot_vectors(rig, reference):
     return feet
 
 
+def _foot_roll_observed(rig, name, readings, confidence):
+    """A flat-contact prior must not override multi-view evidence of foot roll."""
+    anchors = [k for k, owner in enumerate(rig.point_bones) if owner == name]
+    anchors += [2 * rig.index[n] for n in rig.order
+                if rig.parents[n] == name and n not in rig.motion_roots]
+    valid = [k for k in anchors if np.isfinite(readings[k]).all()
+             and np.count_nonzero(confidence[:, k] >= 0.6) >= 2]
+    if len(valid) < 3:
+        return False
+    source = np.array([rig.h[rig.point_bones[k]]
+                       + rig.R[rig.point_bones[k]] @ rig.local_points[k]
+                       for k in valid])
+    singular = np.linalg.svd(source - source.mean(0), compute_uv=False)
+    return bool(singular[1] > max(singular[0] * 1e-6, rig.height * 1e-8))
+
+
 def _resolve_frame_end_pairs(rig, cameras, uv_t, conf_t, previous_points):
     """Dynamic symmetric prop endpoint (end1/end2) swap resolution per view."""
     end_pairs = getattr(rig, "end_pairs", ())
@@ -1194,6 +1280,25 @@ def _resolve_frame_end_pairs(rig, cameras, uv_t, conf_t, previous_points):
                 uv_out, conf_out = best_u, best_c
             # Align 3D end1/end2 label orientation to the closer previous 3D endpoints.
             X_tri = triangulate(cameras, uv_out, conf_out, previous_points)
+            owner = rig.point_bones[i1]
+            anchors = [k for k, name in enumerate(rig.point_bones)
+                       if name == owner and k not in (i1, i2)
+                       and np.count_nonzero(conf_out[:, k] >= 0.5) >= 2
+                       and np.isfinite(X_tri[k]).all()]
+            if anchors:
+                local = rig.local_points
+                def shape_error(first, second):
+                    return sum(abs(np.linalg.norm(X_tri[k] - X_tri[observed])
+                                   - np.linalg.norm(local[k] - local[expected]))
+                               for k in anchors
+                               for observed, expected in ((first, i1), (second, i2)))
+                keep_error = shape_error(i1, i2)
+                flip_error = shape_error(i2, i1)
+                if abs(keep_error - flip_error) > 1e-4 * rig.height:
+                    if flip_error < keep_error:
+                        uv_out[:, [i1, i2]] = uv_out[:, [i2, i1]]
+                        conf_out[:, [i1, i2]] = conf_out[:, [i2, i1]]
+                    continue
             if np.isfinite(X_tri[[i1, i2]]).all() and np.isfinite(previous_points[[i1, i2]]).all():
                 d_keep = np.linalg.norm(X_tri[i1] - previous_points[i1]) + np.linalg.norm(X_tri[i2] - previous_points[i2])
                 d_flip = np.linalg.norm(X_tri[i2] - previous_points[i1]) + np.linalg.norm(X_tri[i1] - previous_points[i2])
@@ -1437,7 +1542,10 @@ def fit_clip_2d_reprojection(
                     rig, cameras, uv[t], conf[t], previous_points
                 )
             scales = np.where(stable[t], cauchy_px * stable_scale, cauchy_px)[..., None]
-            weights = conf[t][..., None]
+            # Kernel widening alone can still prefer a higher-confidence
+            # jittering panel. Smooth sure tracks also receive the configured
+            # evidence weight, so independent starts use the intended objective.
+            weights = (conf[t] * np.where(stable[t], stable_scale, 1.0))[..., None]
             if who_sees == "model" and (getattr(rig, "capsules", ()) or getattr(rig, "skin", None) is not None):
                 weights = _apply_body_picture_weights(
                     rig,
@@ -1451,6 +1559,9 @@ def fit_clip_2d_reprojection(
             read = triangulate(
                 cameras, uv[t], conf[t], previous_points if read_one_panel else None
             )
+            # Triangulation fills unseen slots from the previous frame. Those
+            # placeholders are not observations of a bone's roll or attachment.
+            read[np.max(conf[t], axis=0) <= 0] = np.nan
             planted = []
             for name, local in feet:
                 tip = 2 * rig.index[name] + 1
@@ -1461,7 +1572,8 @@ def fit_clip_2d_reprojection(
                     if np.isfinite(read[tip]).all()
                     else previous_points[tip, 2]
                 )
-                if z - rig.floor < 0.05 * rig.height:
+                if (z - rig.floor < 0.05 * rig.height
+                        and not _foot_roll_observed(rig, name, read, conf[t])):
                     planted.append((name, local))
 
             use_scipy_loss = robust_mode in ("scipy_hybrid", "scipy_video2rig")
@@ -1473,8 +1585,11 @@ def fit_clip_2d_reprojection(
                     data_scales.extend(scales[v, :, 0].ravel())
             data_scales_arr = np.asarray(data_scales, dtype=float)
             n_data_residuals = len(data_scales_arr)
+            evaluated = [None, None]
 
             def objective(p):
+                if evaluated[0] is not None and np.array_equal(p, evaluated[0]):
+                    return tuple(value.copy() for value in evaluated[1])
                 X, J, _, rotations = rig.fk(p, jac=True)
                 residual = []
                 rows = []
@@ -1535,10 +1650,19 @@ def fit_clip_2d_reprojection(
                     rows.extend(np.diag(prior_w))
                 residual.extend((p - prev) * 0.03)
                 rows.extend(np.eye(rig.size) * 0.03)
-                return np.asarray(residual), np.asarray(rows)
+                result = np.asarray(residual), np.asarray(rows)
+                evaluated[:] = [p.copy(), tuple(value.copy() for value in result)]
+                return result
 
-            read_cand = rig.read_start(read, prev)
+            read_cand = rig.refine_read_start(read, rig.read_start(read, prev))
             starts = [("prev", prev), ("read", read_cand)]
+            if not np.allclose(prev, reference, atol=1e-8, rtol=0):
+                starts.append(("reference", reference))
+            # A preceding extreme pose can preserve the wrong unobserved twist
+            # in a line-only chain. Reinitialize from readings and saved p0 too.
+            read_reference = rig.refine_read_start(read, rig.read_start(read, reference))
+            if not np.allclose(read_reference, read_cand, atol=1e-8, rtol=0):
+                starts.append(("read_reference", read_reference))
             if prop_roots:
                 prop_placed = prev.copy()
                 changed_prop = False
@@ -1575,7 +1699,20 @@ def fit_clip_2d_reprojection(
                 )
                 return float(result.cost), label, result.x
 
-            candidates = [run(s) for s in starts]
+            # A complete, high-confidence multi-view fit already at subpixel
+            # precision needs no costly escape starts. Noisy/hidden readings
+            # retain all independent starts and the identical objective.
+            read_result = run(("read", read_cand))
+            read_points, read_jac, _, _ = rig.fk(read_result[2], jac=True)
+            read_guard = rig.guard(read_points, read_jac)[0]
+            dense_fit = (len(cameras) >= 2 and np.all(conf[t] >= .99)
+                         and prior_w is None
+                         and max(float(np.linalg.norm(c.project(read_points) - uv[t, v], axis=-1).max())
+                                 for v, c in enumerate(cameras)) < .01
+                         and float(np.max(read_guard, initial=0.0)) < 1e-6)
+            candidates = [read_result]
+            if not dense_fit:
+                candidates.extend(run(s) for s in starts if s[0] != "read")
             best = min(candidates, key=lambda x: x[0])
 
             def error(p):
@@ -1593,7 +1730,7 @@ def fit_clip_2d_reprojection(
                 )
 
             current_error = error(best[2])
-            if current_error > 1.5 * previous_error or not params:
+            if not dense_fit and (current_error > 1.5 * previous_error or not params):
                 reset = prev.copy()
                 for entry in rig.slices.values():
                     if not isinstance(entry, slice):
@@ -1769,7 +1906,7 @@ def sample_v3_pose(
     if events.get("yaw"):
         root_euler[2] = rng.uniform(-np.pi, np.pi)
     if events.get("pitch"):
-        root_euler[0] = rng.uniform(-math.radians(75), math.radians(75))
+        root_euler[0] = float(np.clip(rng.gauss(0, math.radians(30)), -math.radians(75), math.radians(75)))
     p[sl.start : sl.start + 3] = Rotation.from_euler("xyz", root_euler).as_rotvec()
     translation = np.zeros(3)
     if skin is not None:

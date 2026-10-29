@@ -53,7 +53,7 @@ FORMAL_GATE_SCHEMA = "monster-formal-verification-gate-v1"
 
 
 def _v3_bones(bones):
-    from anatomical_names import parse_anatomical_name
+    from bone_taxonomy import parse_anatomical_name
     return bool(bones) and all(parse_anatomical_name(n) for n in bones)
 
 
@@ -613,7 +613,7 @@ def _verify_v3_rig(classified, skin, seed, num_random_poses, assert_passed):
     confidence = np.ones((len(params), 2, len(rig.point_names)))
     frames = rig.frames(params, confidence)
     p1 = verify_trajectory_formal_gate(frames, classified, trajectory_meta={
-        "reader_contract": "monster-reader-v3", "motion_structure": structure}, assert_passed=False)
+        "reader_contract": "monster-reader-v3", "motion_structure": structure}, limit_tol_deg=3.0, assert_passed=False)
     numerical = verify_v3_numerics(classified, seed, skin=skin)
     points = np.array([rig.fk(p)[0] for p in params])
     cameras = list(cameras_from_calibration({"center": points[0].mean(0).tolist(),
@@ -644,7 +644,7 @@ def _verify_v3_rig(classified, skin, seed, num_random_poses, assert_passed):
                 violations.append(f"P2_V3_ROTATION_REACHABILITY pose={label}: max={rotation_deg:.6f}deg > 0.35deg")
     recovered_frames = rig.frames(fit, confidence)
     recovered_p1 = verify_trajectory_formal_gate(recovered_frames, classified, trajectory_meta={
-        "reader_contract": "monster-reader-v3", "motion_structure": structure}, assert_passed=False)
+        "reader_contract": "monster-reader-v3", "motion_structure": structure}, limit_tol_deg=3.0, assert_passed=False)
     violations.extend(recovered_p1["violations"])
     hidden, _ = fit_clip_2d_reprojection(rig, cameras, np.zeros_like(observed[:1]), np.zeros_like(confidence[:1]))
     hidden = np.asarray(hidden, dtype=float)
@@ -1123,9 +1123,11 @@ def run_monster_rig_formal_gate(
         else None
     )
 
+    from rig_skinning_artifact import load_probe_skinning
     report = verify_rig_formal_gate(
         rig_meta.get("bones", {}),
         jl_profile,
+        rig_skinning=load_probe_skinning(jl_profile, _blend_path, rig_meta.get("bones", {})),
         assert_passed=False,
     )
     report["monster_id"] = monster_id

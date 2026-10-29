@@ -4,52 +4,36 @@ G1/G2/G3 和最终批次验收的判定来源是用户对具体材料的明确�
 
 ## 保存什么
 
-先读取已有 `stage_state.json`、项目资源版本和用户决定；保存时合并自己的记录，保留历史与 Worker 产生的阶段字段。若现有结构不能可靠容纳审计记录，在用户项目的 `.game-studio/monster/<monster_id>/reviews.json` 保存独立审计账本，并在交接中给出路径。该账本只是可追溯记录，**不等于 Worker 已读取或执行后端门禁**。
+候选动态材料按 [候选视频审阅规范 v1](candidate-video-review.md) 保存独立视频主入口、同步来源和哈希。新 G1 报告使用 `presentation_contract=monster-candidate-video-review-v1`，完整锁定 4×3 视频引用及证据；历史展示升级另建审阅版本，保留原签名和用户决定。
+
+先读取已有 `stage_state.json`、项目资源版本和用户决定；保存时合并自己的记录，保留历史与 Worker 产生的阶段字段。在用户项目的 `.game-studio/monster/<monster_id>/reviews.json` 与 Drive 的 `stage_state.json` 中同步维护审计账本，并在交接中给出路径。
 
 每次审阅至少保存：
 
 - 关卡 `G1|G2|G3|final_batch`、`monster_id`、项目/资源版本及审阅包位置。
 - 输入、完整模型/骨架、采样器与配置、数据集、checkpoint、考试视频或动作批次的实际版本与路径记录，以及锁定的多视图拼合分辨率、单面板分辨率与视角排布（`composite_width × composite_height` / `panel_width × panel_height` / `num_views` / `view_order`）；没有的字段不编造。
-- `user_decision=pending|approved|changes_requested|rejected`；等待阶段分别使用 `awaiting_rig_review`、`awaiting_pose_review`、`awaiting_exam_review`，生产后按批次和片段保存当前验收状态。
-- 用户原始反馈的可追溯引用或原话、决定时间及所针对的版本。`pending` 不写通过时间；没有用户证据不产生 `approved`。用户提出返修时保留旧记录并新建后续版本。
-- G1 通过时唯一的 `selected_candidate_id` 及预检强制骨骼规范命名校验记录（`bone_naming_validation.valid=True`、零匿名骨、`<KIND>_<SIDE>_<GROUP>_<INDEX>` 映射清单）；G2 通过时固定 seed、采样器版本、关节范围和必要的异常重抽日志；G3 通过时实际 checkpoint 路径与考试材料；最终批次保存当批文件清单、逐片当前版本和用户决定。
+- `user_decision=pending|approved|changes_requested|rejected`；等待阶段分别使用 `awaiting_rig_review`、`awaiting_pose_review`、`awaiting_exam_review`、`awaiting_final_batch_review`，生产后按批次和片段保存当前验收状态。
+- 用户原始反馈的可追溯引用或原话、决定时间及所针对的版本。`pending` 不写通过时间；没有用户证据不产生 `approved`。用户提出返修时保留原记录并新建后续版本。
+- **G1 锁定材料**：唯一的 `selected_candidate_id`、完整绑定模型、解剖学骨骼规范命名校验记录（`bone_naming_validation.valid=True`、零匿名骨、`monster-bone-taxonomy-v3` 映射清单）与 `studio_rig_meta.json`。
+- **G2 锁定材料**：固定 `seed`、采样器版本、`joint_limits.json`、异常重抽日志，以及真实 Blender 输出的原始标签、相机、姿态记录、总览图、各视角原图/裁剪图与 2D 叠加图的文件哈希清单（`materials.g2_review_artifacts`，总签名 `g2_review_sha256`）。G2 覆盖审计在实际拟合通道上进行，世界根角度单独记录，冻结骨保留保存的非零 `pose_basis`。
+- **G3 锁定材料**：实际 checkpoint 路径、HTML、诊断报告、预测轨迹、原考试视频、同视角/3⁄4/轮廓对比视频与实际烘焙 GLB 的文件哈希清单（`materials.g3_review_artifacts`，总签名 `g3_review_sha256`），以及轨迹输出的 `at_limit` 卡限诊断（非铰链骨超过 25% 帧距关节极限不超过 `2°` 时列出骨名和帧占比，交由用户结合视频判断）。
+- **最终批次锁定材料**：当批文件清单 `batch_manifest.json`、非空预测轨迹、通过的标定极线同步门禁、真实 Blender 逐帧回读验证报告（在轨迹 FPS 下核对骨头与世界旋转，使用实际 Action 小数起止帧检查 `:loop` 闭合，`valid=True`）及逐片当前版本的用户决定。
 
 记录里不包含 Worker 密码或私密认证头。Drive 上传和下载记录包含真实文件 ID/路径与大小，确认完成后标记 U1/U2 或归档完成。仅上传脚本配置不产生新的 U2 模型版本。
 
-## 决定的有效性
+## 决定的有效性与分级失效规则
 
-门禁绑定实际依赖版本，而非 `monster_id`、文件名、最新版本标签或一次历史通过。输入版本变化时检查其影响，追加失效原因；旧材料和旧通过记录保留作为历史，不自动迁移到新结果。
-
-G3 报告与审查页展示轨迹实际输出的 `at_limit` 诊断：非铰链骨超过25%帧距关节极限不超过2°时，列出骨名和帧占比。没有该诊断的历史轨迹明确显示未测量，不作为零告警；告警交由用户结合视频判断，不自动写入通过或拒绝。
-
-新 G3 提交锁定 HTML、诊断报告、预测轨迹、原考试视频、对照/3⁄4/轮廓视频与 GLB 的实际 SHA256，保存在 `materials.g3_review_artifacts`，总签名为 `g3_review_sha256`。批准前及下游门禁都会重新检查文件内容；任一材料变更或丢失，G3 与最终批次失效，未变动的 G1/G2 保留，须重建并审查当前材料。历史无签名记录仍可读取；v3 材料缺失签名时不能作为有效 G3。
+门禁绑定实际依赖版本与材料 SHA-256 签名，而非仅看 `monster_id`、文件名或最新标签。批准前及下游门禁均重新核对文件内容与哈希；任一材料变更或缺失时自动触发对应级别的失效，并在账本中追加失效原因（保留历史审批记录备查，不删除历史模型或权重文件）。批次中只要有当前视频仍待审或需返修，就不满足“本批全部满意后释放实例”的条件。
 
 | 改动或失败 | 保留与失效范围 | 下一步 |
 | --- | --- | --- |
-| 只改 `joint_limits.json` 关节角度限制、随机采样脚本或 seed | 模型和骨架未变，G1 保留；G2 及依赖旧采样器/旧 `joint_limits.json` 的训练/G3/生产资格失效 | 运行 `joint-limits apply` 更新限制后新抽 50 个边界探索随机姿势，重新提交 G2，通过后再训练 |
-| 网格、骨骼命名或 `KIND`/`sub_role` 分类、骨骼轴、蒙皮权重、装饰绑定发生实质改动（或发现残留 `bone_0..N` 匿名骨） | 受影响的 G1 材料需补审；旧 G2、数据集、checkpoint/G3 不再证明新模型有效 | 本地强制规范重命名并核验 → 受影响 G1 → 50 姿势/G2 → 下一次云端消费前完成 U2 |
-| 骨架结构或层级缺陷 | 选定候选和全部依赖关卡失效 | 重生成四候选，恢复装饰并重新 G1/G2 |
-| 输入姿态、焊接粘连、严重遮挡 | 原 U1 与下游版本失效 | 预检、新 U1、四候选、G1/G2 |
-| 考试视频、标定或 IK 实现问题 | 未变模型/采样器的 G1/G2 可保留；旧 G3 不适用于修复后的链路 | 修复后用已有视频重考 G3，不自动重训 |
-| 姿态泛化不足 | 保留未变模型的 G1；采样分布、训练权重和 G3 需更新 | 回 G2，重新采样/训练/考试 |
-| 视频生成最高分辨率档位（`MONSTER_ENABLE_2K`）或视角模式（`MONSTER_ENABLE_3VIEW` 双视图 vs 三视图）变更 | 模型和骨架未变，G1 可保留；不同分辨率或不同视角数下的旧训练集、checkpoint 与 G3 失效（双视图与三视图首帧参考图 `idle_split_*.png` / `idle_3view_*.png` 独立并存互不覆盖） | 按新分辨率与视角排布重新渲染合成训练图、训练 `dinov2_head.pt` 并重考 G3 |
-| 仅主干冻结／部分微调策略、学习率或训练轮次变更 | 骨架、采样器和数据标签未变时保留 G1/G2 与合成集；新 checkpoint 必须重做 G3，原权重与历史审计保留 | 在独立实验路径训练，按固定留出集选择权重，再用同一独立考试视频复考 G3 |
-| 运动学求解先验开关或参数变更（`MONSTER_ENABLE_MOCAP_PRIORS`，含 1-Euro 滤波、躯干刚性 ICP、关节分类先验、接触脚部钉扎） | 不改变 `dataset_signature`，无损兼容已有 `dinov2_head.pt`；G1、G2、合成数据集与已有 checkpoint 均保留，仅旧 G3 重建结果需刷新 | 直接在现有权重上用已有视频重考 G3（或重烘焙动作），不重抽数据、不自动重训 |
-| 稠密表面坐标与可微 LBS 轴向精修开关（`MONSTER_ENABLE_DENSE_SURFACE`）开启（`0 -> 1`） | 模型、骨架与采样器未变，G1/G2 保留；但 `dataset_signature` 变更（需额外生成 `*_dense_rest.npz` 与 `rig_skinning.npz`）且需训练 `dense_head` 权重，旧纯关键点数据集与旧 checkpoint 失效（反之 `1 -> 0` 回退至纯关键点解析解则无需重训） | 合成含稠密表面坐标标签的数据集、训练含 `dense_head` 的 `dinov2_head.pt` 并重考 G3 |
-| 只改生产动作规格、提示词或该动作 seed | G1/G2 与未变 checkpoint 的 G3 可保留；该片及对应批次当前验收需重做 | 保持相同最高分辨率重做相应动作，等待当前片段的用户确认 |
-
-在实际数据集中区分“历史产物可保留”与“可作为新阶段有效输入”。不要删除历史模型或权重来表达失效。批次中只要有当前视频仍待审或需返修，就不满足“本批全部满意后释放”的条件。
-
-
-### v3 迁移
-
-`anatomical_reader_v3_migration` 涉及骨名/轴/几何/蒙皮，按结构性改动失效 G1、G2、G3 和最终批次；新材料完成前保留历史批准记录，不能迁移为新版本批准。`reader_label_contract_change` 保留未变动的绑定审批，但重生成标签、重训并重考 G3。`MONSTER_CAMERA_LENS` 或 `MONSTER_STUDIO_LAYOUT` 变化会改变签名，并要求重查 G2/训练/G3。
-
-
-### v3 G2 实际材料与下游检查
-
-v3 G2必须成功运行实际Blender边界采样，消费同一keypoints_gt.json中的姿态、完整Reader槽位和相机，不用示意图或旧式FK替代失败渲染。按实际蒙皮筛选可运动通道，冻结骨保留保存的非零basis；G2覆盖审计使用可运动根的世界角度，不把冻结组织根或局部起始姿态当成采样不足。上下堆叠/透视视图按实际标签画叠加，分视图图片每次刷新。
-
-G2审查包锁定原始标签、相机、姿态记录、关节限制、总览及实际查看的原图/叠加/各视角裁剪；总签名g2_review_sha256。批准前和下游都会检查文件内容，变化时失效G2/G3/最终批次，保留G1。没有网格拉伸/碰撞的实际测量时，页面显示未测量，不能用默认零值宣称通过。G3使用v3 FK/像素求解器的形式化检查，不调用旧层级救援器证明新管线。
-
-v3交付必须提供非空预测轨迹和通过的标定读数门禁，并真实读取导出的GLB。Blender在轨迹FPS下逐帧核对骨头与世界旋转，使用实际Action的小数起止帧检查循环；报告必须明确valid，不能把退出码0当成验证通过。非共享竖直轴的相关系数可为空。最终收尾只评估当前关卡/材料的有效决定，材料失效时保留实例；插件开发测试不会关闭用户实例。
+| 只改 `joint_limits.json` 关节角度限制、随机采样配置或 seed（`sampler_script_or_seed_change`） | 模型和骨架未变，G1 保留；G2 及依赖原采样器/原 `joint_limits.json` 的训练/G3/生产资格失效 | 运行 `joint-limits apply` 更新限制后新抽 50 个边界探索随机姿势，重新提交 G2，通过后再训练 |
+| 网格、解剖学骨骼命名或 `kind`/`anatomical_role` 分类、骨骼轴、蒙皮权重、装饰绑定发生实质改动（`local_model_or_bone_naming_change`） | 受影响的 G1 材料需补审；G2、数据集、checkpoint/G3 与最终批次失效 | 本地强制规范重命名并核验 → 受影响 G1 → 50 姿势/G2 → 下一次云端消费前完成 U2 |
+| 骨架结构或层级缺陷（`skeleton_topology_defect`） | 选定候选和全部依赖关卡（G1/G2/G3/最终批次）失效 | 重生成四候选，精修骨架与恢复装饰并重新提交 G1/G2 |
+| 输入姿态、焊接粘连、严重遮挡（`u1_input_defect`） | 原 U1 与全部下游版本失效 | 预检、新 U1、四候选、G1/G2 |
+| 考试视频、标定或重投影求解/后处理参数调整（`exam_video_or_ik_fix`） | 未变模型/采样器的 G1/G2、合成数据集与已有 checkpoint 均保留；仅 G3 重建结果需刷新 | 直接在现有权重上调用 `reexam_only` 用已有视频重考 G3（或重烘焙动作），不重抽数据、不重训模型 |
+| 姿态泛化不足（`pose_generalization_insufficient`） | 保留未变模型的 G1；采样分布、训练权重和 G3 需更新 | 回 G2，重新采样、训练并重考 G3 |
+| 视频生成分辨率档位（`MONSTER_ENABLE_2K`）、视角模式（`MONSTER_ENABLE_3VIEW` / `MONSTER_STUDIO_LAYOUT`）或相机焦距（`MONSTER_CAMERA_LENS`）变更（`resolution_or_view_mode_change`） | 模型和骨架未变，G1 保留；数据集签名改变，G2/训练集/checkpoint/G3 需按新相机标定刷新 | 按新相机标定与视角排布刷新 G2/合成训练图、训练 Reader 并重考 G3 |
+| 仅主干冻结／部分微调策略、学习率、移动窗口或训练轮次变更 | 骨架、采样器和全画幅数据标签未变时保留 G1/G2 与合成集；新 checkpoint 必须重做 G3 | 在独立实验路径训练，按固定留出集选择权重，再用同一独立考试视频复考 G3 |
+| Reader 标签契约变更或新开启密集表面场/局部手爪探针（`reader_label_contract_change` / `dense_surface_enabled_0_to_1`） | 模型与骨架未变，保留 G1/G2；数据集签名变更，需重新生成标签并训练对应探针权重 | 重新合成训练标签、训练探针权重并重考 G3 |
+| 只改生产动作规格、提示词或该动作 seed | G1/G2 与未变 checkpoint 的 G3 保留；该片及对应批次当前验收需重做 | 保持相同锁定分辨率与标定重做相应动作，等待当前片段的用户确认 |

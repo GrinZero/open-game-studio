@@ -287,6 +287,12 @@ def api_rig_candidates(monster_id: str, input_glb_file: str, run_auto_audit: boo
             for c in cands:
                 if c.exists():
                     shutil.copy2(c, drive_cand_dir / c.name)
+            raw_archive = drive_cand_dir / 'provider_originals'
+            raw_archive.mkdir(parents=True, exist_ok=True)
+            for raw in cand_dir.glob('candidate_*.glb'):
+                shutil.copy2(raw, raw_archive / raw.name)
+            for receipt in cands[0].parent.glob('*.json'):
+                shutil.copy2(receipt, drive_cand_dir / receipt.name)
             GUARD.touch()
 
             py_bpy = resolve_bpy_python()
@@ -294,21 +300,22 @@ def api_rig_candidates(monster_id: str, input_glb_file: str, run_auto_audit: boo
             meta_path = m_drive / "studio_rig_meta.json"
             if run_auto_audit:
                 bpy_worker = Path(__file__).resolve().parent / "studio_bpy_worker.py"
-                subprocess.run(
-                    [
-                        py_bpy,
-                        str(bpy_worker),
-                        "--mode",
-                        "audit",
-                        "--candidates",
-                        *[str(c) for c in cands],
-                        "--blend_path",
-                        str(blend_path),
-                        "--meta_path",
-                        str(meta_path),
-                    ],
-                    check=True,
-                )
+                audit_cmd = [
+                    py_bpy,
+                    str(bpy_worker),
+                    "--mode",
+                    "audit",
+                    "--candidates",
+                    *[str(c) for c in cands],
+                    "--blend_path",
+                    str(blend_path),
+                    "--meta_path",
+                    str(meta_path),
+                ]
+                resolved_skinning_mode = os.environ.get("MONSTER_SKINNING_MODE")
+                if resolved_skinning_mode:
+                    audit_cmd.extend(["--skinning_mode", resolved_skinning_mode])
+                subprocess.run(audit_cmd, check=True)
 
             bundle_zip = m_work / f"{monster_id}_stage1_rig_bundle.zip"
             contact_sheet = m_drive / "candidates_contact_sheet.jpg"

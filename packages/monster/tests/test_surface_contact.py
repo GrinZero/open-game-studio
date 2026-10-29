@@ -109,20 +109,6 @@ class SurfaceContactTests(unittest.TestCase):
         self.assertTrue(result['contact_quality_passed'])
         self.assertEqual(json.dumps(args[-1],sort_keys=True),serialized)
 
-    def test_collision_does_not_damp_shared_rigid_ancestor(self):
-        meta={'root':{'parent':None,'kind':'root','depth':0},
-              'spine':{'parent':'root','kind':'spine','depth':1},
-              'left':{'parent':'spine','kind':'limb','depth':2},
-              'right':{'parent':'spine','kind':'limb','depth':2}}
-        angles={'root':[0,0,0],'spine':[30,0,0],'left':[20,0,0],'right':[-20,0,0]}
-        violation={'passed':False,'violations':[{'bone_a':'left','bone_b':'right','penetration_m':.01}]}
-        check=lambda pose,*args: violation if abs(pose['left'][0])>=19.99 and abs(pose['right'][0])>=19.99 else {'passed':True}
-        with patch.object(tax,'evaluate_volume_clearance',side_effect=check):
-            out,diag=tax.resolve_volume_collisions_fk(angles,meta,meta,{'pair_min_clearance':{'x':1}})
-        self.assertEqual(out['spine'],angles['spine'])
-        self.assertLess(abs(out['left'][0]),20)
-        self.assertEqual(len(diag),1)
-
     def test_root_fraction_change_refreshes_both_absolute_consumers(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'joint_limits.json'

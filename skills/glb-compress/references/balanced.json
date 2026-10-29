@@ -1,0 +1,13 @@
+{
+  "preset": "balanced",
+  "geometry": "on",
+  "textures": "webp",
+  "resizeMax": 1024,
+  "simplify": "off",
+  "weld": "off",
+  "keepNames": true,
+  "stripAnimations": false,
+  "stripTangents": false,
+  "mipmaps": false,
+  "preservePrecision": false
+}

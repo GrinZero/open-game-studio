@@ -87,6 +87,17 @@ class ActualG2Tests(unittest.TestCase):
                 *args,
             ]
 
+        approved_metadata = (source / "studio_rig_meta.json").read_bytes()
+        probe = subprocess.run(
+            [blender, "--background", "--factory-startup", "--python-exit-code", "1",
+             "--python", str(ROOT / "tests/fixture_v3_g2_worker.py"), "--",
+             "--mode", "probe_joint_limits", "--blend_path", str(source / "rig.blend"),
+             "--meta_path", str(source / "studio_rig_meta.json"),
+             "--limits_path", str(work / "joint_limits.json")],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        self.assertEqual(probe.returncode, 0, probe.stdout[-16000:])
+
         with (
             patch.object(
                 g2,
@@ -122,7 +133,13 @@ class ActualG2Tests(unittest.TestCase):
         self.assertTrue(result["boundary_exploration_passed"])
         self.assertTrue(result["coverage_passed"])
         output = checks / "g2_review"
+        self.assertEqual((source / "studio_rig_meta.json").read_bytes(), approved_metadata)
+        self.assertTrue((output / "studio_rig_meta.json").is_file())
         data = json.loads((output / "keypoints_gt.json").read_text())
+        self.assertEqual(data["sampling_contract"], "monster-calibrated-sampling-v2")
+        self.assertFalse(data["coverage_audit"]["boundary_exploration_audit"]["boundary_coverage_required"])
+        self.assertEqual({r["sampling_regime"] for r in data["samples"]}, {"video2rig_calm", "video2rig_active"})
+        self.assertTrue(all(r["v3_sampling"]["sampling_policy"] == "video2rig-start-pose-v1" for r in data["samples"]))
         summary = json.loads((output / "g2_pose_summary.json").read_text())
         records = json.loads((output / "pose_records.json").read_text())
         self.assertEqual(len(records), 50)

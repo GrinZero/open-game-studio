@@ -10,6 +10,7 @@ from unittest.mock import patch
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "worker"))
 from studio_camera import Camera, cameras_from_calibration, triangulate
 from reprojection_solver import (
@@ -31,9 +32,8 @@ from reading_pipeline import (
     strip_shadow,
     detect_video_cadence_optical_flow,
 )
-from skeleton_postprocess import voxelize, rest_coords, postprocess_skintokens_skeleton
-from anatomical_names import parse_anatomical_name
-from bone_taxonomy import classify_rig_bones, validate_canonical_rig_bone_names
+from skeleton_postprocess import voxelize, rest_coords, postprocess_skintokens_skeleton, anatomical_names
+from bone_taxonomy import classify_rig_bones, parse_anatomical_name, validate_canonical_rig_bone_names
 
 
 def fixture():
@@ -214,7 +214,7 @@ class GeometryContractTests(unittest.TestCase):
         self.assertEqual(len(_footprints(shell, thin_legs=True)), 4)
 
     def test_midline_limb_names_remain_valid_without_inventing_a_side(self):
-        from anatomical_names import anatomical_names
+        from skeleton_postprocess import anatomical_names
 
         meta = {
             "root": {"kind": "root", "side": "C", "parent": None},

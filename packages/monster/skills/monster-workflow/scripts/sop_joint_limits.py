@@ -47,6 +47,7 @@ from sop_preflight import (  # noqa: E402
     resolve_scratch_dirs,
 )
 from sop_formal_gate import verify_rig_formal_gate  # noqa: E402
+from rig_skinning_artifact import load_probe_skinning  # noqa: E402
 
 
 def resolve_joint_limits_path(project_root: Path, monster_id: str) -> Path:
@@ -125,7 +126,11 @@ def probe_joint_limits(
     derive_invalidations(ledger, new_fingerprints={"joint_limits_sha256": jl_sha})
     save_ledger(ledger, project_root=proj, drive_root=drive_root)
 
-    formal_gate = verify_rig_formal_gate(rig_meta.get("bones", {}), profile, assert_passed=True)
+    formal_gate = verify_rig_formal_gate(
+        rig_meta.get("bones", {}), profile,
+        rig_skinning=load_probe_skinning(profile, blend_path, rig_meta.get("bones", {})),
+        assert_passed=True,
+    )
     checks_dir = resolve_scratch_dirs(proj, monster_id)["checks_dir"]
     checks_dir.mkdir(parents=True, exist_ok=True)
     (checks_dir / "formal_gate_rig.json").write_text(
@@ -262,11 +267,13 @@ def apply_custom_joint_limits(
         root_motion["translation_fraction_xyz"] = [round(max(0.0, x), 4) for x in t_parts]
 
     if isinstance(profile.get("global_root"), dict):
-        profile["global_root"]["rotation_limits_deg"] = [
-            list(root_motion["global_pitch_deg"]),
-            list(root_motion["global_yaw_deg"]),
-            list(root_motion["global_roll_deg"]),
-        ]
+        # V3 SO(3) profiles intentionally omit the legacy Euler root box.
+        if all(key in root_motion for key in ("global_pitch_deg", "global_yaw_deg", "global_roll_deg")):
+            profile["global_root"]["rotation_limits_deg"] = [
+                list(root_motion["global_pitch_deg"]),
+                list(root_motion["global_yaw_deg"]),
+                list(root_motion["global_roll_deg"]),
+            ]
         profile["global_root"]["translation_fraction_xyz"] = list(root_motion["translation_fraction_xyz"])
     # Fractions and absolute bounds are alternative consumers of the same
     # envelope. Never leave an old absolute clamp after changing its fraction.
@@ -313,7 +320,11 @@ def apply_custom_joint_limits(
     formal_gate_passed = True
     if meta_path.is_file():
         rig_meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        formal_gate = verify_rig_formal_gate(rig_meta.get("bones", {}), profile, assert_passed=True)
+        formal_gate = verify_rig_formal_gate(
+            rig_meta.get("bones", {}), profile,
+            rig_skinning=load_probe_skinning(profile, _blend_path, rig_meta.get("bones", {})),
+            assert_passed=True,
+        )
         formal_gate_passed = bool(formal_gate.get("passed", False))
         checks_dir = resolve_scratch_dirs(proj, monster_id)["checks_dir"]
         checks_dir.mkdir(parents=True, exist_ok=True)

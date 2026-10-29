@@ -3,7 +3,7 @@
 
 Enforces:
   1. Hard G1 Gate Check (`assert_gate(ledger, "G1")`): refuses to run unless G1 is `approved` with a
-     locked `selected_candidate_id` and verified canonical bone names (`<KIND>_<SIDE>_<GROUP>_<INDEX>`).
+     locked `selected_candidate_id` and verified canonical bone names (`monster-bone-taxonomy-v3`).
   2. Native Target Resolution & View Mode Alignment:
      Renders `pose_001`..`pose_050` directly at the active studio configuration (`1344x768` or 2K
      `2560x1440` / `2688x1440`, 2-view `[Front | Side]` or 3-view `[Left | Front | Right]`).
@@ -343,6 +343,21 @@ def build_g2_review_html(
                 for k, v in (r.get("joints_rad") or {}).items()
             }
         b_joints = r.get("boundary_joints") or r.get("boundary", {}).get("boundary_joints") or []
+        normalized_boundary = []
+        for item in b_joints:
+            if all(key in item for key in ("value", "lo", "hi")):
+                value, lo, hi = (float(item[key]) for key in ("value", "lo", "hi"))
+                lower = value <= .5 * (lo + hi)
+                normalized_boundary.append({
+                    **item, "axis": ("rx", "ry", "rz")[int(item["axis"])],
+                    "deg": round(math.degrees(value), 1),
+                    "bound": "lo" if lower else "hi",
+                    "limit_deg": round(math.degrees(lo if lower else hi), 1),
+                    "utilization": min(1.0, abs(2 * value - lo - hi) / max(hi - lo, 1e-10)),
+                })
+            else:
+                normalized_boundary.append(item)
+        b_joints = normalized_boundary
         b_count = int(
             r.get("boundary_joint_count")
             or r.get("boundary", {}).get("boundary_joint_count")
@@ -352,6 +367,8 @@ def build_g2_review_html(
             float(r.get("max_utilization", r.get("boundary", {}).get("max_utilization", 0.0))),
             3,
         )
+        if b_joints and not max_util:
+            max_util = round(max(float(item.get("utilization", 0)) for item in b_joints), 3)
         raw_m = r.get("metrics") or {}
         whole_m = raw_m.get("whole_mesh") if isinstance(raw_m.get("whole_mesh"), dict) else raw_m
         flex_m = raw_m.get("flexible_connections") if isinstance(raw_m.get("flexible_connections"), dict) else {}
@@ -368,6 +385,7 @@ def build_g2_review_html(
                 raw_m.get("new_flexible_intersection_pairs", r.get("new_intersection_pairs", 0))
             ),
             "chest_rigid_fit_max_m": round(float(raw_m.get("chest_rigid_fit_max_m", 0.0)), 6),
+            "chest_fit_available": raw_m.get("chest_rigid_fit_max_m") is not None,
         }
         poses_payload.append({
             "pose_id": pid,
@@ -394,6 +412,7 @@ def build_g2_review_html(
     comp_h = int(calib.get("composite_height") or (calib.get("resolution") or [1344, 768])[1])
     cov = summary.get("coverage_audit") or {}
     b_audit = cov.get("boundary_exploration_audit") or summary.get("boundary_exploration_audit") or {}
+    boundary_counts = b_audit.get("boundary_exploration") or {}
     jl_summary = summary.get("joint_limits_summary") or {}
     normalized_bones = {}
     for b_name, b_info in (jl_summary.get("bones") or cov.get("bones") or {}).items():
@@ -415,12 +434,13 @@ def build_g2_review_html(
         cov.get("active_dof_count")
         or b_audit.get("active_axes_count")
         or b_audit.get("total_active_axes")
-        or 52
+        or boundary_counts.get("total_active_axes")
+        or 0
     )
     dual_rate = float(
         cov.get("both_bounds_coverage_ratio")
         if cov.get("both_bounds_coverage_ratio") is not None
-        else b_audit.get("dual_boundary_touch_rate", 1.0)
+        else b_audit.get("dual_boundary_touch_rate", 0.0)
     )
     both_covered = int(
         cov.get("both_bounds_covered_count")
@@ -434,7 +454,10 @@ def build_g2_review_html(
         "num_poses": len(poses_payload),
         "generated_at": summary.get("generated_at", ""),
         "user_decision": summary.get("user_decision", "awaiting_pose_review"),
-        "sampler_policy": summary.get("sampler_policy"),
+        "sampler_policy": summary.get("sampler_policy") or (
+            "固定 seed；本批实际采样体制计数：" + "、".join(
+                f"{name}={count}" for name, count in cov.get("regime_counts", {}).items() if count)
+            + "。完整关节范围采样；硬部件新增相交与全网格拉伸不合格时记录并重抽。"),
         "render_receipt": receipt,
         "coverage_audit": {
             "passed": bool(cov.get("passed", True)),
@@ -510,7 +533,12 @@ def build_g2_review_pack(
         bbox_max=rig_meta.get("bbox_max"),
     )
     classified = apply_joint_limits_profile(classified, joint_limits_profile)
-    formal_gate = verify_rig_formal_gate(classified, joint_limits_profile, assert_passed=True)
+    from rig_skinning_artifact import load_probe_skinning
+    measured_skin = load_probe_skinning(joint_limits_profile, blend_path, classified)
+    if rig_meta.get("reader_contract") == "monster-reader-v3" and measured_skin is None:
+        raise ValueError("V3 G2 requires measured rig skinning; rerun joint-limits probe")
+    formal_gate = verify_rig_formal_gate(
+        classified, joint_limits_profile, rig_skinning=measured_skin, assert_passed=True)
     (dirs["checks_dir"] / "formal_gate_rig.json").write_text(
         json.dumps(formal_gate, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
@@ -569,7 +597,7 @@ def build_g2_review_pack(
             raise ValueError("V3 G2 labels do not match the selected rig, sampling contract, seed or pose count")
         calib = actual_data["training_calibration"]
         if not calib.get("cameras") or not actual_data.get("coverage_audit", {}).get("boundary_exploration_audit", {}).get("passed"):
-            raise ValueError("V3 G2 requires actual cameras and a passed boundary audit")
+            raise ValueError(f"V3 G2 requires actual cameras and a passed pose audit: {actual_data.get('coverage_audit', {}).get('boundary_exploration_audit', {}).get('failures')}")
         with np.load(g2_dir/'rig_skinning.npz') as archive:
             actual_skin = {name: archive[name] for name in archive.files}
         actual_skin['bone_names'] = actual_data['bone_names']
@@ -579,7 +607,7 @@ def build_g2_review_pack(
     rng = random.Random(int(seed))
     pose_records: list[dict[str, Any]] = []
     audit_samples: list[dict[str, Any]] = []
-    rejection_redraw_log: list[dict[str, Any]] = []
+    rejection_redraw_log: list[dict[str, Any]] = list(actual_data.get("rejection_redraw_log", [])) if actual_data else []
     overlay_paths: list[Path] = []
 
     for idx in range(int(num_poses)):
@@ -640,7 +668,8 @@ def build_g2_review_pack(
             "max_utilization": boundary_info.get("max_utilization", 0.0),
             "joints_rad": {k: [round(float(x), 5) for x in v] for k, v in eulers.items()},
             "uv_labels": uv_labels,
-            **({"reader_points": native_record['reader_points'], "v3_sampling": native_record['v3_sampling']} if native_record else {}),
+            **({"reader_points": native_record['reader_points'], "v3_sampling": native_record['v3_sampling'],
+                **({"metrics": native_record["metrics"]} if "metrics" in native_record else {})} if native_record else {}),
         })
 
     overview_jpg = g2_dir / "g2_50_overview.jpg"
@@ -667,6 +696,7 @@ def build_g2_review_pack(
     })[:16]
 
     summary = {
+        "sampler_policy": 'video2rig 起始姿态采样：G2 与训练共用分布；30% 概率将幅度缩至 0.4，非铰链轴围绕保存的 p0 高斯采样，肘膝主轴在合法范围内均匀采样。保留小概率全身转向、俯仰、接触与位移；双侧极限覆盖率仅报告，不作为通过阈值。保留越限、非有限值、意外冻结、固定比例联动与网格安全检查。',
         **({"reader_contract":actual_data['reader_contract'], "sampling_contract":actual_data['sampling_contract'],
             "actual_labels_sha256":sha256_file(g2_dir/'keypoints_gt.json')} if actual_data else {}),
         "monster_id": monster_id,

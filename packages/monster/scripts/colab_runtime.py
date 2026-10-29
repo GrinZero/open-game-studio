@@ -16,8 +16,8 @@ from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKER_MODULES = (
-    "anatomical_names", "studio_camera", "skeleton_postprocess", "reprojection_solver", "reading_pipeline", "reader_v3", "video2rig_pipeline", "video2rig_blender", "v3_verification", "rig_pose", "pose_sampling_v3", "video_timing", "strip_renderer", "blender_runtime", "bone_taxonomy",
-    "pose_finetuning", "mocap_priors", "pose_features", "pose_visibility", "dinov2_pose_trainer", "pipeline_runner",
+    "studio_camera", "skeleton_postprocess", "reprojection_solver", "reading_pipeline", "reader_v3", "video2rig_pipeline", "video2rig_blender", "v3_verification", "rig_pose", "pose_sampling_v3", "video_timing", "strip_renderer", "blender_runtime", "bone_taxonomy",
+    "pose_finetuning", "pose_features", "pose_visibility", "dinov2_pose_trainer", "pipeline_runner",
     "studio_bpy_worker", "runtime_metadata", "task_progress", "colab_g4_worker_server",
 )
 
@@ -34,7 +34,7 @@ def stop_previous_worker():
     old.APP.close()
 
 
-def configure(*, depth_visibility=True, dense_surface=False, mocap_priors=True, enable_2k=False, enable_3view=False, profile="full", cache_models=True,
+def configure(*, depth_visibility=True, dense_surface=False, mocap_priors=False, enable_2k=False, enable_3view=False, profile="full", cache_models=True,
               training_mode="partial", unfreeze_last_blocks=8, backbone_lr=1e-4,
               idle_timeout=0,
               drive_root="/content/drive/MyDrive/MonsterStudio",
@@ -56,7 +56,6 @@ def configure(*, depth_visibility=True, dense_surface=False, mocap_priors=True, 
         "MONSTER_WORK_ROOT": work_root,
         "MONSTER_ENABLE_DEPTH_VISIBILITY": "1" if depth_visibility else "0",
         "MONSTER_ENABLE_DENSE_SURFACE": "1" if dense_surface else "0",
-        "MONSTER_ENABLE_MOCAP_PRIORS": "1" if mocap_priors else "0",
         "MONSTER_ENABLE_2K": "1" if enable_2k else "0",
         "MONSTER_ENABLE_3VIEW": "1" if enable_3view else "0",
         "MONSTER_CACHE_MODELS_ON_DRIVE": "1" if cache_models else "0",

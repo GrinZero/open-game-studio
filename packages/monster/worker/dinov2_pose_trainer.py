@@ -32,13 +32,11 @@ import warnings
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from pose_features import (
-    calibrate_view_scale_drift,
     decode_mode,
     features_enabled,
     dense_surface_enabled,
     dense_grid_shape,
     match_dense_surface_correspondences,
-    mocap_priors_enabled,
     pipeline_feature_flags,
     rig_contract_v3_enabled,
     solver_mode,
@@ -48,8 +46,6 @@ from pose_features import (
     video_domain_degrade,
     fuse_depth_visibility,
     dinov2_panel_padding,
-    windowed_peak_dsnt_numpy,
-    windowed_peak_dsnt_torch,
 )
 from bone_taxonomy import (
     BONE_TAXONOMY_SCHEMA,
@@ -162,11 +158,6 @@ def dsnt_soft_argmax_numpy(logits: np.ndarray, beta: float = 12.0) -> tuple[np.n
     exp_u = np.sum(probs * grid_x, axis=(-2, -1))
     exp_v = np.sum(probs * grid_y, axis=(-2, -1))
     coords_norm = np.stack([exp_u, exp_v], axis=-1)
-    if mocap_priors_enabled():
-        deadband_norm = 2.5 / max(1.0, float(max(H_hm, W_hm)))
-        coords_norm = windowed_peak_dsnt_numpy(
-            probs, grid_x, grid_y, coords_norm, window_radius=3, pull_deadband_px=deadband_norm
-        ).astype(np.float32)
     return coords_norm, conf
 
 
@@ -224,7 +215,8 @@ if HAS_TORCH:
             self.reader_v3 = reader_v3
             if reader_v3:
                 from reader_v3 import ReaderHeads
-                self.reader_heads = ReaderHeads(int(num_bones), num_keypoints)
+                nb = int(num_bones) if num_bones is not None else num_keypoints
+                self.reader_heads = ReaderHeads(nb, num_keypoints)
             if custom_backbone is not None:
                 self.backbone = custom_backbone
             else:
@@ -392,11 +384,6 @@ if HAS_TORCH:
                 p_coords, p_conf = decode_heatmap_parabola_torch(logits)
                 out_conf = p_conf.to(logits.dtype) if peak_height_confidence else conf
                 return p_coords.to(logits.dtype), out_conf
-            if mocap_priors_enabled():
-                deadband_norm = 2.5 / max(1.0, float(max(H_hm, W_hm)))
-                coords_norm = windowed_peak_dsnt_torch(
-                    probs, grid_x, grid_y, coords_norm, window_radius=3, pull_deadband_px=deadband_norm
-                )
             return coords_norm, conf
 
         def forward_from_features(self, patch_grid: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -765,10 +752,18 @@ def train_monster_dinov2_probe(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     non_blocking = device.type == "cuda"
     from reader_v3 import ReaderDataset, READER_CONTRACT, resolve_temporal_context_contract
-    reader_v3 = (
-        rig_contract_v3_enabled()
-        and json.loads((Path(synth_dir) / "keypoints_gt.json").read_text()).get("reader_contract") == READER_CONTRACT
-    )
+    reader_v3 = rig_contract_v3_enabled()
+    if synth_dir and Path(synth_dir).exists():
+        kgt_path = Path(synth_dir) / "keypoints_gt.json"
+        if kgt_path.exists():
+            try:
+                kgt = json.loads(kgt_path.read_text(encoding="utf-8"))
+                if kgt.get("reader_contract") != READER_CONTRACT:
+                    reader_v3 = False
+            except Exception:
+                pass
+        else:
+            reader_v3 = False
     DatasetClass = ReaderDataset if reader_v3 else DualPanelMonsterDataset
     if reader_v3 and not enhanced: raise ValueError('V3 Reader requires depth/visibility enabled')
     ds = DatasetClass(synth_dir, bone_names, augment=True, enhanced=enhanced)
@@ -1247,19 +1242,6 @@ def evaluate_epipolar_consistency_and_triangulate(
             if has_right
             else None
         )
-        if mocap_priors_enabled():
-            uv_f_enh, uv_r_enh, _ = calibrate_view_scale_drift(
-                uv_front=uv_f_enh,
-                uv_side=uv_s_enh,
-                conf_front=conf_front_all,
-                conf_side=conf_side_all,
-                calib=calib,
-                uv_right=uv_r_enh,
-                conf_right=conf_right_all,
-                vis_front=visibility_front_all,
-                vis_side=visibility_side_all,
-                vis_right=visibility_right_all,
-            )
         epipolar_dv_px = np.abs(uv_f_enh[..., 1] - uv_s_enh[..., 1])
         epipolar_gate = np.exp(-0.5 * (epipolar_dv_px / (28.0 * res_scale)) ** 2)
         cs_gated = np.clip(conf_side_all.astype(np.float64) * (0.35 + 0.65 * epipolar_gate), 0.01, 1.0)
@@ -1917,7 +1899,7 @@ def evaluate_stage4_studio_exam(ckpt_path: str, exam_dir: str, out_report: str) 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="DINOv2 Probe Trainer, Exam Evaluator & 3D Triangulator")
-    parser.add_argument("--mode", required=True, choices=["train", "exam", "triangulate_video"])
+    parser.add_argument("--mode", required=True, choices=["train", "exam", "infer", "triangulate_video"])
     parser.add_argument("--synth_dir", help="Stage 2 synthetic dataset directory")
     parser.add_argument("--meta_path", help="Path to studio_rig_meta.json")
     parser.add_argument("--ckpt_path", required=True, help="Path to dinov2_head.pt")
@@ -1938,14 +1920,9 @@ def main() -> None:
                                     training_config=json.loads(args.training_config) if args.training_config else None)
     elif args.mode == "exam":
         evaluate_stage4_studio_exam(args.ckpt_path, args.exam_dir, args.out_json)
-    elif args.mode == "triangulate_video":
+    elif args.mode in ("infer", "triangulate_video"):
         frames = sorted(Path(args.video_frames_dir).glob("*.jpg")) + sorted(Path(args.video_frames_dir).glob("*.png"))
         res = infer_dual_view_frames(args.ckpt_path, frames)
-        if args.contact_events:
-            from motion_contact import refine_trajectory
-            with open(args.contact_events, encoding="utf-8") as stream:
-                contact_config = json.load(stream)
-            res = refine_trajectory(res, res["bones_meta"], res["joint_limits_profile"], contact_config)
         with open(args.out_json, "w", encoding="utf-8") as f:
             json.dump(res, f, indent=2, ensure_ascii=False)
         print(

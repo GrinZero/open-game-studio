@@ -46,6 +46,12 @@
     display: grid;
     grid-template-rows: 52px 1fr auto 48px;
   }
+  .app > * { min-width: 0; max-width: 100%; }
+  .topbar { overflow-x: auto; overscroll-behavior-x: contain; }
+  .workspace, .stage-grid, .viewport { min-width: 0; }
+  @media (max-width: 900px) {
+    .pose-title, .regime-badge, .topbar .quick-metrics { display: none; }
+  }
 
   /* Topbar */
   .topbar {
@@ -1106,6 +1112,8 @@ let summaryData = null;
 try { summaryData = __SUMMARY_DATA__; } catch (_e) { summaryData = null; }
 
 const REGIME_LABELS = {
+  video2rig_calm: "起始姿态附近 · 小幅",
+  video2rig_active: "起始姿态附近 · 常规",
   in_phase_boundary_extension: "同相伸展",
   antiphase_fold_boundary: "反相折叠",
   cross_occlusion_twist_boundary: "交叉与扭转",
@@ -1170,7 +1178,7 @@ let currentView = viewOrder.includes("front") ? "front" : viewOrder[0];
 let showOverlay = false;
 // labelMode: 'hover' | 'boundary' | 'all' | 'baked'
 let labelMode = "hover";
-let inspectorOpen = true;
+let inspectorOpen = window.innerWidth >= 1000;
 let stripOpen = true;
 let activeTab = "pose";
 let boneFilter = "all";
@@ -1710,7 +1718,7 @@ function renderInspectorPosePane(pose) {
     </div>
     <div class="stat-card">
       <div class="k">胸腔刚体拟合误差</div>
-      <div class="v">${measured ? Number(m.chest_rigid_fit_max_m || 0).toFixed(6) + " m" : "未测量"}</div>
+      <div class="v">${measured && pose.metrics?.chest_fit_available ? Number(m.chest_rigid_fit_max_m).toFixed(6) + " m" : "未测量"}</div>
       <div class="sub">最大边拉伸比 ${measured ? (m.max_stretch_ratio ?? "-") : "未测量"}</div>
     </div>
   `;
@@ -1719,13 +1727,13 @@ function renderInspectorPosePane(pose) {
   document.getElementById("boundaryCountLabel").textContent = String(bList.length);
   const listEl = document.getElementById("boundaryList");
   if (!bList.length) {
-    listEl.innerHTML = `<div class="summary-note">当前姿势为内部均匀过渡区样本，无关节压在 85%~100% 极值边界。</div>`;
+    listEl.innerHTML = `<div class="summary-note">当前姿势没有触达所配置的边界区。</div>`;
     return;
   }
 
   listEl.innerHTML = bList
     .map((bj) => {
-      const ratio = bj.limit_deg
+      const ratio = bj.utilization != null ? Math.round(bj.utilization * 100) : bj.limit_deg
         ? Math.min(100, Math.round((Math.abs(bj.deg) / Math.max(0.1, Math.abs(bj.limit_deg))) * 100))
         : 90;
       const boundText = bj.bound === "lo" ? "下界 lo" : "上界 hi";
@@ -1822,11 +1830,11 @@ function renderInspectorBatchPane(pose) {
   const rejectedCount = summaryData?.render_receipt?.rejected_draws ??
     (Array.isArray(summaryData?.rejection_redraw_log) ? summaryData.rejection_redraw_log.length : 0);
   const cov = summaryData?.coverage_audit || {};
-  const activeDof = cov.active_dof_count ?? poses[0]?.boundary?.active_axes_count ?? 52;
-  const bothCovered = cov.both_bounds_covered_count ?? activeDof;
+  const activeDof = cov.active_dof_count ?? poses[0]?.boundary?.active_axes_count ?? 0;
+  const bothCovered = cov.both_bounds_covered_count ?? 0;
   const covRate = cov.both_bounds_coverage_ratio !== undefined
     ? `${Math.round(cov.both_bounds_coverage_ratio * 100)}%`
-    : "100%";
+    : "未记录";
   const engine = summaryData?.render_receipt?.backend?.engine || "CYCLES";
   const backendDev = summaryData?.render_receipt?.backend?.backend || "GPU";
 
@@ -1839,7 +1847,7 @@ function renderInspectorBatchPane(pose) {
     <div class="stat-card">
       <div class="k">双侧边界覆盖率</div>
       <div class="v" style="color:var(--emerald)">${covRate} (${bothCovered}/${activeDof})</div>
-      <div class="sub">全部活动自由度触达正负 85%~100%</div>
+      <div class="sub">实际边界触达统计；不代表自然度或通过要求</div>
     </div>
     <div class="stat-card">
       <div class="k">正式样本 / 异常重抽</div>
@@ -1854,7 +1862,7 @@ function renderInspectorBatchPane(pose) {
   `;
 
   const policyText = summaryData?.sampler_policy ||
-    "5 模态分层边界探索随机采样（25% 同相伸展、20% 反相折叠、20% 交叉扭转、20% 全身与根部运动、15% 内部均匀覆盖）＋ 通用三层几何/拓扑关节协调（同骨多轴椭球耦合、跨骨骼拓扑耦合、多球体 FK 体积防穿插）。";
+    "当前审阅包未记录采样策略，请核对原始采样记录。";
   document.getElementById("batchPolicyNote").innerHTML = `
     <div><strong>采样与协调策略：</strong>${policyText}</div>
     <div style="margin-top:6px"><strong>生成时间：</strong>${summaryData?.generated_at || "当前批次"} · <strong>审计状态：</strong>${summaryData?.user_decision || "awaiting_pose_review"}</div>
@@ -2175,6 +2183,8 @@ window.addEventListener("keydown", (e) => {
 });
 
 // Initialize
+inspectorDrawer.classList.toggle("collapsed", !inspectorOpen);
+toggleInspectorBtn.classList.toggle("active", inspectorOpen);
 initToolbarViews();
 buildStageViewports();
 buildFilmstripAndProgress();

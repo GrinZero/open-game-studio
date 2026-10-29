@@ -5,6 +5,29 @@ import numpy as np
 START_POSE_CONTRACT = "monster-start-pose-v1"
 
 
+def rigid_rotation(value, name="rotation"):
+    """Remove Blender float32 drift, while rejecting actual scale/shear/reflection."""
+    rotation = np.asarray(value, dtype=float)
+    if rotation.shape != (3, 3) or not np.isfinite(rotation).all():
+        raise ValueError(f"{name}: invalid rigid rotation")
+    u, singular, vt = np.linalg.svd(rotation)
+    if np.linalg.det(rotation) <= 0 or np.max(np.abs(singular - 1.0)) > 1e-4:
+        raise ValueError(f"{name}: scale, shear or reflection is not a rigid rotation")
+    return u @ vt
+
+
+def rigid_pose_basis(value, name="pose_basis"):
+    local = np.asarray(value, dtype=float).copy()
+    if (
+        local.shape != (4, 4)
+        or not np.isfinite(local).all()
+        or not np.allclose(local[3], [0, 0, 0, 1])
+    ):
+        raise ValueError(f"{name}: invalid saved pose_basis")
+    local[:3, :3] = rigid_rotation(local[:3, :3], name)
+    return local
+
+
 def start_pose_matrices(bones):
     """Evaluate Blender's parent-relative matrix_basis contract in world coordinates.
 
@@ -15,17 +38,10 @@ def start_pose_matrices(bones):
     basis = {}
     for name, bone in bones.items():
         matrix = np.eye(4)
-        matrix[:3, :3] = np.asarray(bone["rest_rot_mat_world"], dtype=float)
+        matrix[:3, :3] = rigid_rotation(bone["rest_rot_mat_world"], name)
         matrix[:3, 3] = bone["rest_head_world"]
         rest[name] = matrix
-        local = np.asarray(bone.get("pose_basis", np.eye(4)), dtype=float)
-        if (
-            local.shape != (4, 4)
-            or not np.isfinite(local).all()
-            or not np.allclose(local[3], [0, 0, 0, 1])
-        ):
-            raise ValueError(f"{name}: invalid saved pose_basis")
-        basis[name] = local
+        basis[name] = rigid_pose_basis(bone.get("pose_basis", np.eye(4)), name)
     posed = {}
     pending = set(bones)
     while pending:
@@ -63,7 +79,7 @@ def start_pose_vertices(skin, bones):
     transforms = []
     for name in names:
         rest = np.eye(4)
-        rest[:3, :3] = bones[name]["rest_rot_mat_world"]
+        rest[:3, :3] = rigid_rotation(bones[name]["rest_rot_mat_world"], name)
         rest[:3, 3] = bones[name]["rest_head_world"]
         transforms.append(posed[name] @ np.linalg.inv(rest))
     ids = np.asarray(skin["skin_indices"], dtype=int)

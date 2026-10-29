@@ -4,7 +4,11 @@
   "authentication": "username-password",
   "endpoints": {
     "heartbeat": [],
-    "rig_candidates": ["monster_id", "input_glb_file", "run_auto_audit"],
+    "rig_candidates": [
+      "monster_id",
+      "input_glb_file",
+      "run_auto_audit"
+    ],
     "train_monster_probe": [
       "monster_id",
       "custom_blend_file",
@@ -24,10 +28,19 @@
       "bake_glb_on_cloud",
       "auto_shutdown_after"
     ],
-    "shutdown": ["reason"]
+    "shutdown": [
+      "reason"
+    ]
   },
   "file_outputs": {
-    "rig_candidates": ["rig_metadata_json", "rig_bundle_zip"],
-    "generate_actions_batch": ["batch_summary_json", "animations_bundle_zip"]
-  }
+    "rig_candidates": [
+      "rig_metadata_json",
+      "rig_bundle_zip"
+    ],
+    "generate_actions_batch": [
+      "batch_summary_json",
+      "animations_bundle_zip"
+    ]
+  },
+  "orientation_contract": "monster-reviewed-orientation-v1"
 }

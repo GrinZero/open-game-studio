@@ -121,7 +121,9 @@ def load_probe_weights(model, checkpoint):
     model.head.load_state_dict(checkpoint["head_state_dict"])
     if model.enable_depth_visibility:
         model.aux_head.load_state_dict(checkpoint["aux_state_dict"])
-    if getattr(model, "reader_v3", False):
+    if getattr(model, "reader_v3", False) and (
+        "reader_heads_state_dict" in checkpoint or "reader_contract" in checkpoint
+    ):
         if checkpoint.get("reader_contract") != "monster-reader-v3":
             raise ValueError("V3 Reader weights require a v3 checkpoint; regenerate labels and retrain")
         rh_state = dict(checkpoint["reader_heads_state_dict"])

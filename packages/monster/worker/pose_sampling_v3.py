@@ -4,7 +4,9 @@ import math
 from copy import deepcopy
 import numpy as np
 
-SAMPLING_CONTRACT = "monster-calibrated-sampling-v1"
+SAMPLING_CONTRACT = "monster-calibrated-sampling-v2"
+POSE_POLICY = "video2rig-start-pose-v1"
+POSE_REGIMES = ("video2rig_calm", "video2rig_active")
 
 
 def sampling_audit_inputs(records, bones):
@@ -17,6 +19,13 @@ def sampling_audit_inputs(records, bones):
     for name in meta:
         if name not in fitted:
             meta[name]["fixed_local"] = True
+    if reports[0].get("sampling_policy") == POSE_POLICY:
+        # Motion roots are solved in world SO(3), with no local Euler box.
+        # Euler components below are reporting coordinates, not joint limits.
+        for name in reports[0].get("motion_roots", ()):
+            meta[name]["limits_rad"] = [[-math.pi, math.pi] for _ in range(3)]
+            meta[name]["limits_source"] = "agent_custom"
+            meta[name]["allow_leaf_twist"] = True
     audit = []
     for record, report in zip(records, reports):
         if set(report.get("fitted_bones", ())) != fitted:
@@ -54,6 +63,52 @@ def sampling_events(rng, *, calm=False, motion_blur=False):
         "strike": motion_blur and rng.random() < 0.25,
         "lunge": motion_blur and rng.random() < 0.30,
     }
+
+
+def sample_start_pose(rig, rng):
+    """Port video2rig.reader.poses.sample's local distribution to this rig contract.
+
+    Python Random.gauss is used instead of numpy.normal; fixed seeds are stable
+    within this implementation, not bit-identical to the source repository.
+    """
+    from scipy.spatial.transform import Rotation
+
+    calm = rng.random() < .3
+    scale = .4 if calm else 1.0
+    p0 = rig.start_params()
+    eulers = {}
+    for name in rig.order:
+        entry = rig.slices.get(name)
+        initial = Rotation.from_matrix(rig.basis[name][:3, :3]).as_euler("xyz")
+        if isinstance(entry, slice):
+            initial = Rotation.from_rotvec(p0[entry.start:entry.start + 3]).as_euler("xyz")
+            # World Z is up here; the source uses its measured up/facing axes.
+            delta = np.radians([
+                np.clip(rng.gauss(0, 8), -25, 25),
+                np.clip(rng.gauss(0, 4), -12, 12),
+                np.clip(rng.gauss(0, 12), -30, 30),
+            ]) * scale
+            initial = (Rotation.from_euler("xyz", delta) * Rotation.from_euler("xyz", initial)).as_euler("xyz")
+        elif entry is not None:
+            indices, channels = entry
+            info = rig.meta[name]
+            hinge = info.get("hinge") or {}
+            roles = info.get("axis_roles", {})
+            for slot, axis in zip(indices, channels):
+                if axis == 1 and name not in rig.parents.values() and not info.get("allow_leaf_twist", False):
+                    initial[axis] = p0[slot]
+                    continue
+                lo, hi, start = rig.lower[slot], rig.upper[slot], p0[slot]
+                role = roles.get(("rx", "ry", "rz")[axis], "twist" if axis == 1 else "bend")
+                factor, cap = {"bend": (.5, 1.6), "twist": (.3, 1.2), "side": (.4, 1.2)}.get(role, (.5, 1.6))
+                sd = factor * min(max(hi - start, start - lo), cap)
+                value = rng.uniform(lo, hi) if hinge.get("axis") == int(axis) else start + rng.gauss(0, sd)
+                initial[axis] = np.clip(start + scale * (value - start), lo, hi)
+            limits = np.asarray(info.get("limits_rad", [[-np.pi, np.pi]] * 3))
+            frozen = limits[:, 1] - limits[:, 0] <= 1e-8
+            initial[frozen] = limits[frozen, 0]
+        eulers[name] = initial.tolist()
+    return eulers, calm
 
 
 def posed_surface(rig, params, skin):

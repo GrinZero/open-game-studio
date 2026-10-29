@@ -22,22 +22,187 @@ try:
 except ImportError:
     Image = None  # type: ignore
 
-from mocap_priors import (  # noqa: E402
-    MOCAP_PRIORS_ENV,
-    MOCAP_PRIORS_SCHEMA,
-    blend_limb_afterimage_ghost_rgba,
-    bone_motion_blur_speed_factor,
-    calibrate_view_scale_drift,
-    compute_chain_wave_target_euler,
-    compute_mesh_edge_stretch_metric,
-    dejitter_velocity_gated,
-    mocap_priors_enabled,
-    sample_ghost_perturbation_eulers,
-    verify_blender_lbs_skin_consistency,
-    whittaker_charbonnier_smooth_trajectory,
-    windowed_peak_dsnt_numpy,
-    windowed_peak_dsnt_torch,
-)
+MOCAP_PRIORS_SCHEMA = "monster-mocap-priors-v1"
+MOCAP_PRIORS_ENV = "MONSTER_ENABLE_MOCAP_PRIORS"
+
+
+def mocap_priors_enabled() -> bool:
+    """Legacy v2 mocap priors stub; deprecated and always returns False in v3."""
+    return False
+
+
+def extract_unique_edges_from_faces(faces: np.ndarray) -> np.ndarray:
+    """Extracts unique undirected mesh edges (M, 2) from triangle indices (F, 3)."""
+    f = np.asarray(faces, dtype=np.int64)
+    if f.ndim != 2 or f.shape[1] < 3 or len(f) == 0:
+        return np.zeros((0, 2), dtype=np.int64)
+    e01 = np.sort(f[:, [0, 1]], axis=1)
+    e12 = np.sort(f[:, [1, 2]], axis=1)
+    e20 = np.sort(f[:, [2, 0]], axis=1)
+    all_edges = np.vstack([e01, e12, e20])
+    return np.unique(all_edges, axis=0)
+
+
+def compute_mesh_edge_stretch_metric(
+    rest_vertices: np.ndarray,
+    posed_vertices: np.ndarray,
+    edges_or_faces: np.ndarray,
+    max_stretch: float = 1.80,
+    min_stretch: float = 0.45,
+    max_bad_ratio: float = 0.02,
+) -> dict[str, Any]:
+    """Evaluates deformed mesh edge stretch ratios r = L_posed / L_rest to detect skinning tear/collapse."""
+    v_rest = np.asarray(rest_vertices, dtype=np.float64)
+    v_posed = np.asarray(posed_vertices, dtype=np.float64)
+    ef = np.asarray(edges_or_faces, dtype=np.int64)
+    if ef.ndim == 2 and ef.shape[1] == 3:
+        edges = extract_unique_edges_from_faces(ef)
+    elif ef.ndim == 2 and ef.shape[1] == 2:
+        edges = ef
+    else:
+        edges = np.zeros((0, 2), dtype=np.int64)
+
+    if len(edges) == 0 or len(v_rest) == 0 or v_rest.shape != v_posed.shape:
+        return {
+            "passed": True,
+            "bad_edge_ratio": 0.0,
+            "max_stretch_ratio": 1.0,
+            "min_stretch_ratio": 1.0,
+            "edge_count": 0,
+        }
+
+    d_rest = np.linalg.norm(v_rest[edges[:, 0]] - v_rest[edges[:, 1]], axis=-1)
+    d_posed = np.linalg.norm(v_posed[edges[:, 0]] - v_posed[edges[:, 1]], axis=-1)
+    valid = d_rest > 1e-5
+    if not np.any(valid):
+        return {
+            "passed": True,
+            "bad_edge_ratio": 0.0,
+            "max_stretch_ratio": 1.0,
+            "min_stretch_ratio": 1.0,
+            "edge_count": int(len(edges)),
+        }
+
+    ratios = d_posed[valid] / d_rest[valid]
+    bad_mask = (ratios > float(max_stretch)) | (ratios < float(min_stretch))
+    bad_ratio = float(np.mean(bad_mask))
+    return {
+        "passed": bool(bad_ratio <= float(max_bad_ratio)),
+        "bad_edge_ratio": round(bad_ratio, 5),
+        "max_stretch_ratio": round(float(np.max(ratios)), 4),
+        "min_stretch_ratio": round(float(np.min(ratios)), 4),
+        "edge_count": int(np.sum(valid)),
+    }
+
+
+def verify_blender_lbs_skin_consistency(
+    rest_vertices: np.ndarray,
+    blender_posed_vertices: np.ndarray,
+    bone_weights: np.ndarray,
+    bone_indices: np.ndarray,
+    rest_heads: np.ndarray,
+    rest_rots: np.ndarray,
+    posed_heads: np.ndarray,
+    posed_rots: np.ndarray,
+    lbs_deform_fn: Any,
+    tol_ratio: float = 0.015,
+) -> dict[str, Any]:
+    """Verifies that Blender evaluated mesh deformation matches analytical LBS."""
+    v_rest = np.asarray(rest_vertices, dtype=np.float64)
+    v_bl = np.asarray(blender_posed_vertices, dtype=np.float64)
+    if len(v_rest) == 0 or v_rest.shape != v_bl.shape:
+        return {
+            "consistent": True,
+            "max_vertex_error": 0.0,
+            "mean_vertex_error": 0.0,
+            "relative_max_error": 0.0,
+        }
+    v_lbs = lbs_deform_fn(
+        v_rest,
+        bone_weights,
+        bone_indices,
+        rest_heads,
+        rest_rots,
+        posed_heads,
+        posed_rots,
+    )
+    errs = np.linalg.norm(v_lbs - v_bl, axis=-1)
+    max_err = float(np.max(errs))
+    mean_err = float(np.mean(errs))
+    bbox_diag = float(np.linalg.norm(np.max(v_rest, axis=0) - np.min(v_rest, axis=0)))
+    rel_max = max_err / max(1e-6, bbox_diag)
+    return {
+        "consistent": bool(rel_max <= float(tol_ratio)),
+        "max_vertex_error": round(max_err, 6),
+        "mean_vertex_error": round(mean_err, 6),
+        "relative_max_error": round(rel_max, 6),
+    }
+
+
+def dejitter_velocity_gated(
+    x: np.ndarray,
+    v_fast: float | None = None,
+    passes: int = 2,
+    strength: float = 0.55,
+) -> np.ndarray:
+    """Velocity-gated micro-jitter filter suppressing stationary tremor while passing motion peaks."""
+    arr = np.asarray(x, dtype=np.float64)
+    T = int(arr.shape[0])
+    if T < 5 or strength <= 0.0:
+        return arr.copy()
+    lp = arr.copy()
+    for _ in range(max(1, int(passes))):
+        nxt = lp.copy()
+        nxt[1:-1] = 0.25 * lp[:-2] + 0.50 * lp[1:-1] + 0.25 * lp[2:]
+        lp = nxt
+    step_diff = np.linalg.norm(arr[1:] - arr[:-1], axis=-1, keepdims=True)
+    speed_prev = np.concatenate([step_diff[:1], step_diff], axis=0)
+    speed_next = np.concatenate([step_diff, step_diff[-1:]], axis=0)
+    speed = np.maximum(speed_prev, speed_next)
+    if v_fast is None or v_fast <= 0.0:
+        med_speed = np.median(speed, axis=0, keepdims=True)
+        v_thresh = np.maximum(1e-5, 1.35 * med_speed)
+    else:
+        v_thresh = float(v_fast)
+    gate = float(strength) / (1.0 + (speed / v_thresh) ** 2)
+    return arr + gate * (lp - arr)
+
+
+def bone_motion_blur_speed_factor(kind: str, sub_role: str = "", chain_index: int = 0) -> float:
+    """Returns per-bone relative speed factor for synthetic motion blur."""
+    k = kind.strip().lower()
+    idx = max(0, int(chain_index))
+    if k == "rigid":
+        return 0.0
+    if k in ("root", "spine"):
+        return 0.15
+    if k in ("head", "jaw"):
+        return 0.35
+    if k in ("limb", "digit", "wing"):
+        base = 1.45 if sub_role in ("forearm_hinge", "lower_limb", "hand_hub") else 1.10
+        return min(2.4, base + 0.28 * idx)
+    if k in ("tail", "flex"):
+        return min(2.2, 0.90 + 0.25 * idx)
+    return 1.0
+
+
+def calibrate_view_scale_drift(
+    uv_front: np.ndarray,
+    uv_side: np.ndarray,
+    conf_front: np.ndarray | None = None,
+    conf_side: np.ndarray | None = None,
+    calib: dict[str, Any] | None = None,
+    uv_right: np.ndarray | None = None,
+    **kwargs: Any,
+) -> tuple[np.ndarray, np.ndarray | None, dict[str, Any]]:
+    """Passthrough fallback for view drift compensation in v3."""
+    diag = {
+        "view_drift_calibrated": False,
+        "max_abs_dy_px": 0.0,
+        "mean_abs_dy_px": 0.0,
+        "max_abs_scale_pct": 0.0,
+    }
+    return uv_front.copy(), (uv_right.copy() if uv_right is not None else None), diag
 
 FEATURE_ENV = "MONSTER_ENABLE_DEPTH_VISIBILITY"
 RESOLUTION_2K_ENV = "MONSTER_ENABLE_2K"
@@ -256,7 +421,6 @@ def pipeline_feature_flags() -> dict[str, object]:
         "panel_drift": panel_drift_enabled(),
         "depth_visibility": features_enabled(),
         "dense_surface": dense_surface_enabled(),
-        "mocap_priors": mocap_priors_enabled(),
         "enable_2k": resolution_2k_enabled(),
         "enable_3view": three_view_enabled(),
     }
@@ -328,6 +492,8 @@ def dataset_signature(blend_path, meta_path, num_samples, seed=42):
     meta = json.loads(Path(meta_path).read_text())
     meta.pop("calibration", None)  # Stage 2 adds calibration; it is not a rig change.
     digest = hashlib.sha256()
+    from pose_sampling_v3 import SAMPLING_CONTRACT, POSE_POLICY
+    digest.update(f"{SAMPLING_CONTRACT}:{POSE_POLICY}".encode())
     with open(blend_path, "rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
@@ -375,7 +541,7 @@ def dataset_cache_matches(synth_dir, blend_path, meta_path, num_samples):
             return False
         if v3 and data.get("context_geometry_contract") != "monster-context-pose-v1":
             return False
-        if v3 and data.get('sampling_contract') != 'monster-calibrated-sampling-v1':
+        if v3 and data.get('sampling_contract') != 'monster-calibrated-sampling-v2':
             return False
         if bool(data.get("dense_surface_enabled", False)) != (v3 or dense_surface_enabled()):
             return False

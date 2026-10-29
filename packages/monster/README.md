@@ -63,7 +63,7 @@ npm run monster:call -- shutdown
 
 ## DINOv2 主干微调
 
-默认采用部分微调：检测头热身 1 轮后，解冻 DINOv2-base 最后 8 层及输出 LayerNorm，主干学习率 `1e-4`。Notebook Cell 1 可切换 `TRAINING_MODE="frozen"` 做同配置冻结对照。按姿态固定留出 5% 验证集、保存验证最优 checkpoint，微调主干与检测头一起保存并加载；支持 `--init_checkpoint` 从兼容旧权重继续训练。原生分辨率保持，默认 micro-batch 2、累积 16 次、activation checkpointing。完整配置与 A/B 操作见 [运行说明](skills/monster-workflow/references/runtime.md#主干微调与冻结对照)。正式效果仍须独立 G3 考试确认。
+默认采用部分微调（`MONSTER_BACKBONE=dinov2-small`，$d=384$；可选 `dinov2_vitb14_reg` $d=768$）：检测头热身 1 轮后，冻结前 4 层并解冻最后 8 层及输出 LayerNorm，主干学习率 `1e-4`、检测头 `1e-3`。Notebook Cell 1 可切换 `TRAINING_MODE="frozen"` 做同配置冻结对照。按姿态固定留出 5% 验证集、保存验证最优 checkpoint，微调主干与检测头一起保存并加载；支持 `--init_checkpoint` 从同契约权重继续训练。默认 micro-batch 2、累积 16 次、activation checkpointing。完整配置与 A/B 操作见 [运行说明](skills/monster-workflow/references/runtime.md#主干微调与冻结对照)。正式效果须独立 G3 考试确认。
 
 ## 检查与离线打包
 
@@ -109,14 +109,10 @@ AGPL 允许商业使用、收费分发和收费服务。分发时须履行对应
 第三方代码、依赖和模型保留自己的许可。特别是 **MiniMax H3 使用带地域、商业门槛和可接受用途限制的社区许可**，不能因为 Monster 改为 AGPL 就视为已获所有商业部署授权。核心上游版本、证据及保留的许可文本见 [第三方声明](THIRD_PARTY.md)。部署归档附带这些说明与许可文本；它不包含模型权重或第三方仓库检出。
 
 
-## v3 Video2Rig integration
+## Video2Rig v3 管线与渲染环境
 
-New candidates use anatomical v3 names and retain fingers/toes. The v3 Reader adds calibrated orthographic/perspective cameras, 896→448 moving windows, temporal heatmaps, bone-local dense targets, 224-pixel hand/paw refinement and direct multi-view 2D reprojection fitting. Legacy v2 evaluation data and checkpoints keep their existing inference route. New rigs/labels require retraining and renewed G1/G2/G3 approval; no user character files are migrated automatically. See [runtime parameters and compatibility](skills/monster-workflow/references/video2rig-v3.md).
+候选骨架使用解剖学规范命名（`monster-bone-taxonomy-v3`）并默认保留完整手指/脚趾（`MONSTER_FOLD_DIGITS=0`）。v3 Reader（`monster-reader-v3`）包含标定正交/透视相机、`896→448` p95 移动窗口、双向时序热图、表皮关键点与密集场、手爪 `224×224` 局部放大精修、解析雅可比混合 Cauchy 多视角 2D 重投影求解以及 8 步 `clean_motion` 后处理。详见 [v3 算法与运行参数](skills/monster-workflow/references/video2rig-v3.md)。
 
-Local CPU and Blender fixture checks validate the code paths, including real GLB export/readback. They do not establish accuracy or GPU throughput on a production character.
+Stage 2 默认 EEVEE 8 spp 动画条带渲染，最多 16 副本，按图像宽度自动拆批；原图以 896px 渲染并按 p95 移动窗口同步裁剪到 448px Reader 输入。配置见 [EEVEE 动画条带渲染](skills/monster-workflow/references/video2rig-v3.md#eevee-动画条带渲染)。
 
-
-Stage 2 默认 EEVEE 8 spp 动画条带渲染，最多 16 副本，按图像宽度自动拆批；v3 原图以 896px 渲染并按完整网格紧致框同步裁剪到 448px Reader 输入。配置及缓存兼容说明见 [EEVEE 动画条带渲染](skills/monster-workflow/references/video2rig-v3.md#eevee-动画条带渲染)。
-
-
-Blender 渲染环境已升级至 `bpy==5.2.3` / Python 3.13，直接依赖固定于 `worker/blender-requirements.txt`；Colab Cell 2 自动准备独立环境 `/content/monster-bpy/venv`，与 SkinTokens 的 Python 3.11（内部最新兼容 LTS bpy 4.5.15）分开。旧 `ready.json` 需通过版本核对，避免跳过升级。参考 [Blender 运行版本](contracts/blender-runtime.json)。
+Blender 渲染环境固定为 `bpy==5.2.3` / Python 3.13，直接依赖固定于 `worker/blender-requirements.txt`；Colab Cell 2 自动准备独立环境 `/content/monster-bpy/venv`，与 SkinTokens 的 Python 3.11（内部 LTS `bpy==4.5.15`）隔离。参考 [Blender 运行版本](contracts/blender-runtime.json)。

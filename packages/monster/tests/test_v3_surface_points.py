@@ -61,6 +61,7 @@ def skin_for(meta, names=None):
         skin_indices=np.array(indices)[:, None],
         skin_weights=np.ones((len(points), 1)),
         height=2.0,
+        floor_z=0.0,  # This fixture contains only the hand, not the actor's sole.
     )
 
 

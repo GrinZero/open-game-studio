@@ -12,3 +12,7 @@ Read workflow_get: run.inputSnapshot is the frozen production context; execution
 Candidate browsing does not write a decision. Only invoke workflow_decide when the user has chosen the version or expressly authorized that review scope; set actor=delegated_agent for an Agent decision. A delegated actor label alone is not authorization. Stop at awaiting_review when needed and return the fixed candidates and decision required.
 
 On return or restart, query the existing run. Repairs use a new local rerun via job_control, preserving previous results. Export only after current review gates. Completion means saved production outputs and honest validation status, not an unverified claim of game readiness.
+
+## Textured model completion
+
+After a complete model has geometry, UVs, materials and textures, load [glb-compress](../glb-compress/SKILL.md) and its compression policy by default before delivery. Re-run this step after texture changes. Generate project-aware recommendations and visual candidates in one dedicated temporary directory; keep the complete source and fixed production versions intact. Godot projects use geometry=off. Choose between WebP 1K/2K (or source resolution when detail requires it) using actual size and same-camera renders, not triangle count alone. Do not apply this step to unfinished meshes or replace a reviewed rig/training source with a compressed derivative.

@@ -133,7 +133,7 @@ npm run install:local
 
 ## 도구와 문서
 
-**도메인 MCP 도구 26개 + 앱 전용 브리지 1개 · 워크플로 스킬 12개.** HTTP 버전과 MCP Apps 내장 버전은 같은 프로젝트 코어와 에셋 이력을 공유합니다.
+**도메인 MCP 도구 26개 + 앱 전용 브리지 1개 · 워크플로 스킬 13개.** HTTP 버전과 MCP Apps 내장 버전은 같은 프로젝트 코어와 에셋 이력을 공유합니다.
 
 | 문서 | 내용 |
 | --- | --- |
@@ -143,6 +143,7 @@ npm run install:local
 | [검증 기록](docs/VERIFICATION.md) | 수행한 검증과 실제 환경에서 확인해야 할 항목. |
 | [구현 현황](docs/IMPLEMENTATION.md) | 구조, 미완료 단계와 향후 작업. |
 | [Monster 모듈](packages/monster/README.md) | [![Open in Colab](docs/images/open-in-colab.svg)](https://colab.research.google.com/github/GrinZero/codex-game-studio/blob/main/packages/monster/notebooks/colab.ipynb) 실행, Worker 소스 및 자동 탐색 로컬 클라이언트. |
+| [로컬 GLB 압축 스킬](skills/glb-compress/SKILL.md) | 독립 배포 가능한 오프라인 CLI. Draco, 텍스처, 크기 조정 및 비교 보고서를 지원합니다. |
 
 <a id="limits"></a>
 

@@ -29,13 +29,16 @@ def workbench(scene, samples=None):
 
 
 worker.configure_blender_gpu_rendering = workbench
-worker.generate_stage2_synthetic_dataset(
-    a.blend_path,
-    a.meta_path,
-    a.out_dir,
-    num_samples=a.num_samples,
-    seed=a.seed,
-    limits_path=a.limits_path,
-    boundary_exploration=True,
-)
+if a.mode == "probe_joint_limits":
+    worker.sop_probe_joint_limits(a.blend_path, a.meta_path, a.limits_path, "native-g2")
+else:
+    worker.generate_stage2_synthetic_dataset(
+        a.blend_path,
+        a.meta_path,
+        a.out_dir,
+        num_samples=a.num_samples,
+        seed=a.seed,
+        limits_path=a.limits_path,
+        boundary_exploration=True,
+    )
 print("ACTUAL_G2_BOUNDARY_LABELS")
