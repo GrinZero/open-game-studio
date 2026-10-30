@@ -1,8 +1,8 @@
 export const defaults = Object.freeze({
   preset: "balanced",
   geometry: "on",
-  textures: "webp",
-  resizeMax: 1024,
+  textures: "ktx2",
+  resizeMax: 0,
   simplify: "off",
   simplifyRatio: 0.75,
   simplifyError: 0.0001,

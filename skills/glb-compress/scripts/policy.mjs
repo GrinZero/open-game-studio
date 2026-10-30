@@ -62,6 +62,25 @@ export function recommendCompression(
     throw Error("usage must be standard, close or distant");
   const textureBytes = stats.textures.reduce((sum, t) => sum + t.bytes, 0);
   const share = stats.bytes ? textureBytes / stats.bytes : 0;
+  const textureAssessment = stats.textures
+    .map((t, index) => ({
+      index,
+      name: t.name ?? "",
+      slots: t.slots ?? [],
+      mimeType: t.mimeType ?? null,
+      size: t.size ?? null,
+      bytes: t.bytes,
+      containerShare: stats.bytes ? t.bytes / stats.bytes : 0,
+      suggestedChecks: [
+        ...(["image/png", "image/webp"].includes(t.mimeType)
+          ? [
+              "Measure original-size lossless re-encoding; verify decoded pixels and data interpretation before claiming lossless savings.",
+            ]
+          : []),
+        "Choose encoding/resolution from actual size savings and material appearance; retain original when benefit is insufficient.",
+      ],
+    }))
+    .sort((a, b) => b.bytes - a.bytes || a.index - b.index);
   const band =
     stats.triangles < 10000
       ? "low"
@@ -86,13 +105,19 @@ export function recommendCompression(
   };
   const reasons = [
     `${stats.triangles} triangles (${band} triage band); textures ${(share * 100).toFixed(1)}% of container bytes.`,
+    "Inspect the ranked per-texture assessment first. No texture type is automatically excluded or selected; bulk codec profiles are exploratory candidates, not a delivery recommendation.",
   ];
   const candidates = [];
   if (stats.textures.length) {
     candidates.push({
+      id: "ktx2",
+      options: { ...baseline, textures: "ktx2", resizeMax: 0 },
+      role: "default KTX2 candidate at source resolution; user visual comparison required before adoption",
+    });
+    candidates.push({
       id: "webp2k",
       options: { ...baseline, textures: "webp", resizeMax: 2048 },
-      role: "quality-first candidate",
+      role: "exploratory whole-file candidate; assess per-texture suitability before execution",
     });
     if (maxSize > 1024)
       candidates.push({
@@ -142,13 +167,13 @@ export function recommendCompression(
     );
   reasons.push(
     usage === "close"
-      ? "Close-up use: start at 2K; if fine detail still changes, retain source dimensions/encoding."
+      ? "Close-up use: compare at the closest intended distance; retain needed resolution and material detail."
       : usage === "distant"
-        ? "Distant use: 1K may win, but inspect alpha edges and the closest allowed camera distance."
-        : "Start with 2K, then select 1K only when same-camera visual comparison supports it.",
+        ? "Distant use: lower resolutions may help; inspect alpha edges and the closest allowed camera distance."
+        : "Choose encoding and resolution only after inspecting actual payloads and measuring savings and same-camera visual changes.",
   );
   return {
-    policyVersion: "1.0.0",
+    policyVersion: "1.2.0",
     context,
     usage,
     analysis: {
@@ -161,8 +186,12 @@ export function recommendCompression(
       animated,
     },
     status: "candidates_require_visual_comparison",
-    preferredTrial: candidates.find((c) => c.id === "webp2k")?.id ?? "original",
+    nextStep: stats.textures.length
+      ? "generate_ktx2_candidate_then_wait_for_user_visual_comparison"
+      : "inspect_actual_texture_payloads_and_measure_relevant_candidates",
+    preferredTrial: stats.textures.length ? "ktx2" : null,
     selected: null,
+    textureAssessment,
     original: {
       id: "original",
       role: "reference and valid final choice when compression worsens appearance or saves little",
@@ -170,6 +199,13 @@ export function recommendCompression(
     candidates,
     reasons,
     review: {
+      humanApprovalRequired: stats.textures.length > 0,
+      status: stats.textures.length
+        ? "awaiting_comparison_evidence_and_user_choice"
+        : "not_applicable",
+      decision: null,
+      acceptance:
+        "Only the user's explicit choice of the current candidate authorizes adoption; a new output invalidates previous approval.",
       views: [
         "normal gameplay distance",
         "closest intended distance",

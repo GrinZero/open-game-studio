@@ -146,6 +146,9 @@ for label, y in [("end1", 0.1), ("end2", 0.5), ("mid", 0.3)]:
         lookup["Prop_tool." + label]["local"], [0, y, 0], atol=2e-6
     )
 rig = RigModel(meta, names, skin)
+# The production model snaps landmarks to real skin vertices. Quantile checks
+# above cover the unsnapped construction; Blender must project the fitted points.
+extra = rig.extra
 points = rig.fk(rig.start_params())[0]
 expected_world = []
 for name in names:

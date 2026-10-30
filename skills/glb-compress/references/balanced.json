@@ -1,8 +1,8 @@
 {
   "preset": "balanced",
   "geometry": "on",
-  "textures": "webp",
-  "resizeMax": 1024,
+  "textures": "ktx2",
+  "resizeMax": 0,
   "simplify": "off",
   "weld": "off",
   "keepNames": true,

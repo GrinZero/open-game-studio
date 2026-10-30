@@ -1,0 +1,73 @@
+{
+  "date": "2026-10-30",
+  "models": [
+    {
+      "id": "pillar_a_revised",
+      "glbBytes": 9368672,
+      "triangles": 1938,
+      "mrBytes": 5562137,
+      "mrSize": [
+        4096,
+        4096
+      ],
+      "mrMimeType": "image/png",
+      "mrShare": 0.5936953497784958,
+      "sameSizeLosslessPngBytes": 3544062,
+      "sameSizeLosslessWebpBytes": 2677486,
+      "decodedRgbBytesCompared": 50331648,
+      "pngPixelsIdentical": true,
+      "webpPixelsIdentical": true
+    },
+    {
+      "id": "pillar_b",
+      "glbBytes": 9455476,
+      "triangles": 1622,
+      "mrBytes": 5041306,
+      "mrSize": [
+        4096,
+        4096
+      ],
+      "mrMimeType": "image/png",
+      "mrShare": 0.5331625821904683,
+      "sameSizeLosslessPngBytes": 3210939,
+      "sameSizeLosslessWebpBytes": 2413150,
+      "decodedRgbBytesCompared": 50331648,
+      "pngPixelsIdentical": true,
+      "webpPixelsIdentical": true
+    },
+    {
+      "id": "wall_a",
+      "glbBytes": 13684304,
+      "triangles": 978,
+      "mrBytes": 9638007,
+      "mrSize": [
+        4096,
+        4096
+      ],
+      "mrMimeType": "image/png",
+      "mrShare": 0.7043110851673567,
+      "sameSizeLosslessPngBytes": 6193194,
+      "sameSizeLosslessWebpBytes": 4880186,
+      "decodedRgbBytesCompared": 50331648,
+      "pngPixelsIdentical": true,
+      "webpPixelsIdentical": true
+    },
+    {
+      "id": "wall_b",
+      "glbBytes": 10455464,
+      "triangles": 990,
+      "mrBytes": 6033435,
+      "mrSize": [
+        4096,
+        4096
+      ],
+      "mrMimeType": "image/png",
+      "mrShare": 0.5770604728781047,
+      "sameSizeLosslessPngBytes": 3739605,
+      "sameSizeLosslessWebpBytes": 2924492,
+      "decodedRgbBytesCompared": 50331648,
+      "pngPixelsIdentical": true,
+      "webpPixelsIdentical": true
+    }
+  ]
+}

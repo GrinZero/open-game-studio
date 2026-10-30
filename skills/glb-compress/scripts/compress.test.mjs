@@ -122,7 +122,8 @@ async function fixture({ alpha = false, morph = false, skin = false } = {}) {
 const fixturePromise = fixture();
 const read = async (bytes) => (await getIO()).readBinary(bytes);
 test("defaults, website labels, strict options and precision conflicts", () => {
-  assert.equal(resolveOptions().effective.resizeMax, 1024);
+  assert.equal(resolveOptions().effective.resizeMax, 0);
+  assert.equal(resolveOptions().effective.textures, "ktx2");
   assert.equal(resolveOptions({ preset: "none" }).effective.geometry, "off");
   assert.equal(
     resolveOptions({ simplify: "light" }).effective.simplifyRatio,
@@ -164,9 +165,12 @@ test("all off preserves texture, positions, names and animations", async () => {
   assert.equal(report.after.animations, 1);
   assert.equal(out.getRoot().listNodes()[0].getName(), "model");
 });
-test("default Draco + WebP roundtrip and aspect-ratio resize", async () => {
+test("explicit Draco + WebP roundtrip and aspect-ratio resize", async () => {
   const { bytes } = await fixturePromise,
-    { report } = await compressBytes(bytes, { resizeMax: 16 });
+    { report } = await compressBytes(bytes, {
+      textures: "webp",
+      resizeMax: 16,
+    });
   assert.deepEqual(report.after.textures[0].size, [16, 8]);
   assert.ok(
     report.after.extensionsRequired.includes("KHR_draco_mesh_compression"),
@@ -283,7 +287,7 @@ test("weld tolerance merges nearby vertices but protects UV, normal, joints and 
 test("skin, morph and animation data survive compression and simplification", async () => {
   for (const type of ["skin", "morph"]) {
     const { bytes } = await fixture({ [type]: true });
-    const { output, report } = await compressBytes(bytes),
+    const { output, report } = await compressBytes(bytes, { textures: "webp" }),
       d = await read(output);
     if (type === "skin") assert.equal(report.after.skins, 1);
     else
@@ -316,6 +320,7 @@ test("skin, morph and animation data survive compression and simplification", as
 test("precision mode keeps exact geometry and decodes incoming Draco when switched off", async () => {
   const { bytes, d } = await fixturePromise,
     { output, report } = await compressBytes(bytes, {
+      textures: "webp",
       preservePrecision: true,
     });
   assert.ok(
@@ -335,7 +340,7 @@ test("precision mode keeps exact geometry and decodes incoming Draco when switch
       .getAttribute("POSITION")
       .getArray(),
   );
-  const compressed = await compressBytes(bytes);
+  const compressed = await compressBytes(bytes, { textures: "webp" });
   const decoded = await compressBytes(compressed.output, noChange);
   assert.ok(
     !decoded.report.after.extensionsRequired.includes(
@@ -347,6 +352,7 @@ test("WebP mipmaps requests sampler filter and reports runtime generation", asyn
   const { bytes } = await fixturePromise,
     { output, report } = await compressBytes(bytes, {
       geometry: "off",
+      textures: "webp",
       mipmaps: true,
     });
   assert.match(report.warnings.join(" "), /runtime/);
@@ -392,9 +398,15 @@ test(
     const { bytes } = await fixturePromise;
     const { output, report } = await compressBytes(
       bytes,
-      { ...noChange, textures: "ktx2", mipmaps: true },
+      { geometry: "off", mipmaps: true },
       { toktx: process.env.TOKTX },
     );
+    assert.equal(report.effective.textures, "ktx2");
+    assert.equal(report.effective.resizeMax, 0);
+    assert.equal(report.review.status, "awaiting_user_comparison");
+    assert.equal(report.review.humanApprovalRequired, true);
+    assert.equal(report.review.decision, null);
+    assert.equal(report.review.selected, null);
     assert.equal(report.after.textures[0].mimeType, "image/ktx2");
     assert.equal(report.after.textures[0].levels, 7);
     assert.ok(report.after.extensionsRequired.includes("KHR_texture_basisu"));
@@ -410,7 +422,11 @@ test(
 test("all encoder presets and weld levels produce readable GLB", async () => {
   const { bytes } = await fixturePromise;
   for (const preset of ["balanced", "max", "fast", "none"]) {
-    const { report } = await compressBytes(bytes, { preset, weld: "light" });
+    const { report } = await compressBytes(bytes, {
+      preset,
+      weld: "light",
+      textures: "webp",
+    });
     assert.equal(report.after.triangles, report.before.triangles);
     assert.equal(
       report.after.extensionsRequired.includes("KHR_draco_mesh_compression"),
@@ -418,6 +434,48 @@ test("all encoder presets and weld levels produce readable GLB", async () => {
     );
   }
 });
+test(
+  "KTX2 color and data descriptors match material semantics",
+  { skip: !process.env.TOKTX && "Set TOKTX for actual encoding" },
+  async () => {
+    const { d } = await fixture();
+    const data = d
+      .createTexture("data")
+      .setMimeType("image/png")
+      .setImage(
+        await sharp({
+          create: {
+            width: 16,
+            height: 16,
+            channels: 3,
+            background: { r: 128, g: 128, b: 255 },
+          },
+        })
+          .png()
+          .toBuffer(),
+      );
+    d.getRoot()
+      .listMaterials()[0]
+      .setNormalTexture(data)
+      .setMetallicRoughnessTexture(data);
+    const io = await getIO();
+    const { output } = await compressBytes(
+      await io.writeBinary(d),
+      { geometry: "off" },
+      { toktx: process.env.TOKTX },
+    );
+    const material = (await io.readBinary(output)).getRoot().listMaterials()[0];
+    for (const [t, primaries, transfer] of [
+      [material.getBaseColorTexture(), 1, 2],
+      [material.getNormalTexture(), 0, 1],
+    ]) {
+      const b = Buffer.from(t.getImage()),
+        dfd = b.readUInt32LE(48);
+      assert.equal(b[dfd + 13], primaries);
+      assert.equal(b[dfd + 14], transfer);
+    }
+  },
+);
 test("CLI supports config, report, inspect, rejects overwrites and all source aliases", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "glb-cli-test-")),
     cli = fileURLToPath(new URL("./compress.mjs", import.meta.url));

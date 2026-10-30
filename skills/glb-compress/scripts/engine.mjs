@@ -201,7 +201,7 @@ async function processTextures(document, o, warnings, toktx) {
           "--assign_oetf",
           color ? "srgb" : "linear",
           "--assign_primaries",
-          "bt709",
+          color ? "bt709" : "none",
         ];
         if (o.mipmaps) args.push("--genmipmap");
         args.push(out, png);
@@ -380,6 +380,24 @@ export async function compressBytes(
       savedBytes: bytes.length - output.length,
       savedPercent: (1 - output.length / bytes.length) * 100,
       actualTriangleRetainRatio: retained,
+      ...(o.textures === "ktx2" && after.textures.length
+        ? {
+            review: {
+              status: "awaiting_user_comparison",
+              humanApprovalRequired: true,
+              decision: null,
+              selected: null,
+              requiredEvidence: [
+                "Actual candidate loaded in target renderer",
+                "Original/candidate same-camera normal and closest-distance views",
+                "PBR under different light directions and alpha edges where present",
+                "Bytes, dimensions, encoding and observed differences",
+              ],
+              adoption:
+                "Wait for the user to choose this exact candidate; do not import, replace production assets or mark it accepted automatically.",
+            },
+          }
+        : {}),
       warnings,
     },
   };

@@ -23,7 +23,11 @@ const low = {
 test("recommendation keeps low-poly topology, offers 1K/2K and retains unselected state", () => {
   const p = recommendCompression(low, { engine: "godot" });
   assert.equal(p.selected, null);
-  assert.equal(p.preferredTrial, "webp2k");
+  assert.equal(p.preferredTrial, "ktx2");
+  assert.equal(p.candidates[0].id, "ktx2");
+  assert.equal(p.candidates[0].options.resizeMax, 0);
+  assert.equal(p.review.humanApprovalRequired, true);
+  assert.equal(p.review.decision, null);
   assert.ok(p.candidates.some((c) => c.id === "webp1k"));
   assert.ok(p.candidates.some((c) => c.id === "webp4k"));
   assert.ok(
@@ -71,7 +75,39 @@ test("size share, animation and source resolution modify recommendations", () =>
     { ...low, textures: [] },
     { engine: "generic" },
   );
-  assert.equal(empty.preferredTrial, "original");
+  assert.equal(empty.preferredTrial, null);
+});
+test("recommendation ranks actual payloads and defaults to a KTX2 trial pending human choice", () => {
+  const plan = recommendCompression(
+    {
+      ...low,
+      textures: [
+        {
+          name: "color",
+          bytes: 10000,
+          size: [2048, 2048],
+          mimeType: "image/jpeg",
+          slots: ["baseColorTexture"],
+        },
+        {
+          name: "roughness-metallic",
+          bytes: 900000,
+          size: [4096, 4096],
+          mimeType: "image/png",
+          slots: ["metallicRoughnessTexture"],
+        },
+      ],
+    },
+    { engine: "godot" },
+  );
+  assert.equal(plan.textureAssessment[0].index, 1);
+  assert.match(
+    plan.textureAssessment[0].suggestedChecks.join(" "),
+    /lossless re-encoding/,
+  );
+  assert.equal(plan.preferredTrial, "ktx2");
+  assert.equal(plan.selected, null);
+  assert.match(plan.nextStep, /wait_for_user_visual_comparison/);
 });
 test("Godot repo discovery and CLI enforcement work outside project cwd", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "glb-policy-"));
@@ -128,6 +164,9 @@ test("Godot repo discovery and CLI enforcement work outside project cwd", async 
     );
     assert.equal(report.projectPolicy.engine, "godot");
     assert.equal(report.effective.geometry, "off");
+    assert.equal(report.effective.textures, "ktx2");
+    assert.equal(report.review.status, "awaiting_user_comparison");
+    assert.equal(report.review.decision, null);
     assert.ok(
       !(parseGLB(await readFile(output)).extensionsRequired ?? []).includes(
         "KHR_draco_mesh_compression",

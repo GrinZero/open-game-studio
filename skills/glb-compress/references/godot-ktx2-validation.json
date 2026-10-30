@@ -1,0 +1,36 @@
+{
+  "engine": "Godot 4.7.2",
+  "platform": "desktop Metal",
+  "entrypoint": "runtime GLTFDocument",
+  "sample": "4K harbor wall, 978 triangles",
+  "humanAccepted": false,
+  "probe": "compensate_prelinearized_srgb",
+  "ktxConformance": "All three current KTX2 payloads passed ktx validate --gltf-basisu --warnings-as-errors",
+  "results": [
+    {
+      "renderer": "forward_plus",
+      "views": 8,
+      "meanForegroundAbsRgbError": 1.672121362044195,
+      "maxForegroundAbsRgbError": 1.7929817320712271,
+      "originalTextureGpuBytes": 201326592,
+      "adaptedTextureGpuBytes": 100663296
+    },
+    {
+      "renderer": "mobile",
+      "views": 8,
+      "meanForegroundAbsRgbError": 1.726702629313219,
+      "maxForegroundAbsRgbError": 1.8606051928216876,
+      "originalTextureGpuBytes": 201326592,
+      "adaptedTextureGpuBytes": 100663296
+    }
+  ],
+  "imageFormats": [
+    "RGBA8 albedo",
+    "BPTC RGBA normal and metallic/roughness"
+  ],
+  "notes": [
+    "Texture GPU counters measured as loaded-minus-empty-scene baseline in separate processes.",
+    "No frame-rate, exported-game or mobile-device claim.",
+    "Color error values are asset-specific diagnostics, not acceptance thresholds."
+  ]
+}

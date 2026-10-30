@@ -24,8 +24,8 @@ All processing is local. First install dependencies: npm ci --prefix SKILL_DIR
 Compression options (also accepted as camelCase keys in --config JSON):
   --preset balanced|max|fast|none       default balanced; none forces geometry off
   --geometry on|off                    default on (Draco)
-  --textures webp|jpeg|off|ktx2         default webp
-  --resizeMax N                       default 1024; 0 = no limit, no upscaling
+  --textures webp|jpeg|off|ktx2         default ktx2; creates a candidate pending user review
+  --resizeMax N                       default 0 (source size); no upscaling
   --simplify off|light|balanced|aggressive|true|false
   --simplifyRatio N                   used with simplify=true (0 < N <= 1)
   --simplifyError N                   default 0.0001, relative error limit

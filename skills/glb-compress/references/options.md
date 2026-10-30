@@ -2,6 +2,8 @@
 
 Reference UI: [3D AI Studio GLB Compression](https://www.3daistudio.com/Tools/GLBCompression), inspected 2026-10-30. The linked conversation “解析 GLB 模型压缩机制” measured actual website downloads. They identified glTF Transform 4.5.1 as the generator, but did not disclose backend encoder settings. This tool pins that version and implements its own explicit preset mapping.
 
+Texture processing is asset-specific: inspect actual bytes, encoding, resolution and material slots, then measure relevant trials. No color-only restriction applies. Raw codec defaults process all images as a KTX2 candidate at source resolution. Every newly encoded KTX2 candidate requires the [human visual review](ktx2-human-review.md) before adoption; execution settings are not acceptance. For selective per-image processing use the authoring tool or a targeted script; the bulk CLI does not select individual image indices.
+
 Production entrypoint: [compression policy](compression-policy.md). `recommend.mjs` selects trial configurations from actual statistics; the raw codec defaults below remain available for generic projects. `compress.mjs` detects Godot from input/cwd ancestors or `--project`, forces geometry off, and rejects explicit geometry=on. `--engine godot` supplies engine context without a project file; `--engine generic` cannot override a detected Godot project.
 
 CLI names and JSON keys are identical, including camelCase. Boolean CLI values must be `true` or `false`; JSON uses actual booleans. Unknown keys and invalid values fail before encoding.
@@ -10,8 +12,8 @@ CLI names and JSON keys are identical, including camelCase. Boolean CLI values m
 | --- | --- | --- | --- |
 | Balanced / Maximum / Fast / Minimal | `preset`: `balanced`, `max`, `fast`, `none` | `balanced` | Select local encoder profile. Minimal forces Draco off; still converts/resizes textures. |
 | Geometry compression | `geometry`: `on`, `off` | `on` | Draco geometry encoding; off also decodes existing Draco/Meshopt input. |
-| Textures | `textures`: `webp`, `jpeg`, `off`, `ktx2` | `webp` | Re-encode textures. Off preserves encoded bytes unless resizing is required. |
-| Max Texture Size | `resizeMax`: integer | `1024` | UI choices 0 / 512 / 1024 / 2048; CLI additionally permits integers up to 32768. 0 is no limit. Fit inside the square, preserve aspect ratio, never upscale. |
+| Textures | `textures`: `webp`, `jpeg`, `off`, `ktx2` | `ktx2` | Re-encode textures. Off preserves encoded bytes unless resizing is required. |
+| Max Texture Size | `resizeMax`: integer | `0` | UI choices 0 / 512 / 1024 / 2048; CLI additionally permits integers up to 32768. 0 is no limit. Fit inside the square, preserve aspect ratio, never upscale. |
 | Simplify Geometry | `simplify`: `off`, `light`, `balanced`, `aggressive` | `off` | Retain target 90% / 75% / 60% of triangles. Also accepts boolean for request-style configuration. |
 | Simplify ratio | `simplifyRatio`: number >0, <=1 | `0.75` | Used with `simplify=true`. Named levels select their corresponding ratio. |
 | Weld Vertices | `weld`: `off`, `light`, `standard`, `aggressive` | `off` | Tolerance 1e-5 / 1e-4 / 1e-3 in mesh-local units. Also accepts boolean. |
@@ -25,6 +27,8 @@ CLI names and JSON keys are identical, including camelCase. Boolean CLI values m
 
 The current website UI does not expose every submitted field: geometry follows the preset; mipmaps, stripTangents and preservePrecision are fixed values. Local CLI exposes them explicitly. Website `stream` and `async` are HTTP transport/job controls, not compression settings; there is no server upload or remote job in this local tool. Use the invoking process's background execution if needed.
 
+Current local defaults differ from the original website: textures=ktx2 and resizeMax=0. Missing toktx is an explicit failure; no silent WebP fallback. KTX2 reports carry review.status=awaiting_user_comparison, humanApprovalRequired=true and selected=null.
+
 ## Local encoder profiles
 
 These are local definitions, **not reverse-engineered website values**. Individual feature switches remain unchanged when choosing a preset, except Minimal's geometry-off behavior.
@@ -36,7 +40,7 @@ These are local definitions, **not reverse-engineered website values**. Individu
 | fast | 80 | 0 | 10 / 10 | 14 / 10 / 12 / 8 / 12 | 128 |
 | none | 80 | 4 | disabled | disabled | 128 |
 
-JPEG uses 4:4:4 sampling. Images with an alpha channel remain PNG when JPEG is requested, with an explicit warning. PNG resize writes lossless PNG. KTX2 uses KTX-Software `toktx`, Basis ETC1S (`--encode etc1s`, BasisLZ payload), compression level 1 for Fast, 2 otherwise. Material color slots use sRGB; data textures use linear transfer. A texture shared between color and data slots must be split before KTX2 encoding. Base dimensions must be divisible by 4 for KHR_texture_basisu; incompatible dimensions are rejected instead of distorting the aspect ratio. KTX2 existing input can be preserved with textures=off, resizeMax=0, mipmaps=false; transcoding existing KTX2 is not implemented.
+JPEG uses 4:4:4 sampling. Images with an alpha channel remain PNG when JPEG is requested, with an explicit warning. PNG resize writes lossless PNG. KTX2 uses KTX-Software `toktx`, Basis ETC1S (`--encode etc1s`, BasisLZ payload), compression level 1 for Fast, 2 otherwise. Material color slots use sRGB; data textures use linear transfer with unspecified primaries. A texture shared between color and data slots must be split before KTX2 encoding. Base dimensions must be divisible by 4 for KHR_texture_basisu; incompatible dimensions are rejected instead of distorting the aspect ratio. KTX2 existing input can be preserved with textures=off, resizeMax=0, mipmaps=false; transcoding existing KTX2 is not implemented.
 
 ## Processing order and invariants
 
