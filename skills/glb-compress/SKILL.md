@@ -9,7 +9,7 @@ Use the bundled Node.js CLI. Model processing stays local; it does not need Open
 
 ## Default completion policy
 
-As soon as a model is complete **including UVs, materials and textures**, read [asset-specific assessment policy](references/compression-policy.md) before delivery. **KTX2 is enabled by default as a candidate and requires human visual comparison before adoption.** Read [the mandatory KTX2 human review](references/ktx2-human-review.md). For Godot loading, read [the KTX2 loading adapter](references/godot-ktx2-loading.md) and use its bundled runtime helper when the probe detects pre-linearized color images. Re-evaluate after texture or geometry revisions. This applies to standalone creation and the bundled resource/character/delivery workflows; it does not compress unfinished models. Default loading is a skill workflow rule, not a background filesystem watcher.
+As soon as a model is complete **including UVs, materials and textures**, read [asset-specific assessment policy](references/compression-policy.md) before delivery. **Generate KTX2 and WebP candidates in parallel from the same original at source resolution, then obtain human visual choice before adoption. KTX2 remains enabled by default; it does not exclude WebP.** Read [the mandatory KTX2 human review](references/ktx2-human-review.md). For Godot loading, read [the KTX2 loading adapter](references/godot-ktx2-loading.md) and use its bundled runtime helper when the probe detects pre-linearized color images. Re-evaluate after texture or geometry revisions. This applies to standalone creation and the bundled resource/character/delivery workflows; it does not compress unfinished models. Default loading is a skill workflow rule, not a background filesystem watcher.
 
 Use the project-aware recommendation command below. It measures triangle count, image share and source resolution, and writes candidate configs without claiming visual acceptance. Godot projects always use geometry=off; this also applies to explicit settings and high-poly models. The CLI detects an ancestor project.godot or a repository's game/project.godot; pass --project for a different target project or --engine godot when the engine is known but no marker exists.
 
@@ -17,16 +17,19 @@ Use the project-aware recommendation command below. It measures triangle count, 
 node "$SKILL_DIR/scripts/recommend.mjs" /absolute/complete-model.glb \
   --project /absolute/game-project --usage standard \
   --plan-dir /absolute/dedicated-temp/compression-plan
-# Default: KTX2 at source resolution. Generate review material, then wait for
-# the user to choose this exact candidate before adopting it.
+# Default workflow: both codecs at source resolution, independently from the original.
+# Generate both, render the actual outputs, then wait for the user to choose.
 node "$SKILL_DIR/scripts/compress.mjs" /absolute/complete-model.glb \
-  /absolute/dedicated-temp/candidate.glb --project /absolute/game-project \
+  /absolute/dedicated-temp/ktx2.glb --project /absolute/game-project \
   --config /absolute/dedicated-temp/compression-plan/ktx2.json
+node "$SKILL_DIR/scripts/compress.mjs" /absolute/complete-model.glb \
+  /absolute/dedicated-temp/webp.glb --project /absolute/game-project \
+  --config /absolute/dedicated-temp/compression-plan/webp-original-size.json
 ```
 
-**根据实际资产处理，不预设只压颜色图，也不统一降分辨率；默认 KTX2 输出仅为待用户对比的候选。** 先检查每张贴图的体积、编码、分辨率和实际材质槽，再针对主要载荷比较保留原图、原尺寸无损重编码、降尺寸或有损编码的收益与效果。法线、粗糙度、金属度、AO、颜色和自发光都可以成为处理对象；是否处理由这次的事实决定。
+**根据实际资产处理，不预设只压颜色图，也不统一降分辨率；默认同时生成同源同尺寸 KTX2 / WebP 待用户对比候选。** 先检查每张贴图的体积、编码、分辨率和实际材质槽，再针对主要载荷比较保留原图、原尺寸无损重编码、降尺寸或有损编码的收益与效果。法线、粗糙度、金属度、AO、颜色和自发光都可以成为处理对象；是否处理由这次的事实决定。
 
-Read [PBR observations](references/pbr-study.md) and the [large material-map counterexample](references/harbor-pbr-study.md). `recommend.mjs` ranks actual image payloads and sets `preferredTrial=ktx2` when textures exist and keeps `selected=null` pending user choice. Its whole-file configs are exploratory codec trials, not automatically appropriate choices for every map. The CLI applies texture settings to all images: use it only when that scope fits the assessed asset. If different maps need different treatment, use a targeted script or the authoring tool rather than pretending the bulk CLI selects individual maps. Keep originals and place trial outputs/reports in a dedicated folder.
+Read [PBR observations](references/pbr-study.md) and the [large material-map counterexample](references/harbor-pbr-study.md). `recommend.mjs` ranks actual image payloads and sets `defaultTrials=[ktx2, webp-original-size]` when textures exist and keeps `selected=null` pending user choice. `preferredTrial=ktx2` is a retained compatibility hint, not permission to skip WebP. Optional resized trials pair both codecs at the same cap; do not compare 4K KTX2 only against 1K WebP to attribute codec quality or savings. Its whole-file configs are exploratory codec trials, not automatically appropriate choices for every map. The CLI applies texture settings to all images: use it only when that scope fits the assessed asset. If different maps need different treatment, use a targeted script or the authoring tool rather than pretending the bulk CLI selects individual maps. Keep originals and place trial outputs/reports in a dedicated folder.
 
 ## Setup and execution
 
@@ -37,17 +40,17 @@ npm ci --prefix "$SKILL_DIR" --no-audit --no-fund
 node "$SKILL_DIR/scripts/compress.mjs" --help
 ```
 
-Default compression uses KTX2, so install [KTX-Software](https://github.com/KhronosGroup/KTX-Software/releases) with its libraries. The CLI resolves the encoder from `--toktx`, `TOKTX`, `~/.local/share/glb-compress/bin/toktx`, then PATH. Run `toktx --version` to verify the installation. WebP, JPEG, resizing and Draco need no extra executable. Do not silently substitute another format if KTX2 is unavailable.
+The default workflow includes KTX2, so install [KTX-Software](https://github.com/KhronosGroup/KTX-Software/releases) with its libraries. The CLI resolves the encoder from `--toktx`, `TOKTX`, `~/.local/share/glb-compress/bin/toktx`, then PATH. Run `toktx --version` to verify the installation. WebP, JPEG, resizing and Draco need no extra executable. Do not silently substitute another format if KTX2 is unavailable.
 
 1. Inspect the input when choosing settings: `node "$SKILL_DIR/scripts/compress.mjs" --inspect /absolute/input.glb`.
 2. Apply [asset-specific assessment policy](references/compression-policy.md). Inspect the ranked per-texture analysis and choose measured trials; do not treat raw presets as a production recommendation. Preserve explicit settings subject to the project's Godot no-Draco rule. If 1K/2K degrade visible detail, compare source resolution or retain the original. Keep skin, animation, tangents, names and morphs unless a separate task explicitly changes them.
 3. Write a new output path. The source is never overwritten, even with `--force`. Existing outputs/reports require a new path or explicit replacement via `--force`.
 4. **Godot loading:** use the [probe-driven KTX2 loader](references/godot-ktx2-loading.md) for runtime GLTFDocument loading; confirm the actual display path before judging compression quality.
-5. **Human review:** show actual same-camera original/KTX2 comparisons and measured size differences, then wait for the user to choose adopt/original/revise. Keep the exact candidate pending; never automatically import or mark it accepted. Follow [the review protocol](references/ktx2-human-review.md).
+5. **Human review:** show actual same-camera original/KTX2/WebP comparisons at matched resolution and measured size differences, then wait for the user to choose adopt/original/revise. Keep the exact candidate pending; never automatically import or mark it accepted. Follow [the review protocol](references/ktx2-human-review.md).
 6. Read the JSON report and summarize actual bytes saved, texture dimensions, triangles, required extensions and warnings. A requested simplification ratio is a target, not a guaranteed result. Structural read-back does not establish visual quality or engine acceptance.
 
 ```sh
-# Default KTX2 candidate at source resolution; user visual review required.
+# Single-output CLI default is KTX2; use both plan configs above for workflow review.
 node "$SKILL_DIR/scripts/compress.mjs" /absolute/source.glb /absolute/balanced.glb
 
 # 2K WebP without Draco, retaining geometry and animation.

@@ -37,7 +37,7 @@ The suite now includes 21 behavior tests. Policy cases cover Godot detection out
 
 ## Asset-specific assessment
 
-Recommendations rank actual per-image payloads, slots, dimensions and encoding, and prefer a source-resolution KTX2 candidate and leave final selection unset for human comparison. A regression case verifies that a large metallic/roughness PNG ranks before a small color image and suggests measuring original-size lossless re-encoding. The earlier color-only restriction has been withdrawn. The bulk encoder still processes all images when executed; the skill requires diagnosing suitability first.
+Recommendations rank actual per-image payloads, slots, dimensions and encoding, and provide parallel source-resolution KTX2 and WebP candidates and leave final selection unset for human comparison. A regression case verifies that a large metallic/roughness PNG ranks before a small color image and suggests measuring original-size lossless re-encoding. The earlier color-only restriction has been withdrawn. The bulk encoder still processes all images when executed; the skill requires diagnosing suitability first.
 
 ## Default KTX2 review regression
 
@@ -48,3 +48,7 @@ A real 4K harbor-wall GLB was encoded with omitted texture/resolution options: K
 ## Bundled Godot runtime loader
 
 The probe-driven godot_ktx2_loader.gd is validated in Godot 4.7.2. Runtime tests check the synthetic sRGB probe, compensation, no modification of linear maps, pass-through when compensation is disabled, and unchanged source bytes. Real GLB captures cover original, color-only/data-only KTX2, all-KTX2 and decoded-PNG controls in Forward+ and Mobile desktop. User acceptance remains pending. A codec regression checks sRGB/BT709 for color and linear/unspecified primaries for normal/MR maps.
+
+## Parallel codec recommendation regression
+
+The defaultTrials pair always includes source-resolution KTX2 and WebP, including sources at or below 1K. Optional 1K/2K/4K caps pair both codecs only when smaller than the source maximum. Tests cover 512–8192 dimensions and preserve selected=null. An integration test executes both generated configs concurrently from the same original, reads back actual KTX2/WebP outputs at the same dimensions and verifies Godot geometry remains off. Single-output CLI defaults remain KTX2.

@@ -24,6 +24,7 @@ test("recommendation keeps low-poly topology, offers 1K/2K and retains unselecte
   const p = recommendCompression(low, { engine: "godot" });
   assert.equal(p.selected, null);
   assert.equal(p.preferredTrial, "ktx2");
+  assert.deepEqual(p.defaultTrials, ["ktx2", "webp-original-size"]);
   assert.equal(p.candidates[0].id, "ktx2");
   assert.equal(p.candidates[0].options.resizeMax, 0);
   assert.equal(p.review.humanApprovalRequired, true);
@@ -76,6 +77,37 @@ test("size share, animation and source resolution modify recommendations", () =>
     { engine: "generic" },
   );
   assert.equal(empty.preferredTrial, null);
+  assert.deepEqual(empty.defaultTrials, []);
+});
+test("default codecs remain paired at source size and every optional resize cap", () => {
+  for (const size of [512, 1024, 2048, 4096, 8192]) {
+    const plan = recommendCompression(
+      { ...low, textures: [{ bytes: 990000, size: [size, size] }] },
+      { engine: "godot" },
+    );
+    const byId = new Map(plan.candidates.map((c) => [c.id, c]));
+    assert.equal(byId.size, plan.candidates.length);
+    const defaults = plan.defaultTrials.map((id) => byId.get(id));
+    assert.deepEqual(
+      defaults.map((c) => c.options.textures),
+      ["ktx2", "webp"],
+    );
+    assert.ok(defaults.every((c) => c.options.resizeMax === 0));
+    const caps = [...new Set(plan.candidates.map((c) => c.options.resizeMax))];
+    for (const cap of caps.filter(Boolean)) {
+      assert.ok(cap < size, "do not duplicate source-size trials or enlarge");
+      const pair = plan.candidates.filter((c) => c.options.resizeMax === cap);
+      assert.deepEqual(
+        pair.map((c) => c.options.textures),
+        ["ktx2", "webp"],
+      );
+      const { textures: _, ...ktx } = pair[0].options;
+      const { textures: __, ...webp } = pair[1].options;
+      assert.deepEqual(ktx, webp);
+    }
+    assert.equal(plan.selected, null);
+    assert.equal(plan.review.humanApprovalRequired, true);
+  }
 });
 test("recommendation ranks actual payloads and defaults to a KTX2 trial pending human choice", () => {
   const plan = recommendCompression(
@@ -210,10 +242,41 @@ test("Godot repo discovery and CLI enforcement work outside project cwd", async 
     );
     assert.equal(plan.context.engine, "godot");
     assert.equal(
-      JSON.parse(await readFile(path.join(planDir, "webp2k.json"), "utf8"))
-        .geometry,
+      JSON.parse(
+        await readFile(path.join(planDir, "webp-original-size.json"), "utf8"),
+      ).geometry,
       "off",
     );
+    const pairedReports = await Promise.all(
+      plan.defaultTrials.map(async (id) => {
+        return JSON.parse(
+          (
+            await call("compress.mjs", [
+              input,
+              path.join(out, `${id}.glb`),
+              "--config",
+              path.join(planDir, `${id}.json`),
+            ])
+          ).stdout,
+        );
+      }),
+    );
+    assert.deepEqual(
+      pairedReports.map((r) => r.effective.textures),
+      ["ktx2", "webp"],
+    );
+    assert.deepEqual(
+      pairedReports.map((r) => r.after.textures[0].size),
+      [
+        [32, 32],
+        [32, 32],
+      ],
+    );
+    assert.deepEqual(
+      pairedReports.map((r) => r.after.textures[0].mimeType),
+      ["image/ktx2", "image/webp"],
+    );
+    assert.ok(pairedReports.every((r) => r.effective.geometry === "off"));
     const matrixDir = path.join(out, "matrix");
     await call("compare.mjs", [input, matrixDir, "--project", root]);
     const matrix = JSON.parse(

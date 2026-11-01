@@ -115,32 +115,22 @@ export function recommendCompression(
       role: "default KTX2 candidate at source resolution; user visual comparison required before adoption",
     });
     candidates.push({
-      id: "webp2k",
-      options: { ...baseline, textures: "webp", resizeMax: 2048 },
-      role: "exploratory whole-file candidate; assess per-texture suitability before execution",
-    });
-    if (maxSize > 1024)
-      candidates.push({
-        id: "webp1k",
-        options: { ...baseline, textures: "webp", resizeMax: 1024 },
-        role: "smaller candidate; compare at maximum intended screen size",
-      });
-    else
-      reasons.push(
-        "Source textures are already <=1K; 1K and 2K caps would not resize them. Compare encoding-only against original.",
-      );
-    candidates.push({
       id: "webp-original-size",
       options: { ...baseline, textures: "webp", resizeMax: 0 },
-      role: "fallback if resolution reduction visibly loses detail",
+      role: "default parallel WebP candidate from the same source at the same resolution as KTX2; user visual comparison required",
     });
-    if (maxSize <= 2048) candidates.pop();
-    if (maxSize > 4096)
-      candidates.push({
-        id: "webp4k",
-        options: { ...baseline, textures: "webp", resizeMax: 4096 },
-        role: "detail fallback when 2K still blurs fine patterns",
-      });
+    for (const size of [4096, 2048, 1024]) {
+      if (maxSize <= size) continue;
+      for (const codec of ["ktx2", "webp"])
+        candidates.push({
+          id: `${codec}${size / 1024}k`,
+          options: { ...baseline, textures: codec, resizeMax: size },
+          role: "optional matched-resolution trial; encode independently from source and compare both codecs before user choice",
+        });
+    }
+    reasons.push(
+      "Generate both source-resolution codec candidates from the original, not from one another. Resolution and encoding are independent axes; compare matched sizes before attributing savings or detail loss to a codec.",
+    );
   }
   if (band === "low")
     reasons.push(
@@ -173,7 +163,7 @@ export function recommendCompression(
         : "Choose encoding and resolution only after inspecting actual payloads and measuring savings and same-camera visual changes.",
   );
   return {
-    policyVersion: "1.2.0",
+    policyVersion: "1.3.0",
     context,
     usage,
     analysis: {
@@ -187,8 +177,9 @@ export function recommendCompression(
     },
     status: "candidates_require_visual_comparison",
     nextStep: stats.textures.length
-      ? "generate_ktx2_candidate_then_wait_for_user_visual_comparison"
+      ? "generate_parallel_ktx2_webp_candidates_then_wait_for_user_visual_comparison"
       : "inspect_actual_texture_payloads_and_measure_relevant_candidates",
+    defaultTrials: stats.textures.length ? ["ktx2", "webp-original-size"] : [],
     preferredTrial: stats.textures.length ? "ktx2" : null,
     selected: null,
     textureAssessment,
