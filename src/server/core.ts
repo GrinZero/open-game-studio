@@ -334,7 +334,11 @@ function findExistingProjectFile(
     for (const entry of entries) {
       if (scanned >= 2000) break;
       if (entry.name === ".git" || entry.name === "node_modules") continue;
-      if (!insideStudio && entry.name.startsWith(".") && entry.name !== ".game-studio")
+      if (
+        !insideStudio &&
+        entry.name.startsWith(".") &&
+        entry.name !== ".game-studio"
+      )
         continue;
       if (insideStudio && (entry.name === "work" || entry.name === "exports"))
         continue;
@@ -364,7 +368,10 @@ function findExistingProjectFile(
           const sameName = entry.name.toLowerCase() === targetName;
           if (!insideStudio) {
             if (sameName) return rel;
-            if (!projectMatch && path.extname(entry.name).toLowerCase() === targetExt)
+            if (
+              !projectMatch &&
+              path.extname(entry.name).toLowerCase() === targetExt
+            )
               projectMatch = rel;
           } else if (sameName && !studioMatch) {
             studioMatch = rel;
@@ -683,7 +690,9 @@ export class StudioCore {
     const stateFile = path.join(root, ".game-studio", "state.json");
     if (existsSync(stateFile)) {
       try {
-        const parsed = JSON.parse(readFileSync(within(root, stateFile), "utf8"));
+        const parsed = JSON.parse(
+          readFileSync(within(root, stateFile), "utf8"),
+        );
         if (parsed?.project) return parsed.project;
       } catch {}
     }
@@ -693,9 +702,7 @@ export class StudioCore {
     for (const raw of roots) {
       let current: string;
       try {
-        const candidate = raw.startsWith("file:")
-          ? new URL(raw).pathname
-          : raw;
+        const candidate = raw.startsWith("file:") ? new URL(raw).pathname : raw;
         if (!path.isAbsolute(candidate) || !existsSync(candidate)) continue;
         current = realpathSync(candidate);
       } catch {
@@ -757,8 +764,7 @@ export class StudioCore {
   db(projectId: string): { db: DatabaseSync; project: Project } {
     const p = get<Project>(this.registry, "projects", projectId);
     if (!existsSync(p.root)) fail("项目目录丢失，请重新定位目录", 409);
-    if (!hasProjectStore(p.root))
-      fail("项目数据库丢失，请重新定位原项目", 409);
+    if (!hasProjectStore(p.root)) fail("项目数据库丢失，请重新定位原项目", 409);
     const dir = safeDir(p.root, path.join(p.root, ".game-studio"));
     const file = path.join(dir, "studio.db");
     const hadDb = existsSync(file);
@@ -1330,6 +1336,131 @@ export class StudioCore {
         throw e;
       }
     });
+  }
+  /** Maintenance only: relocate stored bytes without creating or replacing versions. */
+  relocateAssetFiles(projectId: string, input: unknown) {
+    const entries = z
+      .array(
+        z.object({
+          revisionId: idSchema,
+          fileIndex: z.number().int().nonnegative(),
+          from: z.string().startsWith(".game-studio/assets/"),
+          to: z.string().startsWith("local-archive/"),
+          sha256: z.string().regex(/^[a-f0-9]{64}$/),
+          sizeBytes: z.number().int().positive(),
+        }),
+      )
+      .min(1)
+      .parse(input);
+    return this.inProject(projectId, (db, project) =>
+      transaction(db, () => {
+        const paths = new Map<string, (typeof entries)[number]>();
+        const revisions = new Map<string, AssetRevision>();
+        let changedFiles = 0;
+        for (const entry of entries) {
+          for (const relative of [entry.from, entry.to]) {
+            if (
+              path.posix.normalize(relative) !== relative ||
+              relative.includes("\\")
+            )
+              fail("迁移路径必须是规范的项目相对路径");
+          }
+          const prior = paths.get(entry.from);
+          if (prior && (prior.to !== entry.to || prior.sha256 !== entry.sha256))
+            fail("同一源文件有冲突的迁移目标");
+          paths.set(entry.from, entry);
+          const revision =
+            revisions.get(entry.revisionId) ||
+            get<AssetRevision>(db, "revisions", entry.revisionId);
+          revisions.set(revision.id, revision);
+          const file = revision.files[entry.fileIndex];
+          if (
+            !file ||
+            (file.relativePath !== entry.from &&
+              file.relativePath !== entry.to) ||
+            file.sha256 !== entry.sha256 ||
+            file.sizeBytes !== entry.sizeBytes
+          )
+            fail("资源记录已变化，请重新生成迁移计划", 409);
+          // Validate actual bytes, not refreshFileMetadata, which would accept edited history.
+          const targets =
+            file.relativePath === entry.to
+              ? [entry.to]
+              : [entry.from, entry.to];
+          for (const relative of targets) {
+            const bytes = readFileSync(
+              within(project.root, path.join(project.root, relative)),
+            );
+            if (
+              bytes.length !== entry.sizeBytes ||
+              createHash("sha256").update(bytes).digest("hex") !== entry.sha256
+            )
+              fail(`历史文件内容与迁移计划不符：${relative}`, 409);
+          }
+          if (file.relativePath !== entry.to) {
+            file.relativePath = entry.to;
+            changedFiles++;
+          }
+        }
+        // Frozen workflow inputs also contain AssetFile descriptors. Plain strings,
+        // sourceRef, notes and event history retain their original meaning.
+        const changedRecords: Record<string, number> = {};
+        for (const table of ["revisions", "runs", "tasks", "plans"]) {
+          let count = 0;
+          for (const record of rows<{ id: string }>(db, table)) {
+            let changed = false;
+            const visit = (value: any) => {
+              if (!value || typeof value !== "object") return;
+              const entry = paths.get(value.relativePath);
+              if (
+                entry &&
+                typeof value.name === "string" &&
+                typeof value.sha256 === "string" &&
+                typeof value.sizeBytes === "number"
+              ) {
+                if (
+                  value.sha256 !== entry.sha256 ||
+                  value.sizeBytes !== entry.sizeBytes
+                )
+                  fail("冻结输入与待迁移历史内容不一致", 409);
+                value.relativePath = entry.to;
+                changed = true;
+              }
+              for (const nested of Object.values(value)) visit(nested);
+            };
+            visit(record);
+            if (changed) {
+              put(db, table, record);
+              count++;
+            }
+          }
+          changedRecords[table] = count;
+        }
+        if (changedFiles)
+          event(db, "asset.storage_relocated", {
+            entries,
+            changedFiles,
+            changedRecords,
+          });
+        // Publish state.json while holding the write transaction, so readers cannot
+        // publish an older state between the database update and state sync.
+        this.syncProjectState(db, project);
+        const state = JSON.parse(
+          readFileSync(
+            path.join(project.root, ".game-studio/state.json"),
+            "utf8",
+          ),
+        );
+        for (const entry of entries) {
+          const revision = state.revisions.find(
+            (item: AssetRevision) => item.id === entry.revisionId,
+          );
+          if (revision?.files[entry.fileIndex]?.relativePath !== entry.to)
+            fail("迁移状态文件未同步", 500);
+        }
+        return { changedFiles, changedRecords };
+      }),
+    );
   }
   listWorkspaceFiles(projectId: string) {
     return this.inProject(projectId, (_db, p) => {
@@ -2056,7 +2187,9 @@ export class StudioCore {
           )
         )
           fail("该制作分组已有活动运行，请继续已有运行", 409);
-        const firstImgItem = inputSnapshot.items.find((i) => i.kind === "image");
+        const firstImgItem = inputSnapshot.items.find(
+          (i) => i.kind === "image",
+        );
         const run: WorkflowRun = ensureRunDag({
           id: uid("run"),
           projectId: a.projectId,
